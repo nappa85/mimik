@@ -127,7 +127,7 @@ PDF in `sources::uploads::development::PDF`, returns deterministic page facts/im
 never parses uploaded PDFs. Default/release builds contain neither this worker nor its
 flag. The required CI browser-smoke step runs the standalone `tools/upload_browser.py`
 against the `dev-endpoint` binary artifact in `mimik-browser`; the image includes the script
-and only its shared synthetic PDF fixture. It covers 1280/390 px JavaScript/no-JavaScript
+and, among fixtures, only its shared synthetic PDF fixture. It covers 1280/390 px JavaScript/no-JavaScript
 scenarios, including numeric zoom before image load;
 `tools/smoke_release.py` checks that release artifacts lack and refuse the flag.
 

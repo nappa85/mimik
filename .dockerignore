@@ -4,7 +4,5 @@
 !tools/
 !tools/*.py
 !tools/*.txt
-!tools/fixtures/
-!tools/fixtures/upload-three-pages.pdf.txt
 !schemas/
 !schemas/*.json

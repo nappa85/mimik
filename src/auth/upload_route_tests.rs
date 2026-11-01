@@ -332,6 +332,7 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
     let text = body_text(conflict).await;
     assert!(text.contains("an upload is already staged; open or discard it"));
     assert!(text.contains(&format!("href=\"{path}\"")));
+    assert!(text.contains("<nav>") && text.contains("href=\"/admin/materials\""));
     let player = player_session(&store).await;
     for action in ["set", "render", "inspect", "cancel", "discard"] {
         for case in ["csrf", "missing-csrf", "host", "origin", "non-owner"] {

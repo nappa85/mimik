@@ -383,7 +383,7 @@ async fn receive(
 
 #[derive(Template)]
 #[template(
-    source = "<p>an upload is already staged; open or discard it: <a href=\"/admin/materials/uploads/{{ id }}\">Open staged upload</a></p>",
+    source = "{% extends \"material_base.html\" %}{% block content %}<p>an upload is already staged; open or discard it: <a href=\"/admin/materials/uploads/{{ id }}\">Open staged upload</a></p>{% endblock %}",
     ext = "html"
 )]
 struct StagedConflict {

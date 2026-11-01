@@ -521,7 +521,7 @@ fn normalized_dir_impl(
         rustix::fs::AtFlags::empty(),
     )
     .map_err(|error| {
-        eprintln!("Staging directory permission normalization failed: {error}");
+        eprintln!("Staging directory permission normalisation failed: {error}");
         AppError::Invalid("Staging directory permissions could not be normalised safely.")
     })?;
     #[cfg(test)]

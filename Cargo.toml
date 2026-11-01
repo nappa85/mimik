@@ -107,7 +107,7 @@ mupdf = { version = "=0.8.0", default-features = false, features = ["base14-font
 [dev-dependencies]
 # Token-aware source-boundary checks (already locked through procedural macros).
 proc-macro2 = "=1.0.107"
-syn = { version = "=2.0.119", features = ["full", "parsing"] }
+syn = { version = "=2.0.119", features = ["full", "parsing", "visit"] }
 toml_edit = { version = "=0.25.17", default-features = false, features = ["parse"] }
 flate2 = "=1.1.10"
 rqrr = { version = "=0.11.0", default-features = false }

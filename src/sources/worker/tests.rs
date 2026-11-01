@@ -692,14 +692,36 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     ] {
         boundary_visit(&root.join(name), &mut files, &rules);
     }
+    // Cargo always reads the checkout's root manifest, even when it is ignored.
+    let manifest = boundary_target(root, root, "Cargo.toml");
+    assert!(manifest.is_file(), "missing root Cargo.toml");
+    if !files.contains(&manifest) {
+        files.push(manifest);
+    }
+    let crate_roots = boundary_crate_roots(root, &mut files);
+    boundary_follow_sources(root, &mut files, &crate_roots);
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn boundary_crate_roots(
+    root: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
     let manifests: Vec<_> = files
         .iter()
         .filter(|p| p.file_name().unwrap() == "Cargo.toml")
         .cloned()
         .collect();
+    let mut crate_roots = Vec::new();
     for manifest in manifests {
         for (path, kind) in cargo_source_paths(&manifest) {
             let target = boundary_target(root, manifest.parent().unwrap(), &path);
+            assert!(
+                !target.starts_with(root.join("src/sources/worker")),
+                "Cargo {kind} inside worker: {path}"
+            );
             assert!(
                 ["src", "tests", "examples", "benches", "tools"]
                     .iter()
@@ -708,41 +730,94 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
                 "Cargo {kind} outside walked roots: {path}"
             );
             assert!(
-                if kind == "member" {
+                if kind == "member" || kind == "dependency" {
                     files.contains(&target.join("Cargo.toml"))
                 } else {
-                    files.contains(&target)
+                    target.is_file()
                 },
                 "Cargo {kind} not scanned: {}",
                 target.display()
             );
+            if kind == "target" || kind == "build" {
+                crate_roots.push(target);
+            }
         }
+        crate_roots.extend(boundary_default_roots(root, manifest.parent().unwrap()));
     }
+    files.extend(crate_roots.iter().cloned());
     assert!(
         files.contains(&root.join("src/main.rs")),
         "source walk missed src/main.rs"
     );
-    // Follow literal references too. include_str! assets are scanned as text;
-    // include!/path sources must be Rust within the scanned source roots.
-    let scanned = files.clone();
+    crate_roots
+}
+
+fn boundary_default_roots(
+    root: &std::path::Path,
+    base: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut crate_roots = Vec::new();
+    for name in ["src/main.rs", "src/lib.rs", "build.rs"] {
+        let path = boundary_target(root, base, name);
+        if path.exists() {
+            crate_roots.push(path);
+        }
+    }
+    for directory in ["src/bin", "tests", "examples", "benches"] {
+        let directory = boundary_target(root, base, directory);
+        if !directory.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            let path = if path.extension().is_some_and(|e| e == "rs") {
+                boundary_target(root, &directory, entry.file_name().to_str().unwrap())
+            } else if path.is_dir() && path.join("main.rs").exists() {
+                boundary_target(
+                    root,
+                    &directory,
+                    &format!("{}/main.rs", entry.file_name().to_str().unwrap()),
+                )
+            } else {
+                continue;
+            };
+            crate_roots.push(path);
+        }
+    }
+    crate_roots
+}
+
+fn boundary_follow_sources(
+    root: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+    crate_roots: &[std::path::PathBuf],
+) {
+    // Reachability bypasses ignore rules. Unreachable files still receive the lint,
+    // but only the broad walk above prunes caches and other ignored content.
     let mut pending: Vec<_> = files
         .iter()
         .filter(|p| p.file_name().unwrap() != "Cargo.toml")
-        .cloned()
+        .map(|path| {
+            (
+                path.clone(),
+                boundary_module_directory(path, crate_roots.contains(path)),
+            )
+        })
         .collect();
     let mut seen = std::collections::HashSet::new();
-    while let Some(path) = pending.pop() {
-        if !seen.insert(path.clone()) || path.starts_with(root.join("src/sources/worker")) {
+    while let Some((path, base)) = pending.pop() {
+        if !seen.insert((path.clone(), base.clone())) {
             continue;
         }
         let content = std::fs::read_to_string(&path).unwrap();
-        if path == root.join("build.rs") {
-            // Root build.rs is walked alone, unlike the recursive source roots.
-            // Refuse implicit child modules, including declarations in inline modules.
-            assert!(
-                !has_file_modules(&content),
-                "root build.rs has file modules"
-            );
+        let worker = path.starts_with(root.join("src/sources/worker"));
+        for target in boundary_modules(root, &path, &base, &content) {
+            pending.push((target.clone(), boundary_module_directory(&target, false)));
+            files.push(target);
+        }
+        if worker {
+            continue;
         }
         for (literal, rust) in boundary_references(&content) {
             let target = boundary_target(root, path.parent().unwrap(), &literal);
@@ -756,10 +831,12 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
                     "non-Rust source: {literal}"
                 );
                 assert!(
-                    scanned.contains(&target),
+                    ["src", "tests", "examples", "benches", "tools"]
+                        .iter()
+                        .any(|name| target.starts_with(root.join(name))),
                     "source outside scanned roots: {literal}"
                 );
-                pending.push(target.clone());
+                pending.push((target.clone(), base.clone()));
             }
             assert!(
                 target.is_file(),
@@ -769,9 +846,18 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             files.push(target);
         }
     }
-    files.sort();
-    files.dedup();
-    files
+}
+
+fn boundary_module_directory(path: &std::path::Path, crate_root: bool) -> std::path::PathBuf {
+    if crate_root
+        || ["mod.rs", "main.rs", "lib.rs", "build.rs"]
+            .iter()
+            .any(|name| path.file_name().unwrap() == *name)
+    {
+        path.parent().unwrap().to_path_buf()
+    } else {
+        path.with_extension("")
+    }
 }
 
 fn cargo_source_paths(manifest: &std::path::Path) -> Vec<(String, &'static str)> {
@@ -815,22 +901,182 @@ fn cargo_source_paths(manifest: &std::path::Path) -> Vec<(String, &'static str)>
             paths.push((path.to_owned(), "member"));
         }
     }
+    cargo_dependency_sections(doc.as_item(), &mut paths);
+    if let Some(workspace) = doc.get("workspace") {
+        cargo_dependency_sections(workspace, &mut paths);
+    }
     paths
 }
 
-fn has_file_modules(content: &str) -> bool {
-    fn walk(tokens: proc_macro2::TokenStream) -> bool {
-        let tokens: Vec<_> = tokens.into_iter().collect();
-        tokens.windows(3).any(|t| {
-            matches!(&t[0], proc_macro2::TokenTree::Ident(i) if i == "mod")
-                && matches!(&t[1], proc_macro2::TokenTree::Ident(_))
-                && matches!(&t[2], proc_macro2::TokenTree::Punct(p) if p.as_char() == ';')
-        }) || tokens.into_iter().any(|t| match t {
-            proc_macro2::TokenTree::Group(g) => walk(g.stream()),
-            _ => false,
-        })
+fn cargo_dependencies(item: &toml_edit::Item, paths: &mut Vec<(String, &'static str)>) {
+    if let Some(table) = item.as_table_like() {
+        for (_, dependency) in table.iter() {
+            if let Some(path) = dependency.get("path") {
+                paths.push((
+                    path.as_str().expect("invalid dependency path").to_owned(),
+                    "dependency",
+                ));
+            }
+        }
     }
-    walk(content.parse().expect("invalid Rust tokens"))
+}
+fn cargo_dependency_sections(item: &toml_edit::Item, paths: &mut Vec<(String, &'static str)>) {
+    for name in [
+        "dependencies",
+        "dev-dependencies",
+        "build-dependencies",
+        "replace",
+    ] {
+        if let Some(table) = item.get(name) {
+            cargo_dependencies(table, paths);
+        }
+    }
+    for name in ["target", "patch"] {
+        if let Some(table) = item.get(name).and_then(toml_edit::Item::as_table_like) {
+            for (_, child) in table.iter() {
+                if name == "patch" {
+                    cargo_dependencies(child, paths);
+                } else {
+                    cargo_dependency_sections(child, paths);
+                }
+            }
+        }
+    }
+}
+
+fn boundary_module_paths(meta: &syn::Meta, result: &mut Vec<String>) {
+    if let syn::Meta::NameValue(value) = meta {
+        if value.path.is_ident("path") {
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(value),
+                ..
+            }) = &value.value
+            else {
+                panic!("nonliteral path attribute")
+            };
+            result.push(value.value());
+        }
+    } else if let syn::Meta::List(list) = meta
+        && list.path.is_ident("cfg_attr")
+    {
+        let entries = list
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            )
+            .unwrap();
+        for entry in entries.iter().skip(1) {
+            boundary_module_paths(entry, result);
+        }
+    }
+}
+
+fn boundary_modules(
+    root: &std::path::Path,
+    source: &std::path::Path,
+    base: &std::path::Path,
+    content: &str,
+) -> Vec<std::path::PathBuf> {
+    // Use syn's visitor for declarations inside functions/blocks as well as
+    // top-level items. Stop at each module so its directory can be scoped below.
+    #[derive(Default)]
+    struct Modules<'a>(Vec<&'a syn::ItemMod>);
+    impl<'ast> syn::visit::Visit<'ast> for Modules<'ast> {
+        fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+            self.0.push(module);
+        }
+    }
+    fn walk(
+        root: &std::path::Path,
+        items: &[syn::Item],
+        base: &std::path::Path,
+        attribute_base: &std::path::Path,
+        result: &mut Vec<std::path::PathBuf>,
+        worker: bool,
+    ) {
+        let mut modules = Modules::default();
+        for item in items {
+            syn::visit::Visit::visit_item(&mut modules, item);
+        }
+        for module in modules.0 {
+            let mut literals = Vec::new();
+            for attr in &module.attrs {
+                boundary_module_paths(&attr.meta, &mut literals);
+            }
+            let name = module.ident.to_string().trim_start_matches("r#").to_owned();
+            // A conditional path does not replace the default on every target.
+            let implicit = !module.attrs.iter().any(|a| a.path().is_ident("path"));
+            if let Some((_, items)) = &module.content {
+                let mut directories: Vec<_> = literals
+                    .iter()
+                    .map(|p| boundary_target(root, attribute_base, p))
+                    .collect();
+                if implicit {
+                    directories.push(base.join(name));
+                }
+                for directory in directories {
+                    assert!(
+                        worker || !directory.starts_with(root.join("src/sources/worker")),
+                        "worker inline module outside worker"
+                    );
+                    walk(root, items, &directory, &directory, result, worker);
+                }
+            } else {
+                if implicit {
+                    result.extend(boundary_implicit_module(
+                        root,
+                        base,
+                        &name,
+                        literals.is_empty(),
+                    ));
+                }
+                for literal in literals {
+                    let target = boundary_target(root, attribute_base, &literal);
+                    assert!(
+                        !target.starts_with(root.join("src/sources/worker")) || worker,
+                        "worker path module outside worker"
+                    );
+                    assert!(
+                        target.is_file() && target.extension().is_some_and(|e| e == "rs"),
+                        "missing/non-Rust path module: {literal}"
+                    );
+                    assert!(
+                        ["src", "tests", "examples", "benches", "tools"]
+                            .iter()
+                            .any(|name| target.starts_with(root.join(name))),
+                        "source outside scanned roots: {literal}"
+                    );
+                    result.push(target);
+                }
+            }
+        }
+    }
+    let mut result = Vec::new();
+    walk(
+        root,
+        &syn::parse_file(content).expect("invalid Rust source").items,
+        base,
+        source.parent().unwrap(),
+        &mut result,
+        source.starts_with(root.join("src/sources/worker")),
+    );
+    result
+}
+
+fn boundary_implicit_module(
+    root: &std::path::Path,
+    base: &std::path::Path,
+    name: &str,
+    required: bool,
+) -> Vec<std::path::PathBuf> {
+    let candidates = [format!("{name}.rs"), format!("{name}/mod.rs")]
+        .map(|name| boundary_target(root, base, &name));
+    let existing: Vec<_> = candidates.into_iter().filter(|p| p.exists()).collect();
+    assert!(
+        existing.len() == 1 || (!required && existing.is_empty()),
+        "missing or ambiguous module {name} in {}",
+        base.display()
+    );
+    existing
 }
 
 // No ignore/glob crate is locked. Read only checkout-local .gitignore files,
@@ -944,21 +1190,16 @@ fn boundary_target(
 
 fn boundary_references(content: &str) -> Vec<(String, bool)> {
     use proc_macro2::{TokenStream, TokenTree};
-    fn walk(stream: TokenStream, attribute: bool, references: &mut Vec<(String, bool)>) {
+    fn walk(stream: TokenStream, references: &mut Vec<(String, bool)>) {
         let tokens: Vec<_> = stream.into_iter().collect();
         for (index, token) in tokens.iter().enumerate() {
             if let TokenTree::Ident(ident) = token {
                 let name = ident.to_string();
-                if attribute
-                    && name == "path"
-                    && matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=')
-                {
-                    let Some(TokenTree::Literal(literal)) = tokens.get(index + 2) else {
-                        panic!("nonliteral path attribute");
-                    };
-                    let path: syn::LitStr = syn::parse_str(&literal.to_string()).unwrap();
-                    references.push((path.value(), true));
-                }
+                assert!(
+                    name != "mod"
+                        || !matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '$'),
+                    "macro-generated module cannot be resolved"
+                );
                 if matches!(name.as_str(), "include" | "include_str")
                     && matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
                 {
@@ -971,22 +1212,221 @@ fn boundary_references(content: &str) -> Vec<(String, bool)> {
                 }
             }
             if let TokenTree::Group(group) = token {
-                let is_attribute = attribute
-                    || (group.delimiter() == proc_macro2::Delimiter::Bracket
-                        && index > 0
-                        && matches!(&tokens[index - 1], TokenTree::Punct(p) if p.as_char() == '#')
-                        && matches!(group.stream().into_iter().next(), Some(TokenTree::Ident(i)) if i == "path" || i == "cfg_attr"));
-                walk(group.stream(), is_attribute, references);
+                walk(group.stream(), references);
             }
         }
     }
     let mut references = Vec::new();
     walk(
         content.parse().expect("invalid Rust tokens"),
-        false,
         &mut references,
     );
     references
+}
+
+#[test]
+fn boundary_ignored_crate_roots_are_scanned() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[lib]\npath = 'src/custom.rs'\n").unwrap();
+    for path in ["src/main.rs", "src/lib.rs", "src/custom.rs", "build.rs"] {
+        std::fs::write(root.join(path), "").unwrap();
+    }
+    std::fs::write(root.join(".gitignore"), "/Cargo.toml\n/src/\n/build.rs\n").unwrap();
+    let files = boundary_files(root);
+    for path in [
+        "Cargo.toml",
+        "src/main.rs",
+        "src/lib.rs",
+        "src/custom.rs",
+        "build.rs",
+    ] {
+        assert!(files.contains(&root.join(path)), "{path}");
+    }
+}
+
+#[test]
+fn boundary_module_resolution_follows_rust_directories() {
+    for (entry, declaration, child) in [
+        ("src/main.rs", "mod hidden;", "src/hidden.rs"),
+        ("src/lib.rs", "mod hidden;", "src/hidden/mod.rs"),
+        ("src/parent.rs", "mod hidden;", "src/parent/hidden.rs"),
+        ("src/parent.rs", "mod hidden;", "src/parent/hidden/mod.rs"),
+        ("src/main.rs", "mod a { mod hidden; }", "src/a/hidden.rs"),
+        (
+            "src/parent.rs",
+            "mod a { mod hidden; }",
+            "src/parent/a/hidden.rs",
+        ),
+        ("src/main.rs", "fn f() { mod hidden; }", "src/hidden.rs"),
+        ("build.rs", "mod hidden;", "hidden.rs"),
+        ("tests/entry.rs", "mod hidden;", "tests/hidden.rs"),
+        ("examples/entry.rs", "mod hidden;", "examples/hidden.rs"),
+        ("benches/entry.rs", "mod hidden;", "benches/hidden.rs"),
+        ("src/bin/entry.rs", "mod hidden;", "src/bin/hidden.rs"),
+        ("src/custom.rs", "mod hidden;", "src/hidden.rs"),
+        (
+            "src/main.rs",
+            "mod a { #[path = \"hidden.rs\"] mod b; }",
+            "src/a/hidden.rs",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for path in ["src/main.rs", entry, child] {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), "").unwrap();
+        }
+        let manifest = if entry == "src/custom.rs" {
+            "[lib]\npath = 'src/custom.rs'\n"
+        } else {
+            ""
+        };
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(root.join(".gitignore"), format!("/{child}\n")).unwrap();
+        std::fs::write(root.join(entry), declaration).unwrap();
+        assert!(
+            boundary_files(root).contains(&root.join(child)),
+            "{entry}: {declaration}"
+        );
+    }
+}
+
+#[test]
+fn boundary_reachable_modules_cannot_be_missing_or_symlinks() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(root.join("src/main.rs"), "mod hidden;").unwrap();
+    std::fs::write(root.join(".gitignore"), "/src/hidden.rs\n").unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+    symlink("main.rs", root.join("src/hidden.rs")).unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+    std::fs::remove_file(root.join("src/hidden.rs")).unwrap();
+    symlink("absent.rs", root.join("src/hidden.rs")).unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+}
+
+#[test]
+fn boundary_reachable_ignored_modules_are_scanned() {
+    for (source, module, ignore) in [
+        ("mod __pycache__;", "src/__pycache__/mod.rs", "__pycache__/"),
+        ("mod shim;", "src/shim.rs", "/src/shim.rs"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(module).parent().unwrap()).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("src/main.rs"), source).unwrap();
+        std::fs::write(root.join(module), "use mupdf;").unwrap();
+        std::fs::write(root.join(".gitignore"), ignore).unwrap();
+        let paths = boundary_files(root);
+        assert!(
+            paths
+                .iter()
+                .any(|p| native_rust_reference(&std::fs::read_to_string(p).unwrap())),
+            "reachable native source was hidden: {module}"
+        );
+    }
+}
+
+#[test]
+fn boundary_conditional_path_also_scans_implicit_module() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "#[cfg_attr(windows, path = \"alternate.rs\")] mod shim;",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/alternate.rs"), "").unwrap();
+    std::fs::write(root.join("src/shim.rs"), "use mupdf;").unwrap();
+    std::fs::write(root.join(".gitignore"), "/src/shim.rs\n").unwrap();
+    assert!(boundary_files(root).contains(&root.join("src/shim.rs")));
+}
+
+#[test]
+fn boundary_refuses_worker_cargo_roots() {
+    for manifest in [
+        "[lib]\npath = 'src/sources/worker/host_api.rs'\n",
+        "[package]\nbuild = 'src/sources/worker/host_api.rs'\n",
+        "[workspace]\nmembers = ['src/sources/worker']\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/sources/worker")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(root.join("src/sources/worker/host_api.rs"), "").unwrap();
+        std::fs::write(root.join("src/sources/worker/Cargo.toml"), "").unwrap();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(root)).is_err(),
+            "{manifest}"
+        );
+    }
+}
+
+#[test]
+fn boundary_path_dependencies_require_scanned_manifests() {
+    for section in [
+        "dependencies",
+        "dev-dependencies",
+        "build-dependencies",
+        "target.'cfg(unix)'.dependencies",
+        "target.'cfg(unix)'.dev-dependencies",
+        "target.'cfg(unix)'.build-dependencies",
+        "patch.crates-io",
+        "replace",
+        "workspace.dependencies",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("outside/Cargo.toml"), "").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("[{section}]\nhelper = {{ path = 'outside' }}\n"),
+        )
+        .unwrap();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(root)).is_err(),
+            "{section}"
+        );
+        std::fs::create_dir_all(root.join("tools/helper")).unwrap();
+        std::fs::write(root.join("tools/helper/Cargo.toml"), "").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("[{section}]\nhelper = {{ path = 'tools/helper' }}\n"),
+        )
+        .unwrap();
+        assert!(boundary_files(root).contains(&root.join("tools/helper/Cargo.toml")));
+        std::fs::write(root.join(".gitignore"), "/tools/helper/\n").unwrap();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(root)).is_err(),
+            "ignored dependency: {section}"
+        );
+    }
+}
+
+#[test]
+fn boundary_refuses_macro_generated_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "macro_rules! source { ($name:ident) => { mod $name; }; } source!(shim);",
+    )
+    .unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
 }
 
 #[test]
@@ -1133,7 +1573,13 @@ fn boundary_refuses_root_build_file_modules() {
     std::fs::write(root.join("Cargo.toml"), "[package]\nbuild = 'build.rs'\n").unwrap();
     std::fs::write(root.join("build.rs"), "mod helper;").unwrap();
     std::fs::write(root.join("helper.rs"), "use mupdf;").unwrap();
-    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+    let files = boundary_files(root);
+    assert!(files.contains(&root.join("helper.rs")));
+    assert!(
+        files
+            .iter()
+            .any(|path| native_rust_reference(&std::fs::read_to_string(path).unwrap()))
+    );
 }
 
 #[test]
