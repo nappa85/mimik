@@ -90,9 +90,8 @@ show that upload is unavailable. There is no unconfined fallback in production.
 fields are refused. Owner, Host/Origin, declared length and the staging reservation/slot are
 checked before the body is read. CSRF admission precedes all PDF writes; metadata uses the
 import identity rules. The counting stream limits the complete request, including epilogue,
-to 128 MiB + 64 KiB. The parser receives at most 4 KiB before CSRF admission. Transport
-frames may contain additional bytes retained in memory until admission; see SRC-UPLOAD-POLL
-in `limitations.md`. Uploads have 30-second byte-idle and 15-minute total deadlines.
+to 128 MiB + 64 KiB. The parser receives at most 4 KiB before CSRF admission. At most one
+transport frame is held in memory until admission (SRC-UPLOAD-POLL in `limitations.md`). Uploads have 30-second byte-idle and 15-minute total deadlines.
 An asynchronous-safe RAII wrapper schedules partial-file deletion and slot release on a
 blocking thread on disconnect, refusal or future cancellation. Hashing is incremental;
 publication rechecks Owner/CSRF and the PDF's size, hash and first-1,024-byte magic.

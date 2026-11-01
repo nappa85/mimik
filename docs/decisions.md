@@ -6,7 +6,6 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 
 ## Product direction and rules review
 
-
 - **PROD-1** (2026-10-11) Mimik is a standalone, open-source, sheet-first companion for players at a physical table; it is not a virtual tabletop.
 - **PROD-2** (2026-10-19) Assisted paper sheet: help the player as much as possible and never force anything; improve paper and pencil rather than replace it.
 - **PROD-3** (2026-10-18) Assist, don't police (DL-1, DL-2): violations warn and never block; every change is logged and revertible, with a suggested fix where possible. A Master may open a sheet, its warnings and history; no automatic GM alert feeds or dashboards.
@@ -301,8 +300,6 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 
 ## Dependencies
 
-- **DEP-30** (2026-11-01) Use `multer =3.1.0` directly (MIT, default features only; no `json` or `tokio-io`): `Constraints` exposes allowed fields and per-field limits, and direct field iteration enforces upload field order, which axum's `Multipart` wrapper does not expose.
-
 Versions and exact pins are in `Cargo.toml`; CI checks licences (`cargo about`) and advisories (`cargo audit`).
 
 - **DEP-1** (2026-10-11) HTTP and HTML: Axum 0.8 on Tokio 1 with Askama 0.14 escaped templates; storage: rusqlite 0.37 with bundled SQLite (`functions`, `hooks`), no system SQLite.
@@ -333,6 +330,7 @@ Versions and exact pins are in `Cargo.toml`; CI checks licences (`cargo about`) 
 
 - **DEP-28** (2026-10-30) Word differences on the review screen: similar 3.2.0 (Apache-2.0, maintained by its author, no unsafe-heavy dependencies; features std, text, unicode, which compile unicode-segmentation 1.13.3); the lock also records optional bstr 1.13.1, which these features do not compile. Comparisons have a per-diff deadline; 3.2.1 was under two weeks old at selection.
 - **DEP-29** (2026-10-31) PDF worker: `mupdf =0.8.0`, locking `mupdf-sys =0.8.0` (AGPL-3.0, MuPDF 1.27.2); Linux-only, PDF only, `base14-fonts`, no system-library or other format features; libclang-14 pinned in mimik-ci. FreeType's GPLv2-or-later option (`LICENSE.TXT`: "any later version can be used also") is used as GPLv3, compatible with AGPL-3.0; its crate ships pointer text, not the FTL/GPLv2 documents it cites. The full elected GPLv3 text ships in the notices from `mupdf/thirdparty/lcms2/plugins/fast_float/COPYING.GPL3`, pinned SHA-256 `c53a65c2fd561c87eaabf1072ef5dcab8653042bc15308465f52413585eb6271`. IJG libjpeg's full upstream README ships with the notices (`licenses/ijg-libjpeg-9f-README`, SHA-256 `7c25493a9f64fed34d01445467341bda77bc1cdbeccbe33558659ef173fb9ff2`, from https://www.ijg.org/files/jpegsrc.v9f.tar.gz, archive SHA-256 `04705c110cb2469caa79fb71fba3d7bf834914706e9641a4589485c1f832565b`); the hash-pinned 84-file upstream inventory in `licenses/ijg-libjpeg-9f-upstream.sha256` identifies MuPDF's changes to `jidctint.c`, `jdarith.c`, `jerror.c` and verifies the other 81 files match; the notice also states the omitted upstream documentation and build/configuration categories. The crate exposes no store-size control: the default MuPDF store is accepted subject to the exact-profile live RSS check below 75% of the 2 GiB address-space limit on every corpus run (natural exits: wait4 runner/descendant rusage upper bound; parent kills: host worker VmHWM sampled through the verified pidfd immediately before signalling, with pidfd liveness checked before and after each read; a missing measurement fails the gate). Separate 256 MiB touch controls validate both paths; pre-kill VmHWM excludes the kill/reap interval, and parent-killed wait4 does not reliably include the unreaped worker. Input is held in both a Vec and MuPDF's buffer. The two local MÖRK BORG manuals, EN Bare Bones and IT (76 and 96 pages), passed every eight-page render batch; natural-exit wait4 RSS was at most 136,588 KiB; killed-control worker VmHWM was 287,308 KiB (`docs/results.md`). REL-2 includes the entire vendored crate, pinned licence assets and every shipped licence file, including disabled components and fonts, with an exact-inventory gate at notice generation and newline-exact full-text verification at packaging.
+- **DEP-30** (2026-11-01) Use `multer =3.1.0` directly (MIT, default features only; no `json` or `tokio-io`): `Constraints` exposes allowed fields and per-field limits, and direct field iteration enforces upload field order, which axum's `Multipart` wrapper does not expose.
 
 ## Licensing and release
 

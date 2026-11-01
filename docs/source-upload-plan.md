@@ -353,8 +353,9 @@ MuPDF entry points) is a TODO follow-up after 3a, not only a limitation.
 - the upload slot (one stream at a time; a second gets 409 "an upload is in progress").
 
 *Body stream:* the body is wrapped in a counting stream that enforces the whole-request limit
-(128 MiB + 64 KiB) whether or not `Content-Length` is sent, and lets at most 4 KiB (multipart
-headers and the `csrf` field) be polled before the CSRF admission. Instrumented-body tests: a
+(128 MiB + 64 KiB) whether or not `Content-Length` is sent, and passes at most 4 KiB (multipart
+headers and the `csrf` field) to the parser before the CSRF admission; at most one transport
+frame is buffered (SRC-UPLOAD-POLL). Instrumented-body tests: a
 request refused for authentication, Host or Origin polls no byte; a refused CSRF token
 spools no file byte; a disconnect mid-file, and the handler's future dropped mid-file, each release the slot and
 delete the partial file.

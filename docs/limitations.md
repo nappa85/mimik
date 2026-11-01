@@ -5,12 +5,10 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## PDF source uploads
 
-- **SRC-UPLOAD-POLL** [HTTP admission, blocking] Multipart receives at most 4 KiB before CSRF
-  admission, but Axum's body API polls whole transport frames: one poll may buffer more than
-  4 KiB from the underlying body. This does not spool file bytes before admission, but does not
-  satisfy the plan's literal underlying-body polling bound. Resolve the transport-level
-  requirement with the coordinator before accepting slice 3b2; parser delivery limits are not
-  an equivalent guarantee. Independent change-set review and Chromium checks are also pending.
+- **SRC-UPLOAD-POLL** [HTTP admission] The parser receives at most 4 KiB before CSRF admission,
+  but the body yields whole transport frames, so one frame (bounded by hyper's read buffer, about
+  408 KiB on HTTP/1 and 16 KiB per HTTP/2 frame) may sit in memory before admission. No file byte
+  is spooled before admission, and only one upload streams at a time.
 
 - **SRC-STAGING-AUDIT** [staging] Staging writes are not recorded in the permanent source review-event log; add upload events if a staging history is required.
 - **SRC-FUZZ** [testing, TODO follow-up] No cargo-fuzz runs yet. Add containerized fuzzing
