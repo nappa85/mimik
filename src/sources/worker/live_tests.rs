@@ -82,7 +82,11 @@ fn options(mode: &str) -> Options {
         parent_killed: std::sync::Arc::default(),
         runner: RunnerCommand {
             program: std::env::var_os("MIMIK_LIVE_RUNNER").unwrap().into(),
-            args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],
+            args: vec![
+                "assistant-runner".into(),
+                "--spec-fd".into(),
+                crate::sandbox::runner::SPEC_FD.to_string().into(),
+            ],
             env: vec![],
         },
         executable: binary,

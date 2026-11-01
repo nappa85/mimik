@@ -132,6 +132,8 @@ pub struct Files {
     pub fail_remove: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     pub fail_cleanup: Mutex<Option<std::ffi::OsString>>,
+    #[cfg(test)]
+    pub fail_spool_chmod: std::sync::atomic::AtomicBool,
 }
 impl Files {
     /// # Errors
@@ -147,8 +149,25 @@ impl Files {
             Mode::RUSR | Mode::WUSR,
         )
         .map_err(io)?;
-        rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR).map_err(io)?;
+        #[cfg(test)]
+        let chmod = self.chmod_spool(&fd);
+        #[cfg(not(test))]
+        let chmod = rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR).map_err(io);
+        if let Err(error) = chmod {
+            self.remove_spool(&name)?;
+            return Err(error);
+        }
         Ok((name, File::from(fd)))
+    }
+    #[cfg(test)]
+    fn chmod_spool(&self, fd: &OwnedFd) -> Result<(), AppError> {
+        if self
+            .fail_spool_chmod
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM).into());
+        }
+        rustix::fs::fchmod(fd, Mode::RUSR | Mode::WUSR).map_err(io)
     }
     /// # Errors
     /// Returns invalid-name, unlink or directory-sync failures.
@@ -202,14 +221,7 @@ impl Files {
             Ok(()) | Err(rustix::io::Errno::EXIST) => (),
             Err(e) => return Err(io(e)),
         }
-        let root = rustix::fs::openat(
-            &parent,
-            "staging",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io)?;
-        rustix::fs::fchmod(&root, Mode::RWXU).map_err(io)?;
+        let root = normalized_dir(&parent, "staging")?;
         Ok(Self {
             root,
             path: data.join("staging"),
@@ -217,6 +229,8 @@ impl Files {
             fail_remove: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_cleanup: Mutex::new(None),
+            #[cfg(test)]
+            fail_spool_chmod: std::sync::atomic::AtomicBool::new(false),
         })
     }
     /// # Errors
@@ -236,7 +250,7 @@ impl Files {
     pub fn create(&self, id: &str) -> Result<(), AppError> {
         valid_id(id)?;
         rustix::fs::mkdirat(&self.root, id, Mode::RWXU).map_err(io)?;
-        rustix::fs::fchmod(self.dir(id)?, Mode::RWXU).map_err(io)?;
+        normalized_dir(&self.root, id)?;
         rustix::fs::fsync(&self.root).map_err(io)?;
         Ok(())
     }
@@ -447,6 +461,31 @@ impl Files {
         rustix::fs::fsync(&self.root).map_err(io)?;
         Ok(())
     }
+}
+fn normalized_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, AppError> {
+    // A restrictive umask may remove owner read/search. Check the directory by
+    // name without following links before chmod, which requires neither permission.
+    let stat =
+        rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
+        return Err(AppError::Invalid("Invalid staging directory."));
+    }
+    // The parent is private and manager operations are serialized. Use fchmodat
+    // after the no-follow check: fchmodat2/AT_SYMLINK_NOFOLLOW is not available
+    // on every supported kernel (or inside every application sandbox).
+    rustix::fs::chmodat(parent, name, Mode::RWXU, rustix::fs::AtFlags::empty()).map_err(io)?;
+    let dir = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io)?;
+    let opened = rustix::fs::fstat(&dir).map_err(io)?;
+    if (stat.st_dev, stat.st_ino) != (opened.st_dev, opened.st_ino) {
+        return Err(AppError::Invalid("Staging directory changed."));
+    }
+    Ok(dir)
 }
 fn remove_entry(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<(), AppError> {
     let stat = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;

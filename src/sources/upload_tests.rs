@@ -628,8 +628,8 @@ fn create_returns_committed_upload_id_when_launch_fails() {
 fn private_files_survive_restrictive_umask() {
     const CHILD: &str = "MIMIK_TEST_UPLOAD_UMASK_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let status = std::process::Command::new("sh")
-            .args(["-c", "umask 0277 && exec \"$@\"", "umask-child"])
+        let output = std::process::Command::new("sh")
+            .args(["-c", "umask 0477 && exec \"$@\"", "umask-child"])
             .arg(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -637,9 +637,20 @@ fn private_files_survive_restrictive_umask() {
                 "--nocapture",
             ])
             .env(CHILD, "1")
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed;")),
+            "{stdout}"
+        );
         return;
     }
     // A separate test process avoids changing any parallel test's process-global umask.
@@ -651,6 +662,13 @@ fn private_files_survive_restrictive_umask() {
     .unwrap();
     let files = staging::Files::open(dir.path()).unwrap();
     files.create(ID).unwrap();
+    assert_eq!(
+        std::fs::metadata(dir.path().join("staging").join(ID))
+            .unwrap()
+            .mode()
+            & 0o777,
+        0o700
+    );
     let ledger = staging::Ledger::new(0, || Ok(u64::MAX));
     let mut reservation = ledger.reserve(4096).unwrap();
     let (name, mut spool) = files.spool().unwrap();
@@ -663,6 +681,22 @@ fn private_files_survive_restrictive_umask() {
         .unwrap();
     assert!(files.private_file(ID, "document.pdf"));
     assert!(files.private_file(ID, "page-1.png"));
+}
+
+#[test]
+fn spool_chmod_failure_removes_temporary_file() {
+    let (dir, m, _o, _) = fixture();
+    m.0.files.fail_spool_chmod.store(true, Ordering::Release);
+    assert!(m.begin_upload().is_err());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    m.0.files.fail_spool_chmod.store(false, Ordering::Release);
+    assert!(m.begin_upload().is_ok());
 }
 
 #[test]
@@ -785,6 +819,75 @@ fn sweep_drops_a_retry_page_and_settles_upload_and_progress_together() {
     assert_eq!(u.pages.len(), 1);
     assert_eq!(u.job.done, 0);
     assert!(m.contract(&id).is_err());
+}
+
+#[test]
+fn reconciliation_preserves_failed_and_active_upload_states() {
+    for (state, job) in [
+        ("failed", "failed"),
+        ("rendering", "queued"),
+        ("rendering", "running"),
+    ] {
+        let (dir, m, o, _) = fixture();
+        let id = create(&m, &o);
+        selected(&m, &o, &id, &[1]);
+        start(&m, &o, &id);
+        wait(&m);
+        std::fs::remove_file(dir.path().join("staging").join(&id).join("page-1.png")).unwrap();
+        m.0.store
+            .upload_storage(|db| {
+                db.execute(
+                    "UPDATE source_uploads SET state=?2 WHERE id=?1",
+                    params![id, state],
+                )?;
+                db.execute(
+                    "UPDATE source_jobs SET state=?2 WHERE upload_id=?1",
+                    params![id, job],
+                )?;
+                retained_files(db, &m.0.files)?;
+                Ok(())
+            })
+            .unwrap();
+        let u = m.read(&id).unwrap();
+        assert_eq!(u.state, state, "{job}");
+        assert_eq!(u.job.state, job);
+        assert_eq!(u.job.done, 0);
+        assert!(u.pages.is_empty());
+    }
+}
+
+#[test]
+fn corrupt_inspection_does_not_block_sweep_or_startup_accounting() {
+    for restart in [false, true] {
+        let (dir, m, o, f) = fixture();
+        let id = create(&m, &o);
+        selected(&m, &o, &id, &[1]);
+        start(&m, &o, &id);
+        wait(&m);
+        std::fs::remove_file(dir.path().join("staging").join(&id).join("page-1.png")).unwrap();
+        m.0.store.upload_storage(|db| {
+            db.execute("UPDATE source_uploads SET inspection=json_set(inspection,'$.unknown',1) WHERE id=?1", [&id])?;
+            Ok(())
+        }).unwrap();
+        assert!(m.read(&id).is_err());
+        let m = if restart {
+            let store = m.0.store.clone();
+            drop(m);
+            Uploads::initialize(store, dir.path(), f, false).unwrap()
+        } else {
+            m.sweep().unwrap();
+            m
+        };
+        assert_eq!(m.0.ledger.usage().unwrap(), (PDF.len() as u64, 0));
+        m.0.store.upload_storage(|db| {
+            let (state, done, pages): (String, u32, u32) = db.query_row(
+                "SELECT u.state,j.pages_done,(SELECT count(*) FROM source_upload_pages WHERE upload_id=u.id) FROM source_uploads u JOIN source_jobs j ON j.upload_id=u.id WHERE u.id=?1",
+                [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            assert_ne!(state, "rendered");
+            assert_eq!((done, pages), (0, 0));
+            Ok(())
+        }).unwrap();
+    }
 }
 
 #[test]

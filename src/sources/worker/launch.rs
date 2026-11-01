@@ -200,7 +200,11 @@ impl Options {
         let runner =
             std::env::var_os("MIMIK_LIVE_RUNNER").map_or(runner, |program| RunnerCommand {
                 program: program.into(),
-                args: vec!["assistant-runner".into(), "--spec-fd".into(), "3".into()],
+                args: vec![
+                    "assistant-runner".into(),
+                    "--spec-fd".into(),
+                    runner::SPEC_FD.to_string().into(),
+                ],
                 env: vec![],
             });
         Ok(Self {

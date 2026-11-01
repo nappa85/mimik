@@ -490,7 +490,7 @@ impl Uploads {
         }
         drop(gate);
         if self.launch_locked(&id, 1, &mut control).is_err() {
-            tracing_sweep_failure();
+            eprintln!("Source upload worker launch failed; inspect the upload job status.");
         }
         Ok(id)
     }
@@ -1247,15 +1247,27 @@ fn retained_files(
         }
     }
     for id in changed {
-        let u = load(&tx, &id)?;
+        let Ok(u) = load(&tx, &id) else {
+            // Corrupt typed metadata must not block cleanup or disk accounting for
+            // this upload (or any others). Settle conservatively using only SQL.
+            tx.execute(
+                "UPDATE source_jobs SET pages_done=0 WHERE upload_id=?1",
+                [&id],
+            )?;
+            tx.execute(
+                "UPDATE source_uploads SET state='inspected' WHERE id=?1 AND state='rendered'",
+                [&id],
+            )?;
+            continue;
+        };
         // A retry's total excludes older retained pages. Counting all surviving rows
         // alone would still claim progress if the retry's newly rendered page vanished.
         let done = u64::from(u.job.done)
             .min(u.pages.len() as u64)
             .min(u64::from(u.job.total).saturating_sub(remaining(&u).len() as u64));
         tx.execute(
-            "UPDATE source_uploads SET state=?2 WHERE id=?1",
-            params![id, settled_state(&u)],
+            "UPDATE source_uploads SET state='inspected' WHERE id=?1 AND state='rendered'",
+            [&id],
         )?;
         tx.execute(
             "UPDATE source_jobs SET pages_done=?2 WHERE upload_id=?1",

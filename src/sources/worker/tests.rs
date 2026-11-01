@@ -625,32 +625,93 @@ fn pixel_bounds_and_extreme_aspects() {
 
 #[test]
 fn mupdf_stays_in_worker() {
-    fn visit(path: &std::path::Path, worker: &std::path::Path) {
-        let operations = operations_reference();
-        for entry in std::fs::read_dir(path).unwrap() {
-            let path = entry.unwrap().path();
-            if path
-                .file_name()
-                .is_some_and(|n| n == "target" || n == ".git")
-            {
-                continue;
-            }
-            if path.is_dir() {
-                visit(&path, worker);
-            } else if path.file_name().is_some_and(|n| n == "Cargo.toml") {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(!cargo_alias_reference(&content), "{}", path.display());
-            } else if !path.starts_with(worker)
-                && path.extension().is_some_and(|extension| extension == "rs")
-            {
-                let content = std::fs::read_to_string(&path).unwrap();
-                assert!(!native_rust_reference(&content), "{}", path.display());
-                assert!(!operations.is_match(&content), "{}", path.display());
-            }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let worker = root.join("src/sources/worker");
+    let operations = operations_reference();
+    for path in boundary_files(root) {
+        let content = std::fs::read_to_string(&path).unwrap();
+        if path.file_name().is_some_and(|n| n == "Cargo.toml") {
+            assert!(!cargo_alias_reference(&content), "{}", path.display());
+        } else if !path.starts_with(&worker) {
+            assert!(!native_rust_reference(&content), "{}", path.display());
+            assert!(!operations.is_match(&content), "{}", path.display());
         }
     }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    visit(root, &root.join("src/sources/worker"));
+}
+
+fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fn visit(path: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("{}: {error}", path.display()),
+        };
+        if metadata.is_symlink() {
+            return;
+        }
+        if metadata.is_file() {
+            if path.file_name().is_some_and(|n| n == "Cargo.toml")
+                || path.extension().is_some_and(|extension| extension == "rs")
+            {
+                files.push(path.to_path_buf());
+            }
+            return;
+        }
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            visit(&path, files);
+        }
+    }
+    let mut files = Vec::new();
+    for name in [
+        "src",
+        "tests",
+        "examples",
+        "tools",
+        "build.rs",
+        "Cargo.toml",
+    ] {
+        visit(&root.join(name), &mut files);
+    }
+    files
+}
+
+#[test]
+fn boundary_walk_is_scoped_and_skips_symlinks() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let expected = [
+        "Cargo.toml",
+        "build.rs",
+        "src/main.rs",
+        "src/nested/Cargo.toml",
+        "tests/test.rs",
+        "examples/demo.rs",
+        "tools/helper.rs",
+        "tools/Cargo.toml",
+    ];
+    for name in expected
+        .into_iter()
+        .chain(["docs/ignored.rs", "stray.rs", "outside/hidden.rs"])
+    {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+    }
+    symlink(root.join("outside"), root.join("src/linked-dir")).unwrap();
+    symlink(root.join("stray.rs"), root.join("src/linked.rs")).unwrap();
+    symlink(root.join("missing"), root.join("tools/broken.rs")).unwrap();
+    let outside = root.join("outside");
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o0)).unwrap();
+    // Restore permissions even when the old walk panics, so TempDir can clean up.
+    let walked = std::panic::catch_unwind(|| boundary_files(root));
+    std::fs::set_permissions(outside, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut walked = walked.unwrap();
+    walked.sort();
+    let mut expected = expected.map(|name| root.join(name));
+    expected.sort();
+    assert_eq!(walked, expected);
 }
 
 fn operations_reference() -> regex::Regex {
