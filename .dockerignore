@@ -1,7 +1,6 @@
 **
 !containers/
 !containers/**
-!tools/
 !tools/*.py
 !tools/*.txt
 !schemas/
