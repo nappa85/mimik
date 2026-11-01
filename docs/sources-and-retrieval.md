@@ -84,6 +84,9 @@ There is no HTTP upload route yet. Open one manager with the store and data dire
 accepting uploads; clone its handle for callers, and call it outside the async runtime.
 Opening reconciles interrupted jobs, expires seven-day-idle uploads, removes orphan files and
 folders, and measures retained files. A weak-reference maintenance thread sweeps hourly.
+Cleanup failures use fixed diagnostics and leave surviving bytes charged for a later retry;
+unknown disk usage blocks new reservations until a successful reconciliation. Restart drops
+page rows unless both PNG and text sidecars are no-follow regular files with mode 0600.
 
 `begin_upload` reserves 128 MiB + 64 KiB and returns an RAII stream slot with a private spool
 file. The route must enforce its stream/body limits, hash the stream, and finish authentication
@@ -112,17 +115,25 @@ permanent document without merging readings.
 
 One dedicated worker thread runs inspection/rendering. The production `Worker` adapter uses
 the confined 3a API; synthetic unit tests inject a fake. Jobs transition queued → running →
-succeeded/failed/cancelled; queued cancellation never starts a worker. Running cancellation
-signals `Cancel` and joins the worker before returning. Selection/metadata changes require
-the expected revision, cancel/reap active work, advance the revision, and delete deselected
-page rows/files. Selected renders remain current across revisions when renderer versions and
+succeeded/failed/cancelled; queued cancellation never starts a worker. Launch is serialized
+with queueing under the control lock; spawn failure and worker panic end the job failed with
+a bounded reason. Running cancellation signals `Cancel` and joins the worker before returning.
+Selection/metadata changes require the expected revision and advance it. Selection changes
+cancel/reap active work and delete deselected page rows/files; metadata-only edits preserve
+active work and advance its publication revision under the publication lock. Render settings
+are currently fixed. Selected renders remain current across revisions when renderer versions and
 settings match. Retrying renders only missing/outdated selected pages, preserving successfully
 published pages from failed batches.
 
 Page publication and deletion share a lock; the publication transaction also requires a running
 job and matching upload/job revision. Failed/stale publication removes its new files. Discard
-holds the control lock across cancel/reap, row deletion and folder deletion. Sweeps skip running
-jobs under these locks. On opening, queued/running jobs become failed with `interrupted`.
+holds the control lock across cancel/reap, row deletion and folder deletion. Sweeps skip queued
+and running jobs under these locks, reconcile orphan folders even after a failed discard, and
+reset measured ledger usage while preserving reservations. Creation and spool cleanup share
+the publication lock; reconciliation excludes the exact active spool. Directory deletion uses
+descriptor-relative no-follow traversal and `AT_REMOVEDIR`. On opening, queued/running jobs
+become failed with `interrupted`. Page publication reads geometry from the batch's inspected
+pages and loads only current job/selection/page facts, without reloading the inspection JSON.
 
 `contract(id)` builds `mimik-staged-v1` from a consistent row snapshot: PDF hash/size, pinned
 renderer versions/settings, selected pages/revision, per-page geometry, PNG hash/pixels/dpi,

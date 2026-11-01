@@ -14,7 +14,7 @@ CREATE TABLE source_uploads (
  inspection TEXT CHECK(inspection IS NULL OR (length(CAST(inspection AS BLOB))<=9437184 AND json_valid(inspection) AND json_type(inspection)='object')),
  selected_pages TEXT NOT NULL DEFAULT '[]' CHECK(length(CAST(selected_pages AS BLOB))<=385 AND json_valid(selected_pages) AND json_type(selected_pages)='array' AND json_array_length(selected_pages)<=64),
  system_id TEXT NOT NULL CHECK(length(system_id) BETWEEN 1 AND 64 AND substr(system_id,1,1) GLOB '[a-z]' AND system_id NOT GLOB '*[^a-z0-9-]*'),
- edition TEXT NOT NULL CHECK(length(CAST(edition AS BLOB)) BETWEEN 1 AND 100 AND instr(edition,char(0))=0),
+ edition TEXT NOT NULL CHECK(length(edition) BETWEEN 1 AND 100 AND instr(edition,char(0))=0),
  language TEXT NOT NULL CHECK(length(CAST(language AS BLOB)) BETWEEN 1 AND 30 AND instr(language,char(0))=0),
  CHECK(actor='account:'||actor_id),
  CHECK(inspection IS NULL OR (

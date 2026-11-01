@@ -1,4 +1,4 @@
-//! All inputs are generated synthetic data; no worker process or user corpus is used.
+//! Generated synthetic data; ordinary tests use fake workers, ignored live tests use the host runner.
 use super::*;
 use crate::sources::staging::{self, MIB};
 use crate::{AppError, Store, auth::RequestAuth};
@@ -86,6 +86,8 @@ struct Fake {
     entered: AtomicBool,
     fail: AtomicBool,
     inspect_failure: AtomicBool,
+    panic: AtomicBool,
+    large: AtomicBool,
 }
 impl Worker for Fake {
     fn inspect(&self, _: &std::path::Path, _: &Cancel) -> Result<Inspection, Reason> {
@@ -102,6 +104,7 @@ impl Worker for Fake {
         publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
     ) -> Result<(), Reason> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(!self.panic.load(Ordering::Acquire), "injected worker panic");
         self.entered.store(true, Ordering::Release);
         while self.hold.load(Ordering::Acquire) {
             if cancel.cancelled() {
@@ -113,7 +116,23 @@ impl Worker for Fake {
             if cancel.cancelled() {
                 return Err(Reason::Cancelled);
             }
-            publish(rendered(p.n))?;
+            let mut rendered = rendered(p.n);
+            if self.large.load(Ordering::Acquire) {
+                let mut data = vec![0; 1800 * 1800 * 3];
+                getrandom::fill(&mut data).unwrap();
+                rendered.png.clear();
+                let mut encoder = png::Encoder::new(&mut rendered.png, 1800, 1800);
+                encoder.set_color(png::ColorType::Rgb);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(&data)
+                    .unwrap();
+                rendered.width_px = 1800;
+                rendered.height_px = 1800;
+            }
+            publish(rendered)?;
             if self.fail.load(Ordering::Acquire) {
                 return Err(worker::Error::Unreadable.into());
             }
@@ -122,6 +141,17 @@ impl Worker for Fake {
     }
 }
 fn fixture() -> (tempfile::TempDir, Uploads, OwnerWrite, Arc<Fake>) {
+    let fake = Arc::new(Fake::default());
+    let (dir, manager, owner) = fixture_worker(fake.clone());
+    (dir, manager, owner, fake)
+}
+fn fixture_worker(worker: Arc<dyn Worker>) -> (tempfile::TempDir, Uploads, OwnerWrite) {
+    fixture_worker_data(worker, None)
+}
+fn fixture_worker_data(
+    worker: Arc<dyn Worker>,
+    data: Option<&Path>,
+) -> (tempfile::TempDir, Uploads, OwnerWrite) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("db")).unwrap();
     let session = tower_sessions::session::Id::default();
@@ -136,9 +166,8 @@ fn fixture() -> (tempfile::TempDir, Uploads, OwnerWrite, Arc<Fake>) {
         csrf: auth.csrf_fixture(),
         auth,
     };
-    let fake = Arc::new(Fake::default());
-    let manager = Uploads::initialize(store, dir.path(), fake.clone(), false).unwrap();
-    (dir, manager, owner, fake)
+    let manager = Uploads::initialize(store, data.unwrap_or(dir.path()), worker, false).unwrap();
+    (dir, manager, owner)
 }
 fn create(m: &Uploads, o: &OwnerWrite) -> String {
     let mut phase = m.begin_upload().unwrap();
@@ -233,6 +262,22 @@ fn startup_removes_arbitrarily_named_orphan_folders_without_following_links() {
     assert_eq!(files.reconcile(|_, _| false).unwrap(), 0);
     assert!(!dir.path().join("staging/junk").exists());
     assert_eq!(std::fs::read(dir.path().join("outside")).unwrap(), b"keep");
+}
+
+#[test]
+fn startup_cleanup_continues_after_a_failure_and_counts_retained_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = staging::Files::open(dir.path()).unwrap();
+    for name in ["failed", "removable"] {
+        std::fs::create_dir(dir.path().join("staging").join(name)).unwrap();
+        std::fs::write(dir.path().join("staging").join(name).join("data"), PDF).unwrap();
+    }
+    *files.fail_cleanup.lock().unwrap() = Some("failed".into());
+    assert_eq!(files.reconcile(|_, _| false).unwrap(), PDF.len() as u64);
+    assert!(!dir.path().join("staging/removable").exists());
+    assert!(dir.path().join("staging/failed/data").exists());
+    *files.fail_cleanup.lock().unwrap() = None;
+    assert_eq!(files.reconcile(|_, _| false).unwrap(), 0);
 }
 
 #[test]
@@ -398,6 +443,146 @@ fn selection_limits_and_metadata_import_rules() {
     assert!(m.set(&o, &id, 1, &invalid, &[1]).is_err());
     selected(&m, &o, &id, &(1..=64).collect::<Vec<_>>());
     assert_eq!(m.read(&id).unwrap().selected_pages.len(), 64);
+    let mut unicode = metadata();
+    unicode.edition = "é".repeat(100);
+    m.set(&o, &id, 2, &unicode, &[1]).unwrap();
+    unicode.edition.push('é');
+    assert!(m.set(&o, &id, 3, &unicode, &[1]).is_err());
+}
+
+#[test]
+fn metadata_only_edit_preserves_running_render() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2]);
+    f.hold.store(true, Ordering::Release);
+    start(&m, &o, &id);
+    entered(&f);
+    let mut meta = metadata();
+    meta.edition = "Updated".into();
+    m.set(&o, &id, 2, &meta, &[1, 2]).unwrap();
+    assert_eq!(m.read(&id).unwrap().job.state, "running");
+    f.hold.store(false, Ordering::Release);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.job.state, "succeeded");
+    assert_eq!(u.pages.len(), 2);
+    assert_eq!(u.metadata.edition, "Updated");
+}
+
+#[test]
+fn worker_panic_fails_job_and_gate_remains_usable() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    f.panic.store(true, Ordering::Release);
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().job.state, "failed");
+    f.panic.store(false, Ordering::Release);
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().state, "rendered");
+}
+
+#[test]
+fn concurrent_starts_launch_exactly_one_worker() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    f.hold.store(true, Ordering::Release);
+    let barrier = std::sync::Barrier::new(3);
+    std::thread::scope(|scope| {
+        let handles = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    m.start(&o, &id, 2, false)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        assert_eq!(
+            handles.into_iter().flat_map(|h| h.join().unwrap()).count(),
+            1
+        );
+    });
+    entered(&f);
+    m.cancel(&o, &id).unwrap();
+    assert_eq!(f.calls.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn spawn_failure_fails_job_and_releases_worker_slot() {
+    let (_dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    m.0.fail_spawn.store(true, Ordering::Release);
+    assert!(m.start(&o, ID, 1, true).is_err());
+    assert_eq!(m.read(ID).unwrap().job.state, "failed");
+    assert!(m.0.control.lock().unwrap().is_none());
+    m.start(&o, ID, 1, true).unwrap();
+    wait(&m);
+    assert_eq!(m.read(ID).unwrap().job.state, "succeeded");
+    m.discard(&o, ID).unwrap();
+    m.0.fail_spawn.store(true, Ordering::Release);
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(PDF).unwrap();
+    assert!(
+        m.create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
+            .is_err()
+    );
+    let id: String = m
+        .0
+        .store
+        .upload_storage(|db| Ok(db.query_row("SELECT id FROM source_uploads", [], |r| r.get(0))?))
+        .unwrap();
+    assert_eq!(m.read(&id).unwrap().job.state, "failed");
+    m.discard(&o, &id).unwrap();
+    assert!(m.begin_upload().is_ok());
+}
+
+#[test]
+fn failed_discard_is_retried_by_sweep_without_touching_active_spool() {
+    let (dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    m.0.files.fail_remove.store(true, Ordering::Release);
+    assert!(m.discard(&o, &id).is_err());
+    assert!(m.read(&id).is_err());
+    assert_eq!(m.0.ledger.usage().unwrap().0, PDF.len() as u64);
+    m.0.files.fail_remove.store(false, Ordering::Release);
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(PDF).unwrap();
+    m.sweep().unwrap();
+    assert!(!dir.path().join("staging").join(id).exists());
+    assert_eq!(phase.file().metadata().unwrap().nlink(), 1);
+    assert_eq!(m.0.ledger.usage().unwrap().0, 0);
+}
+
+#[test]
+fn restart_drops_pages_with_missing_or_non_private_files() {
+    use std::os::unix::fs::PermissionsExt;
+    for damaged in ["missing", "mode", "symlink"] {
+        let (dir, m, o, f) = fixture();
+        let id = create(&m, &o);
+        selected(&m, &o, &id, &[1]);
+        start(&m, &o, &id);
+        wait(&m);
+        let png = dir.path().join("staging").join(&id).join("page-1.png");
+        if damaged == "mode" {
+            std::fs::set_permissions(&png, std::fs::Permissions::from_mode(0o644)).unwrap();
+        } else {
+            std::fs::remove_file(&png).unwrap();
+            if damaged == "symlink" {
+                std::os::unix::fs::symlink("document.pdf", &png).unwrap();
+            }
+        }
+        let store = m.0.store.clone();
+        drop(m);
+        let restarted = Uploads::initialize(store, dir.path(), f, false).unwrap();
+        assert!(restarted.read(&id).unwrap().pages.is_empty(), "{damaged}");
+        assert!(restarted.contract(&id).is_err());
+        assert_eq!(restarted.0.ledger.usage().unwrap().0, PDF.len() as u64);
+    }
 }
 
 #[test]
@@ -803,48 +988,43 @@ fn live_staging_enospc_cleans_temporary_file_and_releases_reservation() {
     let path = std::path::PathBuf::from(
         std::env::var_os("MIMIK_STAGING_ENOSPC_DIR").expect("small filesystem directory required"),
     );
-    let files = staging::Files::open(&path).unwrap();
+    let fake = Arc::new(Fake::default());
+    fake.large.store(true, Ordering::Release);
+    let (_dir, m, o) = fixture_worker_data(fake, Some(&path));
     assert!(
-        files.free().unwrap() < 8 * MIB,
+        m.0.files.free().unwrap() < 8 * MIB,
         "test requires a small filesystem"
     );
-    files.create(ID).unwrap();
     // Deliberately bypass only the free-space preflight to exercise a real write ENOSPC.
-    let ledger = staging::Ledger::new(0, || Ok(u64::MAX));
-    let mut reservation = ledger.reserve(8 * MIB).unwrap();
-    let error = files
-        .write(
-            ID,
-            "page-1.png",
-            &vec![0; 8 * 1024 * 1024],
-            &mut reservation,
-        )
-        .unwrap_err();
-    assert!(
-        matches!(error,AppError::SourceIo(ref e) if e.raw_os_error()==Some(libc::ENOSPC)),
-        "{error}"
-    );
-    drop(reservation);
-    assert_eq!(ledger.usage().unwrap(), (0, 0));
+    m.0.ledger.bypass_free.store(true, Ordering::Release);
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.job.state, "failed", "{:?}", u.job);
+    assert_eq!(u.job.reason.as_deref(), Some("space"));
+    assert!(u.pages.is_empty());
+    assert_eq!(m.0.ledger.usage().unwrap(), (PDF.len() as u64, 0));
     assert_eq!(
-        std::fs::read_dir(path.join("staging").join(ID))
+        std::fs::read_dir(path.join("staging").join(&id))
             .unwrap()
             .count(),
-        0
+        1
     );
-    files.discard(ID, &ledger).unwrap();
+    m.discard(&o, &id).unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
 }
 
 #[test]
 #[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in, coordinator live loop"]
 fn live_staged_synthetic_pdf_inspect_render_and_discard() {
     use lopdf::{Document, Object, dictionary};
-    let (dir, fake, o, _) = fixture();
-    let m =
-        Uploads::initialize(fake.0.store.clone(), dir.path(), Arc::new(PdfWorker), false).unwrap();
+    let live = Arc::new(worker::UploadWorker::default());
+    let (_dir, m, o) = fixture_worker(live.clone());
     let mut pdf = Document::with_version("1.7");
     let pages = pdf.new_object_id();
-    let page_id=pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]});
+    let page_id=pdf.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),1000.into(),1000.into()]});
     pdf.objects.insert(
         pages,
         Object::Dictionary(dictionary! {"Type"=>"Pages","Kids"=>vec![page_id.into()],"Count"=>1}),
@@ -866,6 +1046,24 @@ fn live_staged_synthetic_pdf_inspect_render_and_discard() {
     let upload = m.read(&id).unwrap();
     assert_eq!(upload.state, "rendered", "{:?}", upload.job);
     assert_eq!(m.contract(&id).unwrap().pages.len(), 1);
+    // Force a real rerender, then cancel after the real worker starts writing output.
+    m.0.store
+        .upload_storage(|db| {
+            db.execute("UPDATE source_upload_pages SET mupdf_version='older'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    live.cancel_render.store(true, Ordering::Release);
+    start(&m, &o, &id);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !live.entered.load(Ordering::Acquire) {
+        assert!(Instant::now() < deadline, "real render did not start");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    m.cancel(&o, &id).unwrap();
+    assert_eq!(m.read(&id).unwrap().job.state, "cancelled");
+    assert!(m.0.control.lock().unwrap().is_none());
+    assert_eq!(m.0.ledger.usage().unwrap().1, 0);
     m.discard(&o, &id).unwrap();
     assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
 }

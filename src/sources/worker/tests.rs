@@ -626,7 +626,6 @@ fn pixel_bounds_and_extreme_aspects() {
 #[test]
 fn mupdf_stays_in_worker() {
     fn visit(path: &std::path::Path) {
-        let native = native_reference();
         let operations = operations_reference();
         for entry in std::fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
@@ -637,12 +636,13 @@ fn mupdf_stays_in_worker() {
                 visit(&path);
             } else if path.extension().is_some_and(|extension| extension == "rs") {
                 let content = std::fs::read_to_string(&path).unwrap();
-                assert!(!native.is_match(&content), "{}", path.display());
+                assert!(!native_rust_reference(&content), "{}", path.display());
                 assert!(!operations.is_match(&content), "{}", path.display());
             }
         }
     }
     visit(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
+    assert!(!cargo_alias_reference().is_match(include_str!("../../../Cargo.toml")));
 }
 
 fn operations_reference() -> regex::Regex {
@@ -650,12 +650,29 @@ fn operations_reference() -> regex::Regex {
 }
 
 fn native_reference() -> regex::Regex {
-    regex::Regex::new(r"(?s)(\bmupdf_sys\b|\bmupdf\s*::|\b(?:use\s+(?:::\s*)?|extern\s+crate\s+)mupdf\b|\buse\b[^;]*\{[^;]*\bmupdf\b)").unwrap()
+    regex::Regex::new(r#"(?s)(\bmupdf(?:_sys)?\b|#\s*\[\s*path\s*=\s*"[^"]*(?:sources/worker|worker/)[^"]*"|\binclude\s*!\s*\([^;]*(?:sources/worker|worker/)|\bpackage\s*=\s*["']mupdf(?:-sys)?["'])"#).unwrap()
+}
+fn cargo_alias_reference() -> regex::Regex {
+    regex::Regex::new(r#"\bpackage\s*=\s*["']mupdf(?:-sys)?["']"#).unwrap()
+}
+
+fn native_rust_reference(text: &str) -> bool {
+    if text == "\"mupdf\"" {
+        return false;
+    }
+    // Only the explicit provenance field spellings are exempt. Keep whole-token
+    // matching for native crate names, including comments/raw identifiers in imports.
+    let provenance =
+        regex::Regex::new(r#"\bmupdf\s*:\s*(?:String\b|"[^"]*"\.into\(\))|\bdocument\.mupdf\b"#)
+            .unwrap();
+    native_reference().is_match(&provenance.replace_all(text, "provenance"))
 }
 
 #[test]
 fn boundary_matchers_cover_aliases_and_imports() {
-    let native = native_reference();
+    assert!(
+        cargo_alias_reference().is_match("renamed = { package = \"mupdf\", version = \"0.8\" }")
+    );
     for text in [
         "use mupdf;",
         "use mupdf as m;",
@@ -669,10 +686,15 @@ fn boundary_matchers_cover_aliases_and_imports() {
         "use mupdf_sys as native;",
         "extern crate mupdf_sys;",
         "use ::mupdf_sys::{fz_context};",
+        "use /* c */ mupdf as x;",
+        "extern crate r#mupdf as x;",
+        "#[path = \"sources/worker/operations.rs\"] mod bypass;",
+        "include!(\"worker/operations.rs\");",
+        "renamed = { package = \"mupdf\", version = \"0.8\" }",
     ] {
-        assert!(native.is_match(text), "{text}");
+        assert!(native_rust_reference(text), "{text}");
     }
-    assert!(!native.is_match("mupdf_error"));
+    assert!(!native_rust_reference("mupdf_error"));
     let operations = operations_reference();
     for text in [
         "worker::{Input, render as r}",
@@ -696,7 +718,7 @@ fn boundary_matchers_cover_aliases_and_imports() {
         "\"mupdf\"",
         "mupdf_error",
     ] {
-        assert!(!native.is_match(text), "{text}");
+        assert!(!native_rust_reference(text), "{text}");
         assert!(!operations.is_match(text), "{text}");
     }
 }

@@ -5,6 +5,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## PDF source uploads
 
+- **SRC-STAGING-AUDIT** [staging] Staging writes are not recorded in the permanent source review-event log; add upload events if a staging history is required.
 - **SRC-FUZZ** [testing, TODO follow-up] No cargo-fuzz runs yet. Add containerized fuzzing
   of the record parser and sandboxed MuPDF entry points; the generated hostile corpus is
   deterministic coverage, not fuzzing. Watch MuPDF's C security advisories at each release;

@@ -36,6 +36,8 @@ struct Accounting {
 pub struct Ledger {
     bytes: Mutex<Accounting>,
     free: Box<dyn Fn() -> Result<u64, AppError> + Send + Sync>,
+    #[cfg(test)]
+    pub bypass_free: std::sync::atomic::AtomicBool,
 }
 impl Ledger {
     pub fn new(
@@ -45,6 +47,8 @@ impl Ledger {
         Arc::new(Self {
             bytes: Mutex::new(Accounting { used, reserved: 0 }),
             free: Box::new(free),
+            #[cfg(test)]
+            bypass_free: std::sync::atomic::AtomicBool::new(false),
         })
     }
     /// # Errors
@@ -53,7 +57,7 @@ impl Ledger {
         let mut a = self.bytes.lock().map_err(|_| AppError::Worker)?;
         let reserved = a.reserved.checked_add(bytes).ok_or_else(space)?;
         if a.used.checked_add(reserved).is_none_or(|n| n > TOTAL)
-            || (self.free)()? < reserved.checked_add(MARGIN).ok_or_else(space)?
+            || self.free_bytes()? < reserved.checked_add(MARGIN).ok_or_else(space)?
         {
             return Err(space());
         }
@@ -62,6 +66,13 @@ impl Ledger {
             ledger: self.clone(),
             remaining: bytes,
         })
+    }
+    fn free_bytes(&self) -> Result<u64, AppError> {
+        #[cfg(test)]
+        if self.bypass_free.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(u64::MAX);
+        }
+        (self.free)()
     }
     /// # Errors
     /// Returns an error if the ledger lock was poisoned.
@@ -77,6 +88,13 @@ impl Ledger {
             .used
             .checked_sub(bytes)
             .ok_or(AppError::Invalid("Staging accounting mismatch."))?;
+        Ok(())
+    }
+    /// Replace disk usage after a locked scan, preserving active reservations.
+    /// # Errors
+    /// Returns an error if the ledger lock was poisoned.
+    pub fn reconcile(&self, used: u64) -> Result<(), AppError> {
+        self.bytes.lock().map_err(|_| AppError::Worker)?.used = used;
         Ok(())
     }
 }
@@ -110,6 +128,10 @@ impl Drop for Reservation {
 pub struct Files {
     root: OwnedFd,
     path: PathBuf,
+    #[cfg(test)]
+    pub fail_remove: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    pub fail_cleanup: Mutex<Option<std::ffi::OsString>>,
 }
 impl Files {
     /// # Errors
@@ -190,6 +212,10 @@ impl Files {
         Ok(Self {
             root,
             path: data.join("staging"),
+            #[cfg(test)]
+            fail_remove: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_cleanup: Mutex::new(None),
         })
     }
     /// # Errors
@@ -283,6 +309,10 @@ impl Files {
     /// # Errors
     /// Returns invalid paths, unlink/sync failures or accounting mismatches.
     pub fn remove(&self, id: &str, name: &str, ledger: &Ledger) -> Result<(), AppError> {
+        #[cfg(test)]
+        if self.fail_remove.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(std::io::Error::from_raw_os_error(libc::EACCES).into());
+        }
         valid_name(name)?;
         let dir = self.dir(id)?;
         let stat = match rustix::fs::statat(&dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
@@ -302,56 +332,101 @@ impl Files {
     /// # Errors
     /// Returns unexpected directories, invalid sizes or filesystem failures.
     pub fn reconcile(&self, mut keep: impl FnMut(&str, &str) -> bool) -> Result<u64, AppError> {
-        let mut used = 0_u64;
+        self.reconcile_active(&mut keep, None)
+    }
+    #[must_use]
+    pub fn private_file(&self, id: &str, name: &str) -> bool {
+        self.dir(id)
+            .ok()
+            .and_then(|dir| {
+                rustix::fs::statat(&dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).ok()
+            })
+            .is_some_and(|s| {
+                rustix::fs::FileType::from_raw_mode(s.st_mode) == rustix::fs::FileType::RegularFile
+                    && s.st_mode & 0o777 == 0o600
+            })
+    }
+    /// Reconcile under the manager gate, excluding the exact active spool name.
+    /// Cleanup failures are logged and retried; all surviving regular bytes are counted.
+    /// # Errors
+    /// Returns enumeration or accounting failures when disk usage cannot be established.
+    pub fn reconcile_active(
+        &self,
+        mut keep: impl FnMut(&str, &str) -> bool,
+        active_spool: Option<&str>,
+    ) -> Result<u64, AppError> {
         for name in names(&self.root)? {
-            let s = rustix::fs::statat(&self.root, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
-                .map_err(io)?;
-            if rustix::fs::FileType::from_raw_mode(s.st_mode) != rustix::fs::FileType::Directory {
-                rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::empty())
-                    .map_err(io)?;
+            if name.to_str().is_some_and(|name| Some(name) == active_spool) {
                 continue;
             }
-            let dir = rustix::fs::openat(
-                &self.root,
-                &name,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(io)?;
-            let Some(id) = name
-                .to_str()
-                .filter(|id| valid_id(id).is_ok() && keep(id, ""))
-            else {
-                purge(&dir)?;
-                rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::REMOVEDIR)
-                    .map_err(io)?;
-                continue;
-            };
-            rustix::fs::fchmod(&dir, Mode::RWXU).map_err(io)?;
-            for n in names(&dir)? {
-                let s = rustix::fs::statat(&dir, &n, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
-                    .map_err(io)?;
-                let regular = rustix::fs::FileType::from_raw_mode(s.st_mode)
-                    == rustix::fs::FileType::RegularFile;
-                if regular
-                    && n.to_str().is_some_and(|n| {
-                        Path::new(n).extension().is_none_or(|ext| ext != "part") && keep(id, n)
-                    })
+            let result = (|| {
+                #[cfg(test)]
+                if self
+                    .fail_cleanup
+                    .lock()
+                    .map_err(|_| AppError::Worker)?
+                    .as_ref()
+                    == Some(&name)
                 {
-                    used = used
-                        .checked_add(u64::try_from(s.st_size).map_err(|_| space())?)
-                        .ok_or_else(space)?;
-                } else {
-                    remove_entry(&dir, &n)?;
+                    return Err(std::io::Error::from_raw_os_error(libc::EACCES).into());
                 }
-            }
-            rustix::fs::fsync(&dir).map_err(io)?;
-            if !keep(id, "") {
-                rustix::fs::unlinkat(&self.root, id, rustix::fs::AtFlags::REMOVEDIR).map_err(io)?;
-            }
+                let s =
+                    rustix::fs::statat(&self.root, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(io)?;
+                if rustix::fs::FileType::from_raw_mode(s.st_mode) != rustix::fs::FileType::Directory
+                {
+                    rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::empty())
+                        .map_err(io)?;
+                    return Ok(());
+                }
+                let dir = rustix::fs::openat(
+                    &self.root,
+                    &name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(io)?;
+                let Some(id) = name
+                    .to_str()
+                    .filter(|id| valid_id(id).is_ok() && keep(id, ""))
+                else {
+                    purge(&dir)?;
+                    rustix::fs::unlinkat(&self.root, &name, rustix::fs::AtFlags::REMOVEDIR)
+                        .map_err(io)?;
+                    return Ok(());
+                };
+                rustix::fs::fchmod(&dir, Mode::RWXU).map_err(io)?;
+                for n in names(&dir)? {
+                    let s = rustix::fs::statat(&dir, &n, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                        .map_err(io)?;
+                    let regular = rustix::fs::FileType::from_raw_mode(s.st_mode)
+                        == rustix::fs::FileType::RegularFile;
+                    if regular
+                        && n.to_str().is_some_and(|n| {
+                            Path::new(n).extension().is_none_or(|ext| ext != "part") && keep(id, n)
+                        })
+                    {
+                        // Kept files are counted from disk after all cleanup attempts.
+                    } else {
+                        maintenance(remove_entry(&dir, &n));
+                    }
+                }
+                rustix::fs::fsync(&dir).map_err(io)?;
+                if !keep(id, "") {
+                    rustix::fs::unlinkat(&self.root, id, rustix::fs::AtFlags::REMOVEDIR)
+                        .map_err(io)?;
+                }
+                Ok(())
+            })();
+            maintenance(result);
         }
-        rustix::fs::fsync(&self.root).map_err(io)?;
-        Ok(used)
+        maintenance(rustix::fs::fsync(&self.root).map_err(io));
+        Ok(disk_bytes(&self.root, active_spool).unwrap_or_else(|_| {
+            eprintln!(
+                "Source staging usage is unknown; writes remain blocked until reconciliation."
+            );
+            TOTAL
+        }))
     }
     /// # Errors
     /// Returns invalid paths, deletion/sync failures or accounting mismatches.
@@ -388,11 +463,61 @@ fn remove_entry(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<(), AppError> {
     Ok(())
 }
 fn purge(dir: &OwnedFd) -> Result<(), AppError> {
+    let mut failed = false;
     for name in names(dir)? {
-        remove_entry(dir, &name)?;
+        if let Err(e) = remove_entry(dir, &name) {
+            maintenance(Err(e));
+            failed = true;
+        }
     }
     rustix::fs::fsync(dir).map_err(io)?;
-    Ok(())
+    if failed {
+        Err(AppError::Worker)
+    } else {
+        Ok(())
+    }
+}
+fn maintenance(result: Result<(), AppError>) {
+    result.unwrap_or_else(|_| {
+        eprintln!("Source staging cleanup failed; retry on the next sweep.");
+    });
+}
+fn disk_bytes(dir: &OwnedFd, skip_name: Option<&str>) -> Result<u64, AppError> {
+    let mut total = 0_u64;
+    for name in names(dir)? {
+        if name.to_str().is_some_and(|name| Some(name) == skip_name) {
+            continue;
+        }
+        let measured = (|| {
+            let s = rustix::fs::statat(dir, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(io)?;
+            let bytes = match rustix::fs::FileType::from_raw_mode(s.st_mode) {
+                rustix::fs::FileType::Directory => {
+                    let child = rustix::fs::openat(
+                        dir,
+                        &name,
+                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                        Mode::empty(),
+                    )
+                    .map_err(io)?;
+                    disk_bytes(&child, None)?
+                }
+                rustix::fs::FileType::RegularFile => {
+                    u64::try_from(s.st_size).map_err(|_| space())?
+                }
+                _ => 0,
+            };
+            Ok::<_, AppError>(bytes)
+        })();
+        let bytes = measured.unwrap_or_else(|_| {
+            eprintln!(
+                "Source staging usage is unknown; writes remain blocked until reconciliation."
+            );
+            TOTAL
+        });
+        total = total.saturating_add(bytes);
+    }
+    Ok(total)
 }
 fn names(fd: &OwnedFd) -> Result<Vec<std::ffi::OsString>, AppError> {
     let mut dir = rustix::fs::Dir::read_from(fd).map_err(io)?;

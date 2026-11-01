@@ -17,7 +17,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -59,7 +59,7 @@ impl Metadata {
     fn validate(&self, db: &Connection) -> Result<(), AppError> {
         if !crate::registry::valid_id(&self.system_id)
             || self.edition.trim().is_empty()
-            || self.edition.len() > 100
+            || self.edition.chars().count() > 100
             || self.language.trim().is_empty()
             || self.language.len() > 30
             || self.edition.contains('\0')
@@ -107,6 +107,7 @@ struct Running {
     cancel: Cancel,
     handle: JoinHandle<()>,
     cancelled: Arc<AtomicBool>,
+    revision: Arc<AtomicI64>,
 }
 #[cfg(test)]
 type PublishHook = Box<dyn FnOnce(&Store) + Send>;
@@ -118,9 +119,12 @@ struct Inner {
     gate: Mutex<()>,
     control: Mutex<Option<Running>>,
     streaming: Arc<AtomicBool>,
+    active_spool: Mutex<Option<String>>,
     singleton: bool,
     #[cfg(test)]
     before_publish: Mutex<Option<PublishHook>>,
+    #[cfg(test)]
+    fail_spawn: AtomicBool,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -148,6 +152,7 @@ impl UploadPhase {
 }
 impl Drop for UploadPhase {
     fn drop(&mut self) {
+        let _gate = self.manager.gate.lock().ok();
         if let Some(name) = self.name.take()
             && self.files.remove_spool(&name).is_err()
         {
@@ -160,6 +165,9 @@ impl Drop for UploadPhase {
             eprintln!("Source upload partial-file cleanup failed.");
         }
         self.slot.store(false, Ordering::Release);
+        if let Ok(mut active) = self.manager.active_spool.lock() {
+            *active = None;
+        }
     }
 }
 
@@ -288,18 +296,25 @@ impl Uploads {
         singleton: bool,
     ) -> Result<Self, AppError> {
         let files = Arc::new(Files::open(data)?);
-        let used=store.upload_storage(|db| {
-            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute("UPDATE source_uploads SET state='failed' WHERE id IN (SELECT upload_id FROM source_jobs WHERE state IN ('queued','running'))",[])?;
-            tx.execute("UPDATE source_jobs SET state='failed',reason='interrupted',finished_at=?1 WHERE state IN ('queued','running')",[now()?])?;
-            tx.execute("DELETE FROM source_uploads WHERE updated_at<?1",[now()?-7*86400])?;
+        let used = store.upload_storage(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "UPDATE source_uploads SET state='failed' WHERE id IN
+                 (SELECT upload_id FROM source_jobs WHERE state IN ('queued','running'))",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE source_jobs SET state='failed', reason='interrupted', finished_at=?1
+                 WHERE state IN ('queued','running')",
+                [now()?],
+            )?;
+            tx.execute(
+                "DELETE FROM source_uploads WHERE updated_at<?1",
+                [now()? - 7 * 86400],
+            )?;
             tx.commit()?;
-            let mut keep=std::collections::HashSet::new();
-            let mut q=db.prepare("SELECT id FROM source_uploads")?;
-            for id in q.query_map([],|r|r.get::<_,String>(0))? { let id=id?; keep.insert((id.clone(),String::new())); keep.insert((id,"document.pdf".into())); }
-            let mut q=db.prepare("SELECT upload_id,pdf_page FROM source_upload_pages")?;
-            for p in q.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u32>(1)?)))? { let (id,n)=p?; keep.insert((id.clone(),format!("page-{n}.png"))); keep.insert((id,format!("text-{n}.json"))); }
-            files.reconcile(|id,n|keep.contains(&(id.into(),n.into())))
+            let keep = retained_files(db, &files)?;
+            files.reconcile(|id, n| keep.contains(&(id.into(), n.into())))
         })?;
         let disk = files.clone();
         let ledger = Ledger::new(used, move || disk.free());
@@ -311,9 +326,12 @@ impl Uploads {
             gate: Mutex::new(()),
             control: Mutex::new(None),
             streaming: Arc::new(AtomicBool::new(false)),
+            active_spool: Mutex::new(None),
             singleton,
             #[cfg(test)]
             before_publish: Mutex::new(None),
+            #[cfg(test)]
+            fail_spawn: AtomicBool::new(false),
         }));
         let weak = Arc::downgrade(&m.0);
         std::thread::Builder::new()
@@ -333,6 +351,7 @@ impl Uploads {
     /// # Errors
     /// Refuses a second stream/upload, insufficient free space, or a full staging budget.
     pub fn begin_upload(&self) -> Result<UploadPhase, AppError> {
+        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
         if self.0.streaming.swap(true, Ordering::AcqRel) {
             return Err(AppError::Conflict);
         }
@@ -348,6 +367,7 @@ impl Uploads {
             })?;
             let reservation = self.0.ledger.reserve(UPLOAD_RESERVATION)?;
             let (name, file) = self.0.files.spool()?;
+            *self.0.active_spool.lock().map_err(|_| AppError::Worker)? = Some(name.clone());
             Ok(UploadPhase {
                 manager: self.0.clone(),
                 reservation,
@@ -387,7 +407,7 @@ impl Uploads {
         size: u64,
         metadata: &Metadata,
     ) -> Result<String, AppError> {
-        let control = self.0.control.lock().map_err(|_| AppError::Worker)?;
+        let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
         let gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
         if !Arc::ptr_eq(&phase.manager, &self.0) {
             return Err(AppError::Invalid("Wrong upload reservation."));
@@ -406,11 +426,30 @@ impl Uploads {
                 &mut phase.reservation,
             )?;
             phase.name = None;
-            self.write(owner,|tx| {
+            self.write(owner, |tx| {
                 metadata.validate(tx)?;
-                let t=now()?;
-                tx.execute("INSERT INTO source_uploads(id,pdf_sha256,pdf_bytes,actor,actor_id,actor_epoch,session_digest,created_at,updated_at,state,system_id,edition,language) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8,'uploaded',?9,?10,?11)",params![id,sha256,size,format!("account:{}",owner.auth.account_id()),owner.auth.account_id(),owner.auth.epoch(),owner.auth.digest(),t,metadata.system_id,metadata.edition,metadata.language])?;
-                queue(tx,&id,1,"inspect",0)?; Ok(())
+                let t = now()?;
+                tx.execute(
+                    "INSERT INTO source_uploads
+                     (id, pdf_sha256, pdf_bytes, actor, actor_id, actor_epoch, session_digest,
+                      created_at, updated_at, state, system_id, edition, language)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,'uploaded',?9,?10,?11)",
+                    params![
+                        id,
+                        sha256,
+                        size,
+                        format!("account:{}", owner.auth.account_id()),
+                        owner.auth.account_id(),
+                        owner.auth.epoch(),
+                        owner.auth.digest(),
+                        t,
+                        metadata.system_id,
+                        metadata.edition,
+                        metadata.language
+                    ],
+                )?;
+                queue(tx, &id, 1, "inspect", 0)?;
+                Ok(())
             })
         })();
         if let Err(e) = result {
@@ -418,8 +457,7 @@ impl Uploads {
             return Err(e);
         }
         drop(gate);
-        drop(control);
-        self.launch(&id)?;
+        self.launch_locked(&id, &mut control)?;
         Ok(id)
     }
     /// Read the staged page model. Handlers must establish Owner read admission separately.
@@ -459,19 +497,76 @@ impl Uploads {
         selected: &[u32],
     ) -> Result<(), AppError> {
         let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
-        self.write(owner, |tx| {
+        let selection_changed = self.write(owner, |tx| {
             let u = load(tx, id)?;
             check_selection(&u, revision, selected)?;
-            metadata.validate(tx)
+            metadata.validate(tx)?;
+            Ok(u.selected_pages != selected)
         })?;
+        if !selection_changed {
+            let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+            self.write(owner, |tx| {
+                let u = load(tx, id)?;
+                check_selection(&u, revision, selected)?;
+                tx.execute(
+                    "UPDATE source_uploads
+                     SET system_id=?2, edition=?3, language=?4,
+                         revision=revision+1, updated_at=?5 WHERE id=?1",
+                    params![
+                        id,
+                        metadata.system_id,
+                        metadata.edition,
+                        metadata.language,
+                        now()?
+                    ],
+                )?;
+                if control.is_some() {
+                    tx.execute(
+                        "UPDATE source_jobs SET upload_revision=?2
+                         WHERE upload_id=?1 AND state IN ('queued','running')",
+                        params![id, revision + 1],
+                    )?;
+                }
+                Ok(())
+            })?;
+            // Publish and completion read this only under the same gate, after commit.
+            if let Some(r) = control.as_ref() {
+                r.revision.store(revision + 1, Ordering::Release);
+            }
+            return Ok(());
+        }
         self.stop_locked(&mut control, owner, id)?;
         let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
-        let removed=self.write(owner,|tx| {
-            let mut u=load(tx,id)?; check_selection(&u,revision,selected)?; metadata.validate(tx)?;
-            let removed=u.pages.iter().filter(|p|!selected.contains(&p.pdf_page)).map(|p|p.pdf_page).collect::<Vec<_>>();
-            for n in &removed {tx.execute("DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",params![id,n])?;}
-            u.selected_pages=selected.to_vec();
-            tx.execute("UPDATE source_uploads SET system_id=?2,edition=?3,language=?4,selected_pages=?5,revision=revision+1,updated_at=?6,state=?7 WHERE id=?1",params![id,metadata.system_id,metadata.edition,metadata.language,json(&selected)?,now()?,settled_state(&u)])?;
+        let removed = self.write(owner, |tx| {
+            let mut u = load(tx, id)?;
+            check_selection(&u, revision, selected)?;
+            metadata.validate(tx)?;
+            let removed = u
+                .pages
+                .iter()
+                .filter(|p| !selected.contains(&p.pdf_page))
+                .map(|p| p.pdf_page)
+                .collect::<Vec<_>>();
+            for n in &removed {
+                tx.execute(
+                    "DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",
+                    params![id, n],
+                )?;
+            }
+            u.selected_pages = selected.to_vec();
+            tx.execute(
+                "UPDATE source_uploads SET system_id=?2, edition=?3, language=?4,
+                 selected_pages=?5, revision=revision+1, updated_at=?6, state=?7 WHERE id=?1",
+                params![
+                    id,
+                    metadata.system_id,
+                    metadata.edition,
+                    metadata.language,
+                    json(&selected)?,
+                    now()?,
+                    settled_state(&u)
+                ],
+            )?;
             Ok(removed)
         })?;
         for n in removed {
@@ -519,8 +614,7 @@ impl Uploads {
             Ok(())
         })?;
         drop(gate);
-        drop(control);
-        self.launch(id)
+        self.launch_locked(id, &mut control)
     }
     /// Cancel and reap before returning. Published pages remain.
     /// # Errors
@@ -537,7 +631,11 @@ impl Uploads {
     ) -> Result<(), AppError> {
         self.write(owner, |tx| {
             load(tx, id)?;
-            tx.execute("UPDATE source_jobs SET state='cancelled',reason='cancelled',finished_at=?2 WHERE upload_id=?1 AND state='queued'",params![id,now()?])?;
+            tx.execute(
+                "UPDATE source_jobs SET state='cancelled', reason='cancelled', finished_at=?2
+                 WHERE upload_id=?1 AND state='queued'",
+                params![id, now()?],
+            )?;
             Ok(())
         })?;
         if let Some(r) = control.take() {
@@ -545,9 +643,19 @@ impl Uploads {
             r.cancel.cancel();
             r.handle.join().map_err(|_| AppError::Worker)?;
         }
-        self.write(owner,|tx| {
-            tx.execute("UPDATE source_jobs SET state='cancelled',reason='cancelled',finished_at=?2 WHERE upload_id=?1 AND state IN ('queued','running')",params![id,now()?])?;
-            tx.execute("UPDATE source_uploads SET updated_at=?2,state=CASE WHEN state='rendering' THEN CASE WHEN inspection IS NULL THEN 'uploaded' ELSE 'inspected' END ELSE state END WHERE id=?1",params![id,now()?])?;
+        self.write(owner, |tx| {
+            tx.execute(
+                "UPDATE source_jobs SET state='cancelled', reason='cancelled', finished_at=?2
+                 WHERE upload_id=?1 AND state IN ('queued','running')",
+                params![id, now()?],
+            )?;
+            tx.execute(
+                "UPDATE source_uploads SET updated_at=?2,
+                 state=CASE WHEN state='rendering' THEN
+                   CASE WHEN inspection IS NULL THEN 'uploaded' ELSE 'inspected' END
+                 ELSE state END WHERE id=?1",
+                params![id, now()?],
+            )?;
             Ok(())
         })
     }
@@ -570,15 +678,33 @@ impl Uploads {
     pub fn sweep(&self) -> Result<(), AppError> {
         let _control = self.0.control.lock().map_err(|_| AppError::Worker)?;
         let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
-        let ids=self.0.store.upload_storage(|db| {
-            let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let ids=tx.prepare("SELECT id FROM source_uploads WHERE updated_at<?1 AND NOT EXISTS(SELECT 1 FROM source_jobs WHERE upload_id=id AND state='running')")?.query_map([now()?-7*86400],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            for id in &ids {tx.execute("DELETE FROM source_uploads WHERE id=?1",[id])?;}
-            tx.commit()?; Ok(ids)
+        self.0.store.upload_storage(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let ids = tx
+                .prepare(
+                    "SELECT id FROM source_uploads WHERE updated_at<?1 AND NOT EXISTS
+                 (SELECT 1 FROM source_jobs WHERE upload_id=id AND state IN ('queued','running'))",
+                )?
+                .query_map([now()? - 7 * 86400], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for id in &ids {
+                tx.execute("DELETE FROM source_uploads WHERE id=?1", [id])?;
+            }
+            tx.commit()?;
+            Ok(())
         })?;
-        for id in ids {
-            self.0.files.discard(&id, &self.0.ledger)?;
-        }
+        let used = self.0.store.upload_storage(|db| {
+            let keep = retained_files(db, &self.0.files)?;
+            self.0.files.reconcile_active(
+                |id, name| keep.contains(&(id.into(), name.into())),
+                self.0
+                    .active_spool
+                    .lock()
+                    .map_err(|_| AppError::Worker)?
+                    .as_deref(),
+            )
+        })?;
+        self.0.ledger.reconcile(used)?;
         Ok(())
     }
     /// Build the step-4 input solely from staging rows, without reparsing the PDF.
@@ -626,8 +752,12 @@ impl Uploads {
             .files
             .remove(id, &format!("text-{n}.json"), &self.0.ledger)
     }
+    #[cfg(test)]
     fn launch(&self, id: &str) -> Result<(), AppError> {
         let mut control = self.0.control.lock().map_err(|_| AppError::Worker)?;
+        self.launch_locked(id, &mut control)
+    }
+    fn launch_locked(&self, id: &str, control: &mut Option<Running>) -> Result<(), AppError> {
         if let Some(r) = control.take() {
             if !r.handle.is_finished() {
                 *control = Some(r);
@@ -636,30 +766,68 @@ impl Uploads {
             r.handle.join().map_err(|_| AppError::Worker)?;
         }
         let manager = self.clone();
+        let revision = Arc::new(AtomicI64::new(self.read(id)?.revision));
+        let current_revision = revision.clone();
         let id = id.to_owned();
         let cancel = Cancel::default();
         let c = cancel.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = cancelled.clone();
-        let handle = std::thread::Builder::new()
+        let failed_id = id.clone();
+        #[cfg(test)]
+        if self.0.fail_spawn.swap(false, Ordering::AcqRel) {
+            self.fail_job(&failed_id)?;
+            return Err(AppError::Worker);
+        }
+        let spawned = std::thread::Builder::new()
             .name("source-upload".into())
-            .spawn(move || manager.run_job(&id, &c, &flag))?;
+            .spawn(move || manager.run_job(&id, &c, &flag, &current_revision));
+        let handle = match spawned {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.fail_job(&failed_id)?;
+                return Err(e.into());
+            }
+        };
         *control = Some(Running {
             cancel,
             handle,
             cancelled,
+            revision,
         });
         Ok(())
     }
-    fn run_job(&self, id: &str, cancel: &Cancel, cancelled: &AtomicBool) {
+    fn fail_job(&self, id: &str) -> Result<(), AppError> {
+        self.0.store.upload_storage(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "UPDATE source_jobs SET state='failed', reason='unreadable', finished_at=?2
+                 WHERE upload_id=?1 AND state IN ('queued','running')",
+                params![id, now()?],
+            )?;
+            tx.execute("UPDATE source_uploads SET state='failed' WHERE id=?1", [id])?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+    fn run_job(&self, id: &str, cancel: &Cancel, cancelled: &AtomicBool, revision: &AtomicI64) {
         let mut claimed_revision = None;
-        let result = (|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let u = {
                 let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
                 self.0.store.upload_storage(|db| {
-                    let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    if tx.execute("UPDATE source_jobs SET state='running',started_at=?2 WHERE upload_id=?1 AND state='queued'",params![id,now()?])?!=1 {return Err(AppError::Conflict);}
-                    let u=load(&tx,id)?; tx.commit()?; Ok(u)
+                    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    if tx.execute(
+                        "UPDATE source_jobs SET state='running', started_at=?2
+                         WHERE upload_id=?1 AND state='queued'",
+                        params![id, now()?],
+                    )? != 1
+                    {
+                        return Err(AppError::Conflict);
+                    }
+                    let u = load(&tx, id)?;
+                    tx.commit()?;
+                    Ok(u)
                 })?
             };
             claimed_revision = Some(u.revision);
@@ -679,8 +847,16 @@ impl Uploads {
                     return Err(AppError::Invalid("too_large"));
                 }
                 let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+                let current_revision = revision.load(Ordering::Acquire);
                 self.0.store.upload_storage(|db| {
-                    db.execute("UPDATE source_uploads SET inspection=?3,state='inspected',updated_at=?4 WHERE id=?1 AND revision=?2 AND EXISTS(SELECT 1 FROM source_jobs WHERE upload_id=?1 AND state='running' AND upload_revision=?2)",params![id,u.revision,encoded,now()?])?; Ok(())
+                    db.execute(
+                        "UPDATE source_uploads SET inspection=?3, state='inspected', updated_at=?4
+                         WHERE id=?1 AND revision=?2 AND EXISTS
+                         (SELECT 1 FROM source_jobs WHERE upload_id=?1
+                          AND state='running' AND upload_revision=?2)",
+                        params![id, current_revision, encoded, now()?],
+                    )?;
+                    Ok(())
                 })?;
             } else {
                 let pages = remaining(&u);
@@ -693,7 +869,20 @@ impl Uploads {
                     let result = self.0.worker.render(&path, batch, cancel, &mut |p| {
                         let mut reserved =
                             reservation.lock().map_err(|_| worker::Error::Unreadable)?;
-                        let result = self.publish(id, u.revision, &p, &mut reserved, cancelled);
+                        let result = batch
+                            .iter()
+                            .find(|page| page.n == p.n)
+                            .ok_or(AppError::Conflict)
+                            .and_then(|page| {
+                                self.publish_current(
+                                    id,
+                                    revision,
+                                    page,
+                                    &p,
+                                    &mut reserved,
+                                    cancelled,
+                                )
+                            });
                         if let Err(e) = result {
                             *callback_error
                                 .lock()
@@ -709,30 +898,68 @@ impl Uploads {
                 }
             }
             Ok(())
-        })();
-        let finish = (|| {
-            let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
-            self.0.store.upload_storage(|db| {
-                let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let u=load(&tx,id)?;
-                if u.job.state != "running" { return Ok(()); }
-                if claimed_revision != Some(u.job.revision) { return Ok(()); }
-                if u.revision != u.job.revision {
-                    tx.execute("UPDATE source_jobs SET state='cancelled',reason='cancelled',finished_at=?2 WHERE upload_id=?1",params![id,now()?])?;
-                    tx.commit()?;
-                    return Ok(());
-                }
-                let (state,reason)=if cancelled.load(Ordering::Acquire) {("cancelled",Some("cancelled"))} else if let Err(ref e)=result {("failed",Some(error_code(e)))} else {("succeeded",None)};
-                tx.execute("UPDATE source_jobs SET state=?2,reason=?3,finished_at=?4 WHERE upload_id=?1 AND state='running'",params![id,state,reason,now()?])?;
-                let upload_state=if state=="failed" {"failed"} else {settled_state(&u)};
-                tx.execute("UPDATE source_uploads SET state=?2,updated_at=?3 WHERE id=?1",params![id,upload_state,now()?])?;
-                tx.commit()?; Ok(())
-            })
-        })();
-        if finish.is_err() {
+        }))
+        .unwrap_or(Err(AppError::Worker));
+        if self
+            .finish_job(id, cancelled, revision, claimed_revision.is_some(), &result)
+            .is_err()
+        {
             tracing_sweep_failure();
         }
     }
+    fn finish_job(
+        &self,
+        id: &str,
+        cancelled: &AtomicBool,
+        revision: &AtomicI64,
+        claimed: bool,
+        result: &Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        self.0.store.upload_storage(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let u = load(&tx, id)?;
+            if u.job.state != "running"
+                || !claimed
+                || revision.load(Ordering::Acquire) != u.job.revision
+            {
+                return Ok(());
+            }
+            if u.revision != u.job.revision {
+                tx.execute(
+                    "UPDATE source_jobs SET state='cancelled', reason='cancelled', finished_at=?2
+                         WHERE upload_id=?1",
+                    params![id, now()?],
+                )?;
+                tx.commit()?;
+                return Ok(());
+            }
+            let (state, reason) = if cancelled.load(Ordering::Acquire) {
+                ("cancelled", Some("cancelled"))
+            } else if let Err(e) = result {
+                ("failed", Some(error_code(e)))
+            } else {
+                ("succeeded", None)
+            };
+            tx.execute(
+                "UPDATE source_jobs SET state=?2, reason=?3, finished_at=?4
+                     WHERE upload_id=?1 AND state='running'",
+                params![id, state, reason, now()?],
+            )?;
+            let upload_state = if state == "failed" {
+                "failed"
+            } else {
+                settled_state(&u)
+            };
+            tx.execute(
+                "UPDATE source_uploads SET state=?2, updated_at=?3 WHERE id=?1",
+                params![id, upload_state, now()?],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+    #[cfg(test)]
     fn publish(
         &self,
         id: &str,
@@ -741,8 +968,36 @@ impl Uploads {
         reservation: &mut Reservation,
         cancelled: &AtomicBool,
     ) -> Result<(), AppError> {
-        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
         let u = self.read(id)?;
+        let page = u
+            .inspection
+            .as_ref()
+            .and_then(|i| i.pages.iter().find(|page| page.n == p.n))
+            .ok_or(AppError::Conflict)?;
+        self.publish_current(
+            id,
+            &AtomicI64::new(revision),
+            page,
+            p,
+            reservation,
+            cancelled,
+        )
+    }
+    fn publish_current(
+        &self,
+        id: &str,
+        revision: &AtomicI64,
+        page: &Page,
+        p: &RenderedPage,
+        reservation: &mut Reservation,
+        cancelled: &AtomicBool,
+    ) -> Result<(), AppError> {
+        let _gate = self.0.gate.lock().map_err(|_| AppError::Worker)?;
+        let revision = revision.load(Ordering::Acquire);
+        let u = self
+            .0
+            .store
+            .upload_storage(|db| load_parts(db, id, false))?;
         if cancelled.load(Ordering::Acquire)
             || u.revision != revision
             || u.job.state != "running"
@@ -751,11 +1006,6 @@ impl Uploads {
         {
             return Err(AppError::Conflict);
         }
-        let page = u
-            .inspection
-            .as_ref()
-            .and_then(|i| i.pages.iter().find(|page| page.n == p.n))
-            .ok_or(AppError::Conflict)?;
         let text = worker::records::json(&p.lines).map_err(|_| AppError::Invalid("too_large"))?;
         let png_total = u
             .pages
@@ -807,12 +1057,26 @@ impl Uploads {
                 hook(&self.0.store);
             }
             self.0.store.upload_storage(|db| {
-                let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                let changed=tx.execute("INSERT INTO source_upload_pages(upload_id,pdf_page,rendered_revision,png_sha256,png_bytes,width_px,height_px,dpi,width_points,height_points,transform,stats,settings,text_sha256,text_bytes,renderer_crate_version,mupdf_version) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17 WHERE EXISTS(SELECT 1 FROM source_uploads u JOIN source_jobs j ON j.upload_id=u.id WHERE u.id=?1 AND u.revision=?3 AND j.upload_revision=?3 AND j.state='running')",params![id,p.n,revision,hash(&p.png),p.png.len() as u64,p.width_px,p.height_px,p.dpi,page.width,page.height,json(&page.transform)?,json(&p.stats)?,json(&RenderSettings::default())?,hash(&text),text.len() as u64,worker::CRATE_VERSION,worker::MUPDF_VERSION])?;
-                if changed!=1 {return Err(AppError::Conflict);}
-                tx.execute("UPDATE source_jobs SET pages_done=pages_done+1 WHERE upload_id=?1",[id])?;
-                tx.execute("UPDATE source_uploads SET updated_at=?2 WHERE id=?1",params![id,now()?])?;
-                tx.commit()?;Ok(())
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let changed = tx.execute(
+                    "INSERT INTO source_upload_pages
+                     (upload_id, pdf_page, rendered_revision, png_sha256, png_bytes, width_px,
+                      height_px, dpi, width_points, height_points, transform, stats, settings,
+                      text_sha256, text_bytes, renderer_crate_version, mupdf_version)
+                     SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17
+                     WHERE EXISTS (SELECT 1 FROM source_uploads u
+                       JOIN source_jobs j ON j.upload_id=u.id
+                       WHERE u.id=?1 AND u.revision=?3 AND j.upload_revision=?3 AND j.state='running')",
+                    params![id, p.n, revision, hash(&p.png), p.png.len() as u64,
+                        p.width_px, p.height_px, p.dpi, page.width, page.height,
+                        json(&page.transform)?, json(&p.stats)?, json(&RenderSettings::default())?,
+                        hash(&text), text.len() as u64, worker::CRATE_VERSION, worker::MUPDF_VERSION],
+                )?;
+                if changed != 1 { return Err(AppError::Conflict); }
+                tx.execute("UPDATE source_jobs SET pages_done=pages_done+1 WHERE upload_id=?1", [id])?;
+                tx.execute("UPDATE source_uploads SET updated_at=?2 WHERE id=?1", params![id, now()?])?;
+                tx.commit()?;
+                Ok(())
             })
         })();
         if result.is_err() {
@@ -824,6 +1088,36 @@ impl Uploads {
 
 fn tracing_sweep_failure() {
     eprintln!("Source staging maintenance failed; inspect local storage.");
+}
+fn retained_files(
+    db: &Connection,
+    files: &Files,
+) -> Result<std::collections::HashSet<(String, String)>, AppError> {
+    let mut keep = std::collections::HashSet::new();
+    let mut q = db.prepare("SELECT id FROM source_uploads")?;
+    for id in q.query_map([], |r| r.get::<_, String>(0))? {
+        let id = id?;
+        keep.insert((id.clone(), String::new()));
+        keep.insert((id, "document.pdf".into()));
+    }
+    let mut q = db.prepare("SELECT upload_id, pdf_page FROM source_upload_pages")?;
+    let pages = q
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (id, n) in pages {
+        let png = format!("page-{n}.png");
+        let text = format!("text-{n}.json");
+        if files.private_file(&id, &png) && files.private_file(&id, &text) {
+            keep.insert((id.clone(), png));
+            keep.insert((id, text));
+        } else {
+            db.execute(
+                "DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",
+                params![id, n],
+            )?;
+        }
+    }
+    Ok(keep)
 }
 fn verify_spool(file: &mut std::fs::File, sha256: &str, size: u64) -> Result<(), AppError> {
     if !(1..=128 * MIB).contains(&size) || file.metadata()?.len() != size {
@@ -889,7 +1183,15 @@ fn queue(
     kind: &str,
     total: usize,
 ) -> Result<(), AppError> {
-    tx.execute("INSERT INTO source_jobs(upload_id,upload_revision,kind,state,pages_done,pages_total,created_at) VALUES(?1,?2,?3,'queued',0,?4,?5) ON CONFLICT(upload_id) DO UPDATE SET upload_revision=excluded.upload_revision,kind=excluded.kind,state='queued',pages_done=0,pages_total=excluded.pages_total,reason=NULL,created_at=excluded.created_at,started_at=NULL,finished_at=NULL",params![id,revision,kind,total,now()?])?;
+    tx.execute(
+        "INSERT INTO source_jobs
+         (upload_id, upload_revision, kind, state, pages_done, pages_total, created_at)
+         VALUES (?1,?2,?3,'queued',0,?4,?5)
+         ON CONFLICT(upload_id) DO UPDATE SET upload_revision=excluded.upload_revision,
+         kind=excluded.kind, state='queued', pages_done=0, pages_total=excluded.pages_total,
+         reason=NULL, created_at=excluded.created_at, started_at=NULL, finished_at=NULL",
+        params![id, revision, kind, total, now()?],
+    )?;
     Ok(())
 }
 fn remaining(u: &Upload) -> Vec<Page> {
@@ -943,16 +1245,77 @@ fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), Ap
     Ok(())
 }
 fn load(db: &Connection, id: &str) -> Result<Upload, AppError> {
-    let mut u=db.query_row("SELECT id,pdf_sha256,pdf_bytes,revision,state,system_id,edition,language,(SELECT id FROM source_documents WHERE pdf_sha256=source_uploads.pdf_sha256) FROM source_uploads WHERE id=?1",[id],|r|Ok(Upload {already_document:r.get(8)?,id:r.get(0)?,pdf_sha256:r.get(1)?,pdf_bytes:r.get(2)?,revision:r.get(3)?,state:r.get(4)?,metadata:Metadata {system_id:r.get(5)?,edition:r.get(6)?,language:r.get(7)?},inspection:None,selected_pages:Vec::new(),pages:Vec::new(),job:Job {revision:0,kind:String::new(),state:String::new(),done:0,total:0,reason:None}})).optional()?.ok_or(AppError::SourceNotFound)?;
+    load_parts(db, id, true)
+}
+fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Upload, AppError> {
+    let mut u = db
+        .query_row(
+            "SELECT id, pdf_sha256, pdf_bytes, revision, state, system_id, edition, language,
+         (SELECT id FROM source_documents WHERE pdf_sha256=source_uploads.pdf_sha256)
+         FROM source_uploads WHERE id=?1",
+            [id],
+            |r| {
+                Ok(Upload {
+                    already_document: r.get(8)?,
+                    id: r.get(0)?,
+                    pdf_sha256: r.get(1)?,
+                    pdf_bytes: r.get(2)?,
+                    revision: r.get(3)?,
+                    state: r.get(4)?,
+                    metadata: Metadata {
+                        system_id: r.get(5)?,
+                        edition: r.get(6)?,
+                        language: r.get(7)?,
+                    },
+                    inspection: None,
+                    selected_pages: Vec::new(),
+                    pages: Vec::new(),
+                    job: Job {
+                        revision: 0,
+                        kind: String::new(),
+                        state: String::new(),
+                        done: 0,
+                        total: 0,
+                        reason: None,
+                    },
+                })
+            },
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
     let (inspection, selected): (Option<String>, String) = db.query_row(
-        "SELECT inspection,selected_pages FROM source_uploads WHERE id=?1",
-        [id],
+        "SELECT CASE WHEN ?2 THEN inspection END, selected_pages FROM source_uploads WHERE id=?1",
+        params![id, inspection_needed],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     u.inspection = inspection.as_deref().map(parse).transpose()?;
     u.selected_pages = parse(&selected)?;
-    u.job=db.query_row("SELECT upload_revision,kind,state,pages_done,pages_total,reason FROM source_jobs WHERE upload_id=?1",[id],|r|Ok(Job {revision:r.get(0)?,kind:r.get(1)?,state:r.get(2)?,done:r.get(3)?,total:r.get(4)?,reason:r.get(5)?}))?;
-    let mut query=db.prepare("SELECT pdf_page,rendered_revision,png_sha256,png_bytes,width_px,height_px,dpi,width_points,height_points,transform,stats,settings,text_sha256,text_bytes,renderer_crate_version,mupdf_version FROM source_upload_pages WHERE upload_id=?1 ORDER BY pdf_page")?;
+    u.job = db.query_row(
+        "SELECT upload_revision, kind, state, pages_done, pages_total, reason
+         FROM source_jobs WHERE upload_id=?1",
+        [id],
+        |r| {
+            Ok(Job {
+                revision: r.get(0)?,
+                kind: r.get(1)?,
+                state: r.get(2)?,
+                done: r.get(3)?,
+                total: r.get(4)?,
+                reason: r.get(5)?,
+            })
+        },
+    )?;
+    u.pages = load_pages(db, id)?;
+    Ok(u)
+}
+fn load_pages(db: &Connection, id: &str) -> Result<Vec<PageModel>, AppError> {
+    let mut pages = Vec::new();
+    let mut query = db.prepare(
+        "SELECT pdf_page, rendered_revision, png_sha256, png_bytes, width_px, height_px, dpi,
+         width_points, height_points, transform, stats, settings, text_sha256, text_bytes,
+         renderer_crate_version, mupdf_version FROM source_upload_pages
+         WHERE upload_id=?1 ORDER BY pdf_page",
+    )?;
     let rows = query.query_map([id], |r| {
         Ok((
             PageModel {
@@ -992,7 +1355,7 @@ fn load(db: &Connection, id: &str) -> Result<Upload, AppError> {
         page.transform = parse(&transform)?;
         page.stats = parse(&stats)?;
         page.settings = parse(&settings)?;
-        u.pages.push(page);
+        pages.push(page);
     }
-    Ok(u)
+    Ok(pages)
 }
