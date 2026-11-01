@@ -127,6 +127,7 @@ valid.
      18), and route A's scores are reported, with no bar.
    - Ten synthetic hostile or odd PDFs (rotated, no text layer, broken tags): no crash, correct
      probe result.
+   Own plan: `docs/source-route-a-plan.md`.
 5. **Route C: online vision model** (own plan). Key storage (a 0600 file outside the database and
    backups, never shown back, replace and delete) and an HTTPS transport for rig-core (a DEP
    decision; DEP-27's rustls stack, redirects refused, bounded responses, keys redacted from
