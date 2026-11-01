@@ -474,17 +474,43 @@ impl Files {
     }
 }
 fn normalized_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, AppError> {
-    // A restrictive umask may remove owner read/search. Check the directory by
-    // name without following links before chmod, which requires neither permission.
-    let stat =
-        rustix::fs::statat(parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+    normalized_dir_with_hook(parent, name, |_| {})
+}
+fn normalized_dir_with_hook(
+    parent: &OwnedFd,
+    name: &str,
+    mut hook: impl FnMut(u8),
+) -> Result<OwnedFd, AppError> {
+    use std::os::fd::AsRawFd;
+    hook(0);
+    // O_PATH needs no read permission, even if umask removed owner read/search.
+    // Keep this inode pinned across chmod and the subsequent readable open.
+    let pinned = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io)?;
+    let stat = rustix::fs::fstat(&pinned).map_err(io)?;
     if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
         return Err(AppError::Invalid("Invalid staging directory."));
     }
-    // The parent is private and manager operations are serialized. Use fchmodat
-    // after the no-follow check: fchmodat2/AT_SYMLINK_NOFOLLOW is not available
-    // on every supported kernel (or inside every application sandbox).
-    rustix::fs::chmodat(parent, name, Mode::RWXU, rustix::fs::AtFlags::empty()).map_err(io)?;
+    hook(1);
+    // This procfs magic link resolves to the pinned descriptor, never the mutable
+    // directory entry. Refuse if procfs is unavailable; no following-name fallback.
+    rustix::fs::chmodat(
+        rustix::fs::CWD,
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()),
+        Mode::RWXU,
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(|_| {
+        AppError::Invalid(
+            "The umask removes owner permissions; safe directory normalization is unavailable.",
+        )
+    })?;
+    hook(2);
     let dir = rustix::fs::openat(
         parent,
         name,
@@ -497,6 +523,41 @@ fn normalized_dir(parent: &OwnedFd, name: &str) -> Result<OwnedFd, AppError> {
         return Err(AppError::Invalid("Staging directory changed."));
     }
     Ok(dir)
+}
+
+#[test]
+fn normalization_never_chmods_a_swapped_symlink_target() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    for point in 0..=2 {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path();
+        std::fs::create_dir(path.join("directory")).unwrap();
+        std::fs::write(path.join("target"), b"unchanged").unwrap();
+        std::fs::set_permissions(path.join("target"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let parent = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let result = normalized_dir_with_hook(&parent, "directory", |at| {
+            if at == point {
+                std::fs::rename(path.join("directory"), path.join("pinned")).unwrap();
+                symlink(path.join("target"), path.join("directory")).unwrap();
+            }
+        });
+        assert!(result.is_err(), "swap point {point}");
+        assert_eq!(
+            std::fs::metadata(path.join("target"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "swap point {point} changed target mode"
+        );
+    }
 }
 fn remove_entry(dir: &OwnedFd, name: &std::ffi::OsStr) -> Result<(), AppError> {
     let stat = rustix::fs::statat(dir, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;

@@ -632,6 +632,10 @@ fn mupdf_stays_in_worker() {
         let content = std::fs::read_to_string(&path).unwrap();
         if path.file_name().is_some_and(|n| n == "Cargo.toml") {
             assert!(!cargo_alias_reference(&content), "{}", path.display());
+        } else if path == root.join("Cargo.lock") {
+            // Included as provenance/test data, never Rust: include! rejects
+            // non-.rs targets. Native package names in the lockfile are expected.
+            assert!(syn::parse_file(&content).is_err());
         } else if !path.starts_with(&worker) {
             assert!(!native_rust_reference(&content), "{}", path.display());
             assert!(!operations.is_match(&content), "{}", path.display());
@@ -646,9 +650,11 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
             Err(error) => panic!("{}: {error}", path.display()),
         };
-        if metadata.is_symlink() {
-            return;
-        }
+        assert!(
+            !metadata.is_symlink(),
+            "symlink in source boundary: {}",
+            path.display()
+        );
         if metadata.is_file() {
             if path.file_name().is_some_and(|n| n == "Cargo.toml")
                 || path.extension().is_some_and(|extension| extension == "rs")
@@ -667,17 +673,196 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         "src",
         "tests",
         "examples",
+        "benches",
         "tools",
         "build.rs",
         "Cargo.toml",
     ] {
         visit(&root.join(name), &mut files);
     }
+    let manifests: Vec<_> = files
+        .iter()
+        .filter(|p| p.file_name().unwrap() == "Cargo.toml")
+        .cloned()
+        .collect();
+    for manifest in manifests {
+        for path in cargo_source_paths(&manifest) {
+            let target = boundary_target(root, manifest.parent().unwrap(), &path);
+            assert!(
+                target.is_file(),
+                "missing Cargo source: {}",
+                target.display()
+            );
+            files.push(target);
+        }
+    }
+    assert!(
+        files.contains(&root.join("src/main.rs")),
+        "source walk missed src/main.rs"
+    );
+    // Follow literal references too. include_str! assets are scanned as text;
+    // include!/path sources must be Rust within the scanned source roots.
+    let scanned = files.clone();
+    let mut pending: Vec<_> = files
+        .iter()
+        .filter(|p| p.file_name().unwrap() != "Cargo.toml")
+        .cloned()
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) || path.starts_with(root.join("src/sources/worker")) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        for (literal, rust) in boundary_references(&content) {
+            let target = boundary_target(root, path.parent().unwrap(), &literal);
+            if rust {
+                assert!(
+                    target.extension().is_some_and(|e| e == "rs"),
+                    "non-Rust source: {literal}"
+                );
+                assert!(
+                    scanned.contains(&target),
+                    "source outside scanned roots: {literal}"
+                );
+                pending.push(target.clone());
+            }
+            assert!(
+                target.is_file(),
+                "missing included source: {}",
+                target.display()
+            );
+            files.push(target);
+        }
+    }
+    files.sort();
+    files.dedup();
     files
 }
 
+fn cargo_source_paths(manifest: &std::path::Path) -> Vec<String> {
+    // Python 3.11+ is already required by helper checks. Use its maintained TOML
+    // parser, including quoted keys, inline tables and multiline strings.
+    let output = std::process::Command::new("python3")
+        .args([
+            "-I",
+            "-c",
+            r"
+import json, sys, tomllib
+with open(sys.argv[1], 'rb') as source:
+    doc = tomllib.load(source)
+paths = []
+build = doc.get('package', {}).get('build')
+if isinstance(build, str):
+    paths.append(build)
+lib = doc.get('lib', {})
+if 'path' in lib:
+    paths.append(lib['path'])
+for kind in ('bench', 'bin', 'example', 'test'):
+    for target in doc.get(kind, []):
+        if 'path' in target:
+            paths.append(target['path'])
+print(json.dumps(paths))
+",
+        ])
+        .arg(manifest)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}: {}",
+        manifest.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn boundary_target(
+    root: &std::path::Path,
+    base: &std::path::Path,
+    literal: &str,
+) -> std::path::PathBuf {
+    use std::path::Component;
+    assert!(
+        !std::path::Path::new(literal).is_absolute(),
+        "absolute source path: {literal}"
+    );
+    let mut target = base.to_path_buf();
+    for part in std::path::Path::new(literal).components() {
+        match part {
+            Component::CurDir => (),
+            Component::ParentDir => {
+                assert!(
+                    target != root && target.starts_with(root),
+                    "source path escapes repository: {literal}"
+                );
+                target.pop();
+            }
+            Component::Normal(name) => {
+                target.push(name);
+                if let Ok(metadata) = std::fs::symlink_metadata(&target) {
+                    assert!(
+                        !metadata.is_symlink(),
+                        "symlink in source path: {}",
+                        target.display()
+                    );
+                }
+            }
+            _ => panic!("invalid source path: {literal}"),
+        }
+    }
+    target
+}
+
+fn boundary_references(content: &str) -> Vec<(String, bool)> {
+    use proc_macro2::{TokenStream, TokenTree};
+    fn walk(stream: TokenStream, attribute: bool, references: &mut Vec<(String, bool)>) {
+        let tokens: Vec<_> = stream.into_iter().collect();
+        for (index, token) in tokens.iter().enumerate() {
+            if let TokenTree::Ident(ident) = token {
+                let name = ident.to_string();
+                if attribute
+                    && name == "path"
+                    && matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=')
+                {
+                    let Some(TokenTree::Literal(literal)) = tokens.get(index + 2) else {
+                        panic!("nonliteral path attribute");
+                    };
+                    let path: syn::LitStr = syn::parse_str(&literal.to_string()).unwrap();
+                    references.push((path.value(), true));
+                }
+                if matches!(name.as_str(), "include" | "include_str")
+                    && matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+                {
+                    let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
+                        panic!("invalid include macro");
+                    };
+                    let path: syn::LitStr = syn::parse2(group.stream())
+                        .expect("include must use a literal source path");
+                    references.push((path.value(), name == "include"));
+                }
+            }
+            if let TokenTree::Group(group) = token {
+                let is_attribute = attribute
+                    || (group.delimiter() == proc_macro2::Delimiter::Bracket
+                        && index > 0
+                        && matches!(&tokens[index - 1], TokenTree::Punct(p) if p.as_char() == '#')
+                        && matches!(group.stream().into_iter().next(), Some(TokenTree::Ident(i)) if i == "path" || i == "cfg_attr"));
+                walk(group.stream(), is_attribute, references);
+            }
+        }
+    }
+    let mut references = Vec::new();
+    walk(
+        content.parse().expect("invalid Rust tokens"),
+        false,
+        &mut references,
+    );
+    references
+}
+
 #[test]
-fn boundary_walk_is_scoped_and_skips_symlinks() {
+fn boundary_walk_is_scoped_and_rejects_symlinks() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -690,6 +875,7 @@ fn boundary_walk_is_scoped_and_skips_symlinks() {
         "examples/demo.rs",
         "tools/helper.rs",
         "tools/Cargo.toml",
+        "benches/speed.rs",
     ];
     for name in expected
         .into_iter()
@@ -699,9 +885,6 @@ fn boundary_walk_is_scoped_and_skips_symlinks() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "").unwrap();
     }
-    symlink(root.join("outside"), root.join("src/linked-dir")).unwrap();
-    symlink(root.join("stray.rs"), root.join("src/linked.rs")).unwrap();
-    symlink(root.join("missing"), root.join("tools/broken.rs")).unwrap();
     let outside = root.join("outside");
     std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o0)).unwrap();
     // Restore permissions even when the old walk panics, so TempDir can clean up.
@@ -712,6 +895,95 @@ fn boundary_walk_is_scoped_and_skips_symlinks() {
     let mut expected = expected.map(|name| root.join(name));
     expected.sort();
     assert_eq!(walked, expected);
+    for (target, link) in [
+        ("outside", "src/linked-dir"),
+        ("stray.rs", "src/linked.rs"),
+        ("missing", "tools/broken.rs"),
+    ] {
+        symlink(root.join(target), root.join(link)).unwrap();
+        assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+        std::fs::remove_file(root.join(link)).unwrap();
+    }
+}
+
+#[test]
+fn boundary_cargo_targets_are_scanned_and_cannot_escape() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "").unwrap();
+    std::fs::create_dir(root.join("custom")).unwrap();
+    for section in ["[lib]", "[[bench]]", "[[bin]]", "[[example]]", "[[test]]"] {
+        std::fs::write(root.join("custom/target.rs"), "").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("{section}\npath = 'custom/target.rs'\n"),
+        )
+        .unwrap();
+        assert!(boundary_files(root).contains(&root.join("custom/target.rs")));
+        for escape in ["../outside.rs", "/outside.rs"] {
+            std::fs::write(
+                root.join("Cargo.toml"),
+                format!("{section}\npath = '{escape}'\n"),
+            )
+            .unwrap();
+            assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+        }
+    }
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nbuild = 'custom/target.rs'\n",
+    )
+    .unwrap();
+    assert!(boundary_files(root).contains(&root.join("custom/target.rs")));
+}
+
+#[test]
+fn boundary_rejects_hidden_rust_sources() {
+    for text in [
+        "#[path = \"../other/native.rs\"] mod bypass;",
+        "include!(\"x.txt\");",
+        "#[path = \"x.inc\"] mod bypass;",
+        "#[cfg_attr(unix, path = r#\"../other/native.rs\"#)] mod bypass;",
+        "include!(\"/outside.rs\");",
+        "include_str!(\"../outside.txt\");",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), text).unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(dir.path())).is_err(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn boundary_scans_included_text_and_requires_main() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("Cargo.toml"), "").unwrap();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+    std::fs::create_dir(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "const TEXT: &str = include_str!(\"x.txt\");",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/x.txt"), "use mupdf;").unwrap();
+    let paths = boundary_files(root);
+    assert!(paths.contains(&root.join("src/x.txt")));
+    assert!(
+        paths
+            .iter()
+            .any(|p| native_rust_reference(&std::fs::read_to_string(p).unwrap()))
+    );
+    // Tokens in strings/comments are data, not source redirection.
+    assert_eq!(
+        boundary_references("// include!(\"x.txt\");\nconst X: &str = r#\"#[path = \"x.inc\"]\"#;"),
+        Vec::<(String, bool)>::new()
+    );
 }
 
 fn operations_reference() -> regex::Regex {
@@ -734,7 +1006,7 @@ fn native_rust_reference(text: &str) -> bool {
     // Only the explicit provenance field spellings are exempt. Keep whole-token
     // matching for native crate names, including comments/raw identifiers in imports.
     let provenance =
-        regex::Regex::new(r#"\bmupdf\s*:\s*(?:String\b|"[^"]*"\.into\(\))|\bdocument\.mupdf\b"#)
+        regex::Regex::new(r#"\bmupdf\s*:\s*(?:String\b|"[^"]*"\.into\(\)|worker::MUPDF_VERSION\.into\(\))|\bdocument\.mupdf\b"#)
             .unwrap();
     native_reference().is_match(&provenance.replace_all(text, "provenance"))
 }
@@ -811,6 +1083,7 @@ fn boundary_matchers_cover_aliases_and_imports() {
         "use crate::sources::worker::{inspect, render, Cancel};",
         "worker::{Spec, records::read_inspection}",
         "pub mupdf: String",
+        "mupdf: worker::MUPDF_VERSION.into()",
         "document.mupdf",
         "\"mupdf\"",
         "mupdf_error",

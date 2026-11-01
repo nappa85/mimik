@@ -628,29 +628,36 @@ fn create_returns_committed_upload_id_when_launch_fails() {
 fn private_files_survive_restrictive_umask() {
     const CHILD: &str = "MIMIK_TEST_UPLOAD_UMASK_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new("sh")
-            .args(["-c", "umask 0477 && exec \"$@\"", "umask-child"])
-            .arg(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "sources::uploads::tests::private_files_survive_restrictive_umask",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8(output.stdout).unwrap();
-        assert!(
-            output.status.success(),
-            "{stdout}\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            stdout
-                .lines()
-                .any(|line| line.starts_with("test result: ok. 1 passed;")),
-            "{stdout}"
-        );
+        for mask in ["0477", "0277"] {
+            let output = std::process::Command::new("sh")
+                .args([
+                    "-c",
+                    "umask \"$1\" && shift && exec \"$@\"",
+                    "umask-child",
+                    mask,
+                ])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sources::uploads::tests::private_files_survive_restrictive_umask",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed;")),
+                "{stdout}"
+            );
+        }
         return;
     }
     // A separate test process avoids changing any parallel test's process-global umask.
