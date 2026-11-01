@@ -12,6 +12,17 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   Gaps: line `dir`, per-character `bidi`, nested structure traversal and association-linked
   table span attributes. `blocks()` is top-level only; ban `structured()` because it maps
   Struct blocks to `Other` and silently drops codes that are not valid Rust `char`s.
+  Decide either a worker-only wrapper for line `dir` and character `bidi`, retaining both as
+  line/glyph metadata with serialized round trips in the RTL fixture, or direction derived
+  from origin/quad sequence with no bidi in v1; in the latter case RTL/vertical goldens test
+  the frozen direction derivation. Do not promise bidi without the wrapper.
+  `TextBlock::r#type()` unwraps unknown block types: check the raw type before calling it or
+  treat the panic as a contained worker failure, never a successful or partial reading.
+- Exercise two distinct clipping cases in 4a0: text scissored by an in-page clip (and glyphs
+  partly/wholly outside the displayed page), and text used as a clipping path in render modes
+  4–7. Compare `CLIP` off/on against renders and raw glyph counts/flags. In MuPDF 1.27.2,
+  `FZ_STEXT_CLIPPED` marks clip-mode text from `fz_stext_clip_text`/`clip_stroke_text`, not
+  scissored-away glyphs; mode 7 can be `FILLED|CLIPPED`. Freeze the owner's `CLIP` choice below.
 - Check only aggregate catalog `tagged` status for the two local bar PDFs; this does not
   establish usable associations. Inform the owner's scope decision: recommend deferring tags
   if both are untagged, otherwise retain a separate tag slice and assess its cost. Step 4
@@ -48,15 +59,23 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   character flags. Keep image rectangles for coverage, not embedded image bytes. Transform
   all geometry once to the staged displayed space. Record origin, argb, `FILLED`, `STROKED`,
   `CLIPPED`, `SYNTHETIC` and CID/GID status per glyph, including undecodable glyphs.
+  A glyph with `UNICODE_IS_CID`, even if its numeric value is a valid Unicode scalar, or with
+  `char()` returning `None`, is always undecodable: emit U+FFFD as text and retain the CID only
+  diagnostically. Retain line direction and character bidi according to the 4a0 wrapper decision.
+  Interpret `CLIPPED` as clip-mode text, possibly invisible independently of `FILLED`/`STROKED`.
+  Compute `off_page`/`partly_off_page` from glyph quads against the displayed page box, separately
+  from MuPDF flags; retain the original quads and these explicit statuses.
   Initial 4a uses `tag_status: not_collected` even when the catalog says tagged.
   Preserve ligatures/whitespace explicitly; no spelling fixes, dehyphenation, digit/sign
   normalization or fabricated Unicode from CIDs.
 - Pin 4a's exact flags to `PRESERVE_LIGATURES | PRESERVE_WHITESPACE | PRESERVE_IMAGES |
   USE_CID_FOR_UNKNOWN_UNICODE`. `USE_GID_FOR_UNKNOWN_UNICODE` is off: CID or GID may serve as
-  diagnostics, never both, and neither is emitted as text. `CLIP` is off to retain clipped
-  glyphs diagnostically; verify `CLIPPED` observability with a clipping fixture in 4a0 and
-  resolve any wrapper gap. `INHIBIT_SPACES` is off: inferred spaces are allowed and flagged
-  synthetic. `DEHYPHENATE`, `SEGMENT`, `TABLE_HUNT`, `COLLECT_STRUCTURE` and all other flags
+   diagnostics, never both, and neither is emitted as text. Proposed `CLIP` is off, subject to
+   the owner's 4a0 choice: out-of-clip/page glyphs survive without a MuPDF clipping flag;
+   Mimik flags page-boundary status and clip-mode text, but cannot detect in-page scissor
+   clipping. With `CLIP` on, scissored glyphs are silently dropped. `INHIBIT_SPACES` is off:
+   inferred spaces are allowed and flagged synthetic.
+   `DEHYPHENATE`, `SEGMENT`, `TABLE_HUNT`, `COLLECT_STRUCTURE` and all other flags
   are off. Preserve raw ligature scalars; search may expand them using the existing normalizer,
   but scoring uses only frozen IT scorer normalization. Search never changes raw/bar text.
 - Extend 3a framing with `reading_page` (page number, schema version, length) and a matching
@@ -78,16 +97,35 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   dangling reference.
   The 8 MiB byte cap also applies when count caps allow more. Reuse bounded collection/string
   visitors and limited serialization; all floats finite, sizes positive, directions valid,
-  boxes ordered and inside page, quads valid or explicitly clipped. Keep clipped-away/zero-area
-  glyph diagnostics; do not invent a positive-area unit for them. Check containment and
+   boxes ordered and quads valid. Raw glyph quads/bounds may extend outside the displayed page
+   only with the matching Mimik-computed off-page/partly-off-page status; raw line/block bounds
+   may enclose these glyphs outside the page too. Derived unit bounds remain inside the page.
+   Keep off-page/zero-area glyph diagnostics; do not invent a positive-area unit for them.
+   Validate boundary statuses from canonical quads after conversion. Check containment and
   aggregate counts on both sides of the pipe. No source text in diagnostics or logs.
 - Keep render's existing `text` line-array contract for 3c proposals. Add bounded numeric
   diagnostics to render/probe stats: words, font count, fonts without `/ToUnicode`, undecodable
   glyphs, coverage and completeness. Use the existing bounded resource scan (Forms, patterns,
   appearances); distinguish absent `/ToUnicode` from failed decoding, including standard
   encodings and Type3/scan gaps. Missing-map counts come from the resource scan, not just
-  fonts encountered in extracted text. Steps 3b/3c are unmerged: missing stats mean
-  “not measured, re-render”, never zero; no old-render probe job.
+   fonts encountered in extracted text. Steps 3b/3c are unmerged: missing stats mean
+   “not measured, re-render”, never zero; no old-render probe job.
+- Require a bounded diagnostic-only `StructTreeRoot`/MCID walk in 4a's probe, even while
+  `tag_status` is `not_collected`. Use MuPDF in the worker to inspect structure references and
+  page marked content, never to supply glyph membership or resolve text associations.
+  “Unresolved” means an MCID with no matching marked content on its referenced page, a dangling
+  `/Pg` or `/K` reference, or an ancestor cycle. Compare page-scoped MCIDs (including their
+  content-stream scope); a missing `/Pg` may inherit a valid ancestor page. Legal cross-page
+  links and shared subtrees are not unresolved. Use distinct-object visitation plus an active
+  ancestor stack, ≤40,000 distinct objects per run and depth ≤32; bound marked-content scanning
+  by the same worker CPU/wall/memory limits. Count unresolved links/cycles without logging text.
+  Report diagnostic completeness separately from association `tag_status`: complete only when
+  all relevant structure references and page marked content have been examined, or verified
+  absent. On a walk/count/depth limit, stop safely and report incomplete with the limit reason,
+  never zero problems or clean tags; unavailable/unsupported scans are likewise incomplete.
+  Incomplete diagnostics trigger B/C; worker deadline/resource failure fails the run without
+  publishing partial raw. Recoverable unresolved/cyclic fixtures must return bounded diagnostics
+  and valid block text, making fixtures 6 and 7 deliverable in 4a independently of the tag slice.
 
 ## 4b. One raw-reading → units contract
 
@@ -113,7 +151,8 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   optional later versioned slice below.
 - Text is glyph Unicode in recorded order, with U+FFFD for explicit undecodable glyphs; escape
   it before fixed HTML wrapping. Preserve line breaks with fixed markup.
-  Geometry is the clipped bounding rectangle of member glyphs, in fixed
+   `ACCURATE_BBOXES` is off: glyph quads are font-metric boxes, not ink bounds.
+   Geometry is the page-clipped bounding rectangle of member glyphs, in fixed
   top-left clockwise point order. Refuse a nonempty unit with no positive-area geometry.
   Stable IDs use one-based PDF page and the block's index in the single page-local node space
   (`/page/<one-based-pdf-index>/a/<node-index>`), never `owner:` or a separate per-kind counter.
@@ -238,9 +277,11 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   PNG endpoints clearly labelled. Any hints built for A/B or later C suppress excluded glyphs
   before use, including crossing-line portions; never filter the stored raw reading. Source
   suggestions, owner additions and ordinary accept/correct/reject/completion continue unchanged.
-  Flag every unit containing invisible (neither `FILLED` nor `STROKED`) or `CLIPPED` glyphs;
-  include per-glyph diagnostic visibility. Test a render-mode-3 text layer and mixed visible/
-  invisible content against original renders; invisible text is not silently treated as evidence.
+   Flag every unit containing invisible (neither `FILLED` nor `STROKED`), possibly invisible
+   clip-mode (`CLIPPED`, including mode 7's `FILLED|CLIPPED`), off-page or partly-off-page glyphs;
+   include per-glyph diagnostic visibility/boundary status. Test render modes 3–7 and mixed
+   visible/invisible content against original renders; possible invisibility is not silently
+   treated as evidence. With `CLIP` off, in-page scissored text cannot be identified by these flags.
 
 ## Probe: freeze before manual measurements
 
@@ -256,8 +297,9 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   conservative warning accurately. No-text and unknown diagnostics never recommend A.
   B is local/Linux and C requires explicit online consent; unavailable routes stay disabled.
   `not_collected` is explicit, not a malformed-tag claim or automatic B/C trigger. A bounded
-  diagnostic-only tag scan can report broken links/cycles independently of association status;
-  these warnings also trigger B/C. It never supplies glyph membership.
+   diagnostic-only tag scan is mandatory in 4a and reports unresolved links/cycles and completeness
+   independently of association status; these warnings also trigger B/C. It never supplies glyph
+   membership.
 - Show per-page recommendations and a selection summary on the rendered upload **before route
   choice**; persist the exact rule/version/result with the created reading and show it on its
   page list/review. Extend render stats; missing measurements require re-rendering.
@@ -317,6 +359,7 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 - **4a0:** API/wrapper decision, aggregate tag status, IT reference/scorer inspection, aggregate
   size measurements and owner choices; freeze encoding/flags/versions/thresholds/bar inputs.
 - **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe.
+  The bounded StructTreeRoot/MCID diagnostic walk and fixtures 6/7 are required here.
   Independent review before completion; fake-reader max/over-limit/cyclic-reference tests,
   live sandbox and ten PDFs.
 - **4b:** v3/reading schema and one derivation function. Independent review; synthetic goldens,
@@ -346,17 +389,25 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 ## Decisions the owner must make
 
 - **Wrapper gaps:** options: approve a narrow exception-safe worker-only wrapper for line
-  `dir`/character `bidi`, nested structures and any required span accessor; or change renderer
-  pin. Recommendation: retain the pin and use the smallest reviewed wrapper for demonstrated
-  gaps; safe quads/font/flags need none. Resolve clipping diagnostics in 4a0; stop if required
-  fidelity is unavailable. Do not substitute `structured()` or a second parser.
+   `dir`/character `bidi`, nested structures and any required span accessor; or change renderer
+   pin. For v1 direction specifically, either wrap line `dir`/character `bidi` and retain both
+   metadata fields with RTL serialized round trips, or freeze direction derived from origin/quad
+   sequence, exclude bidi from v1 and test derived direction in RTL/vertical goldens.
+   Recommendation: retain the pin and use the smallest reviewed wrapper for demonstrated gaps;
+   safe quads/font/flags need none. Freeze the direction choice in 4a0; stop if required fidelity
+   is unavailable. Do not substitute `structured()` or a second parser.
 - **Tag partitioning:** options: keep a separate versioned tag slice in step 4, or amend the
   umbrella to defer it. Recommendation: use 4a0's aggregate statuses—defer if both bar PDFs
   are untagged; otherwise retain and cost the slice. Initial 4a remains block-only either way.
 - **Flags/ligatures/spaces:** options: approve the exact 4a flag set above with raw ligatures
   and flagged inferred spaces, or choose different explicit settings before freezing.
-  Recommendation: approve that set, CID diagnostics only, `CLIP` off and no dehyphenation;
-  search expansion is separate from frozen scorer normalization. A later change is versioned.
+   Recommendation: approve that set, CID diagnostics only, `CLIP` off and no dehyphenation;
+   search expansion is separate from frozen scorer normalization. A later change is versioned.
+- **Scissor clipping:** choose `CLIP` off (retain out-of-clip/page glyphs, flag clip-mode text
+  and Mimik-computed page-boundary status, but in-page scissoring is undetectable) or `CLIP` on
+  (match rendered clipping by silently dropping scissored glyphs, with no dropped-glyph record).
+  Recommendation: off to preserve diagnostic text, with the limitation visible to the Owner;
+  `CLIPPED` never identifies scissored-away text. Freeze the choice with the 4a0 fixtures/flags.
 - **Bare Bones gold:** options: Owner transcribes/checks it, or appoints a local human
   transcriber with Owner checking. Recommendation: delegate transcription if convenient, Owner
   signs off every row and the page set. Name that person and settle the exact IT-compatible
@@ -376,7 +427,11 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 - Glyph-rich raw data can hit 32 MiB before the 64-page cap; refuse with a smaller-selection
   remedy. Measure memory under the existing worker limits before increasing any bound.
 - Image coverage misses art drawn as vector paths; missing maps over-warn standard fonts.
-  The frozen IT probe check can fail and require a separately reviewed algorithm revision.
+   The frozen IT probe check can fail and require a separately reviewed algorithm revision.
+- With proposed `CLIP` off, in-page scissor clipping is undetectable: retained text may not
+  appear in the render and has no MuPDF clipping flag. Page-boundary and clip-mode flags cannot
+  close this gap; review against original renders remains necessary. `CLIP` on instead loses
+  scissored glyphs silently and cannot provide complete dropped-text diagnostics.
 - SQLite BLOB copies/journaling block the single Store connection (C6); measure transaction
   duration and disk headroom on maximum synthetic sources. Do not promise filesystem/SQL
   atomicity: the receipt, post-commit deletion and restart reconciliation bridge it.
