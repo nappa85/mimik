@@ -492,6 +492,8 @@ impl Uploads {
         let mut random = [0; 16];
         getrandom::fill(&mut random).map_err(|_| AppError::Worker)?;
         let id = hex::encode(random);
+        let mut fingerprint_key = [0; 32];
+        getrandom::fill(&mut fingerprint_key).map_err(|_| AppError::Worker)?;
         self.0.files.create(&id)?;
         let result = (|| {
             self.0.files.publish_spool(
@@ -507,8 +509,8 @@ impl Uploads {
                 tx.execute(
                     "INSERT INTO source_uploads
                      (id, pdf_sha256, pdf_bytes, actor, actor_id, actor_epoch, session_digest,
-                      created_at, updated_at, state, system_id, edition, language)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,'uploaded',?9,?10,?11)",
+                       created_at, updated_at, state, system_id, edition, language, fingerprint_key)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,'uploaded',?9,?10,?11,?12)",
                     params![
                         id,
                         sha256,
@@ -520,7 +522,8 @@ impl Uploads {
                         t,
                         metadata.system_id,
                         metadata.edition,
-                        metadata.language
+                        metadata.language,
+                        fingerprint_key.as_slice()
                     ],
                 )?;
                 queue(tx, &id, 1, "inspect", 0)?;
@@ -874,6 +877,9 @@ impl Uploads {
             return Err(AppError::Conflict);
         }
         u.inspection.as_ref().ok_or(AppError::Conflict)?;
+        if let Some(e) = &u.exclusion {
+            exclusions::validate(e, &u).map_err(|_| AppError::Conflict)?;
+        }
         Ok(StagedContract {
             contract_version: "mimik-staged-v1".into(),
             pdf_sha256: u.pdf_sha256,
@@ -1451,6 +1457,9 @@ fn settled_state(upload: &Upload) -> &'static str {
     }
 }
 fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), AppError> {
+    if revision != u.revision {
+        return Err(AppError::Conflict);
+    }
     if u.exclusion
         .as_ref()
         .is_some_and(|e| e.pages.iter().any(|n| !selected.contains(n)))
@@ -1458,9 +1467,6 @@ fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), Ap
         return Err(AppError::Invalid(
             "Replace or remove the exclusion before deselecting its pages.",
         ));
-    }
-    if revision != u.revision {
-        return Err(AppError::Conflict);
     }
     let Some(i) = u.inspection.as_ref() else {
         return if selected.is_empty() {

@@ -25,6 +25,184 @@ fn exclusion() -> exclusions::Exclusion {
 }
 
 #[test]
+fn exclusion_confirmation_proposal_does_not_hold_store_mutex() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    let mut e = exclusion();
+    e.proposal_fingerprint = Some(
+        m.propose_exclusions(&o.auth, &id, revision).unwrap()[0]
+            .fingerprint
+            .clone(),
+    );
+    let store = m.0.store.clone();
+    exclusions::PROPOSAL_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                store
+                    .upload_storage(|db| {
+                        db.query_row("SELECT 1", [], |_| Ok(()))?;
+                        Ok(())
+                    })
+                    .unwrap();
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+                "Store user blocked during proposal computation"
+            );
+        }));
+    });
+    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+}
+
+#[test]
+fn exclusion_fingerprints_are_upload_private_and_discard_removes_key() {
+    let (_dir, m, o, _) = fixture();
+    let mut fingerprints = Vec::new();
+    for _ in 0..2 {
+        let id = create(&m, &o);
+        selected(&m, &o, &id, &[1, 2, 3]);
+        start(&m, &o, &id);
+        wait(&m);
+        let revision = m.read(&id).unwrap().revision;
+        let first = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+        let second = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+        assert_eq!(first[0].fingerprint, second[0].fingerprint);
+        assert_ne!(first[0].fingerprint, hash(first[0].text.as_bytes()));
+        let key =
+            m.0.store
+                .upload_storage(|db| {
+                    let key: Vec<u8> = db.query_row(
+                        "SELECT fingerprint_key FROM source_uploads WHERE id=?1",
+                        [&id],
+                        |r| r.get(0),
+                    )?;
+                    assert_eq!(key.len(), 32);
+                    Ok(key)
+                })
+                .unwrap();
+        assert!(
+            !serde_json::to_string(&m.contract(&id).unwrap())
+                .unwrap()
+                .contains(&hex::encode(key))
+        );
+        fingerprints.push(first[0].fingerprint.clone());
+        m.discard(&o, &id).unwrap();
+        m.0.store
+            .upload_storage(|db| {
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM source_uploads", [], |r| r
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    assert_ne!(fingerprints[0], fingerprints[1]);
+}
+
+#[test]
+fn exclusion_migration_removes_legacy_guessable_fingerprints() {
+    let (dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
+        .unwrap();
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_upload_exclusions SET proposal_fingerprint=?1",
+                [hash(b"test")],
+            )?;
+            db.execute_batch(
+                "ALTER TABLE source_uploads DROP COLUMN fingerprint_key; PRAGMA user_version=26;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let upgraded = Store::open(&dir.path().join("db")).unwrap();
+    upgraded
+        .upload_storage(|db| {
+            let fingerprint: Option<String> = db.query_row(
+                "SELECT proposal_fingerprint FROM source_upload_exclusions",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(fingerprint.is_none());
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+                27
+            );
+            Ok(())
+        })
+        .unwrap();
+    // Existing staging acquires a fresh getrandom key on first use.
+    let proposed = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    assert_ne!(proposed[0].fingerprint, hash(b"test"));
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+}
+
+#[test]
+fn exclusion_contract_refuses_a_missing_deselected_rendering() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
+        .unwrap();
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=3",
+                [&id],
+            )?;
+            db.execute(
+                "UPDATE source_uploads SET selected_pages='[1,2]' WHERE id=?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(m.contract(&id).is_err());
+}
+
+#[test]
+fn exclusion_propose_refuses_queued_and_running_jobs() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    for state in ["queued", "running"] {
+        m.0.store
+            .upload_storage(|db| {
+                db.execute(
+                    "UPDATE source_jobs SET state=?2 WHERE upload_id=?1",
+                    params![id, state],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            m.propose_exclusions(&o.auth, &id, revision),
+            Err(AppError::Conflict)
+        ));
+    }
+}
+
+#[test]
 fn exclusion_revision_replace_remove_concurrent_writes_and_cascade() {
     let (_dir, m, o, _) = fixture();
     let id = create(&m, &o);
@@ -69,6 +247,10 @@ fn exclusion_revision_replace_remove_concurrent_writes_and_cascade() {
         [1., 2., 6., 5.]
     );
     assert!(m.set(&o, &id, revision, &metadata(), &[1, 2]).is_err());
+    assert!(matches!(
+        m.set(&o, &id, revision - 1, &metadata(), &[1, 2]),
+        Err(AppError::Conflict)
+    ));
     m.remove_exclusion(&o, &id, revision, 2, "removed").unwrap();
     assert_eq!(m.read(&id).unwrap().exclusion_revision, 3);
     assert!(m.contract(&id).unwrap().exclusion.is_none());
@@ -236,6 +418,11 @@ fn assert_private_upload_rows(m: &Uploads) {
                         };
                         assert!(!value.to_lowercase().contains("private-text-marker"));
                         assert!(!value.contains("BUYER-MARKER-NAME"));
+                        assert!(
+                            !value
+                                .to_lowercase()
+                                .contains("worker-stderr-planted-marker")
+                        );
                         if value.contains("RATIONALE-PRIVATE-MARKER") {
                             assert_eq!(table, "source_upload_exclusions");
                             rationales += 1;
@@ -253,18 +440,27 @@ fn assert_private_upload_rows(m: &Uploads) {
 fn exclusion_private_markers_do_not_escape_stdout_stderr() {
     // Capture the ordinary test harness and application stderr, including diagnostics from
     // malformed staged text and refused writes. Each child runs exactly one marker fixture.
-    for filter in [
-        "exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row",
-        "exclusion_proposal_is_current_hash_verified_and_extension_is_explicit",
-        "upload_route_filename_not_stored_and_actions_admitted",
-    ] {
+    let mut filters = vec![
+        "sources::uploads::tests::exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row",
+        "sources::uploads::tests::exclusion_proposal_is_current_hash_verified_and_extension_is_explicit",
+        "sources::uploads::tests::exclusion_worker_stderr_markers_are_discarded",
+        "auth::tests::upload_route_tests::upload_route_filename_not_stored_and_actions_admitted",
+    ];
+    if cfg!(feature = "dev-endpoint") {
+        filters.push("auth::tests::upload_route_tests::upload_route_propose_confirm_adjust_remove_displayed_boxes");
+    }
+    for filter in filters {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([filter, "--nocapture"])
+            .args([filter, "--exact", "--nocapture"])
             .output()
             .unwrap();
         assert!(
             output.status.success(),
             "Private-data fixture subprocess failed."
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "Private-data fixture did not run exactly one test."
         );
         for capture in [&output.stdout, &output.stderr] {
             let text = String::from_utf8_lossy(capture).to_lowercase();
@@ -272,6 +468,7 @@ fn exclusion_private_markers_do_not_escape_stdout_stderr() {
                 "private-text-marker",
                 "buyer-marker-name",
                 "rationale-private-marker",
+                "worker-stderr-planted-marker",
             ] {
                 assert!(
                     !text.contains(marker),
@@ -321,6 +518,49 @@ fn exclusion_history_expires_with_its_upload() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn exclusion_worker_stderr_markers_are_discarded() {
+    struct StderrWorker(bool);
+    impl Worker for StderrWorker {
+        fn inspect(&self, _: &Path, _: &Cancel) -> Result<Inspection, Reason> {
+            worker::stderr_fixture(self.0)?;
+            Ok(inspection())
+        }
+        fn render(
+            &self,
+            _: &Path,
+            _: &[Page],
+            _: &Cancel,
+            _: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
+        ) -> Result<(), Reason> {
+            unreachable!()
+        }
+    }
+    for success in [true, false] {
+        let (_dir, m, o) = fixture_worker(Arc::new(StderrWorker(success)));
+        let id = create(&m, &o);
+        let u = m.read(&id).unwrap();
+        assert_eq!(u.job.state, if success { "succeeded" } else { "failed" });
+        m.0.store
+            .upload_storage(|db| {
+                let diagnostic: Option<String> = db.query_row(
+                    "SELECT reason FROM source_jobs WHERE upload_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(diagnostic.is_none(), success);
+                assert!(
+                    !diagnostic
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains("worker-stderr-planted-marker")
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 #[test]

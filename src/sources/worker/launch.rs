@@ -730,6 +730,23 @@ fn drain_stderr(mut stderr: impl Read) {
     let _ = std::io::copy(&mut stderr, &mut std::io::sink());
 }
 
+/// Fake process exercising the production interruptible stderr drain and exit mapping.
+#[cfg(test)]
+pub(crate) fn stderr_fixture(success: bool) -> Result<(), Reason> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "i=0; while [ $i -lt 3000 ]; do printf 'WORKER-STDERR-PLANTED-MARKER\\n' >&2; i=$((i+1)); done; exit \"$1\"", "fixture", if success { "0" } else { "1" }])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stderr = Interruptible::new(child.stderr.take().unwrap(), &stop);
+    std::thread::scope(|scope| {
+        let drain = scope.spawn(move || drain_stderr(stderr));
+        let status = child.wait().unwrap();
+        drain.join().unwrap();
+        reconcile_output(status.code(), true, Ok(()), None, false, None)
+    })
+}
+
 fn reached_exec(marker: impl Read) -> bool {
     let mut bytes = Vec::new();
     marker.take(129).read_to_end(&mut bytes).is_ok()

@@ -91,6 +91,8 @@
     function visibility() {
       if (root.dataset.absent === 'true') {
         rectangle.toggleAttribute('hidden', !selected?.checked || !extension?.checked);
+      } else if (selected) {
+        rectangle.toggleAttribute('hidden', !selected.checked);
       }
       for (const grip of grips) grip.toggleAttribute('hidden', rectangle.hasAttribute('hidden'));
     }

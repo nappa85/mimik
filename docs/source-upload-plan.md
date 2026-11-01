@@ -468,8 +468,10 @@ The state machine is transactional:
 - **Restart:** `queued` and `running` jobs become `failed` ("interrupted by a restart"). The
   upload page offers "Inspect again" or "Render the remaining pages".
 - **After step 4:** when step 4 makes a source, it copies the PNGs, the page facts and the
-  exclusion's geometry and rationale into its permanent tables. It then deletes the upload's
-  folder and rows. Nothing else is copied: no text files, no proposals.
+  exclusion's geometry, rationale and opaque proposal fingerprint into its permanent tables.
+  It then deletes the upload's folder and rows, including the upload-local fingerprint key.
+  The copied fingerprint is provenance only: its secret no longer exists, so it cannot be
+  recomputed after staging deletion. No key, text files or proposals are copied.
 
 **Screens** (`/admin/materials/uploads`, strict CSP, desktop and tablet first):
 1. **Upload form:** system, edition, language, then the file, last (the field order above).

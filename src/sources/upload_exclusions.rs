@@ -4,10 +4,16 @@ use super::{
     Upload, Uploads, hash, json, now, params, parse, remaining, worker,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use unicode_normalization::UnicodeNormalization;
 
 pub type BoxPoints = [f64; 4];
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static PROPOSAL_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 /// Validated, selected, current staged page text in displayed space.
 pub struct TextPage {
@@ -71,7 +77,7 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<(i64, Option<Exclusion>)
 }
 
 impl Uploads {
-    /// Read-only proposal with Owner admission rechecked before returning private text.
+    /// Owner-only proposal with admission rechecked before returning private text.
     /// # Errors
     /// Refuses stale revisions, incomplete/currentness failures or invalid staged text.
     pub(crate) fn propose_exclusions(
@@ -89,17 +95,43 @@ impl Uploads {
         if u.revision != revision {
             return Err(AppError::Conflict);
         }
-        let proposals = self.proposals(&u)?;
+        let (proposals, _) = self.proposals(&u)?;
         self.0
             .store
             .upload_storage(|db| auth.recheck_owner(db).map(|_| ()))?;
         Ok(proposals)
     }
 
-    fn proposals(&self, u: &Upload) -> Result<Vec<Proposal>, AppError> {
-        if u.selected_pages.is_empty() || !remaining(u).is_empty() {
+    fn proposals(&self, u: &Upload) -> Result<(Vec<Proposal>, [u8; 32]), AppError> {
+        #[cfg(test)]
+        PROPOSAL_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+        if matches!(u.job.state.as_str(), "queued" | "running")
+            || u.selected_pages.is_empty()
+            || !remaining(u).is_empty()
+        {
             return Err(AppError::Conflict);
         }
+        let key = self.0.store.upload_storage(|db| {
+            let key: Option<Vec<u8>> = db.query_row(
+                "SELECT fingerprint_key FROM source_uploads WHERE id=?1",
+                [&u.id],
+                |r| r.get(0),
+            )?;
+            if let Some(key) = key {
+                return key.try_into().map_err(|_| AppError::Worker);
+            }
+            let mut key = [0; 32];
+            getrandom::fill(&mut key).map_err(|_| AppError::Worker)?;
+            db.execute(
+                "UPDATE source_uploads SET fingerprint_key=?2 WHERE id=?1",
+                params![u.id, key.as_slice()],
+            )?;
+            Ok(key)
+        })?;
         let mut pages = Vec::new();
         for page in u
             .pages
@@ -127,7 +159,7 @@ impl Uploads {
                 lines,
             });
         }
-        Ok(propose(&pages))
+        Ok((propose_keyed(&pages, &key)?, key))
     }
 
     /// Append an Owner-confirmed exclusion in displayed points. Both revisions must match.
@@ -148,25 +180,42 @@ impl Uploads {
             .gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.write(owner, |tx| {
-            let u = load_upload(tx, id, revision, exclusion_revision)?;
-            validate(exclusion, &u)?;
-            if let Some(fingerprint) = &exclusion.proposal_fingerprint {
-                let proposals = self.proposals(&u)?;
-                let matching: Vec<_> = proposals
+        let u = self.read_for_owner(&owner.auth, id)?;
+        if u.revision != revision || u.exclusion_revision != exclusion_revision {
+            return Err(AppError::Conflict);
+        }
+        validate(exclusion, &u)?;
+        let verified_key = if let Some(fingerprint) = &exclusion.proposal_fingerprint {
+            let (proposals, key) = self.proposals(&u)?;
+            let matching: Vec<_> = proposals
+                .iter()
+                .filter(|p| &p.fingerprint == fingerprint)
+                .collect();
+            if matching.is_empty() {
+                return Err(AppError::Invalid("Invalid proposal."));
+            }
+            if !extend_absent
+                && !matching
                     .iter()
-                    .filter(|p| &p.fingerprint == fingerprint)
-                    .collect();
-                if matching.is_empty() {
-                    return Err(AppError::Invalid("Invalid proposal."));
-                }
-                if !extend_absent
-                    && !matching
-                        .iter()
-                        .any(|p| exclusion.pages.iter().all(|n| p.boxes.contains_key(n)))
-                {
-                    return Err(AppError::Invalid("Confirm the absent-page warning first."));
-                }
+                    .any(|p| exclusion.pages.iter().all(|n| p.boxes.contains_key(n)))
+            {
+                return Err(AppError::Invalid("Confirm the absent-page warning first."));
+            }
+            Some(key)
+        } else {
+            None
+        };
+        self.write(owner, |tx| {
+            // The upload gate pins the staged files and page facts while proposals
+            // run outside the shared Store lock. Only scalar checks and the append
+            // belong in this transaction, not another full staging snapshot/parse.
+            let (current, excluded, key): (i64, i64, Option<Vec<u8>>) = tx.query_row(
+                "SELECT revision,coalesce((SELECT max(revision) FROM source_upload_exclusions WHERE upload_id=?1),0),fingerprint_key FROM source_uploads WHERE id=?1",
+                [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).optional()?.ok_or(AppError::SourceNotFound)?;
+            if current != revision || excluded != exclusion_revision || excluded == i64::MAX
+                || verified_key.as_ref().is_some_and(|verified| key.as_deref() != Some(verified.as_slice())) {
+                return Err(AppError::Conflict);
             }
             append(tx, owner, id, exclusion_revision + 1, exclusion, false)
         })
@@ -216,7 +265,7 @@ fn check_rationale(rationale: &str) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn validate(e: &Exclusion, u: &Upload) -> Result<(), AppError> {
+pub(super) fn validate(e: &Exclusion, u: &Upload) -> Result<(), AppError> {
     check_rationale(&e.rationale)?;
     if e.pages.is_empty()
         || e.pages.len() > 64
@@ -370,19 +419,31 @@ fn median(group: &Group, pages: &[&TextPage]) -> BoxPoints {
     })
 }
 
-/// Pure function on validated page facts and text. No paths, database or worker access.
-#[must_use]
-pub fn propose(pages: &[TextPage]) -> Vec<Proposal> {
+/// Pure, bounded proposal generation. Exhausting the comparison budget refuses
+/// the proposal instead of changing first-group semantics or returning partial results.
+fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, AppError> {
     let mut ordered: Vec<_> = pages.iter().collect();
     ordered.sort_by_key(|p| p.page);
     let mut groups: Vec<Group> = Vec::new();
-    let mut by_text: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut by_text: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     for page in &ordered {
+        // A group is eligible once per page. Newly created and already matched
+        // groups cannot be scanned again on this page. Indices retain seed order.
+        let mut available = by_text.clone();
+        let mut comparisons = 2_000_000_usize;
+        // Duplicate raw lines are common (and can be hostile). Normalize each
+        // distinct value once per page, with memory bounded by that page's text.
+        let mut normalized = BTreeMap::new();
         let mut lines: Vec<_> = page
             .lines
             .iter()
             .enumerate()
-            .map(|(index, line)| (line.bounds, normalize(&line.text), index))
+            .map(|(index, line)| {
+                let text = normalized
+                    .entry(line.text.as_str())
+                    .or_insert_with(|| normalize(&line.text));
+                (line.bounds, text.clone(), index)
+            })
             .collect();
         lines.sort_by(|a, b| box_order(a.0, b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         for (bounds, text, _) in lines {
@@ -391,18 +452,28 @@ pub fn propose(pages: &[TextPage]) -> Vec<Proposal> {
                 continue;
             }
             let candidate = fractions(bounds, page.width, page.height);
-            let candidates = by_text.entry(text.clone()).or_default();
-            if let Some(index) = candidates.iter().find(|&&i| {
-                !groups[i].boxes.contains_key(&page.page) && {
-                    // Fraction conversion and area arithmetic can put an exact 0.8 edge
-                    // a few ulps below it. Tolerate only floating-point noise.
-                    let overlap = iou(groups[i].seed, candidate);
-                    overlap >= 0.8 || (overlap - 0.8).abs() <= 4. * f64::EPSILON
+            let candidates = available.entry(text.clone()).or_default();
+            let mut matching = None;
+            for &i in candidates.iter() {
+                comparisons = comparisons.checked_sub(1).ok_or(AppError::Invalid(
+                    "Repeated-text comparison limit reached; draw an exclusion by hand.",
+                ))?;
+                // Fraction conversion and area arithmetic can put an exact 0.8 edge
+                // a few ulps below it. Tolerate only floating-point noise.
+                let overlap = iou(groups[i].seed, candidate);
+                if overlap >= 0.8 || (overlap - 0.8).abs() <= 4. * f64::EPSILON {
+                    matching = Some(i);
+                    break;
                 }
-            }) {
-                groups[*index].boxes.insert(page.page, bounds);
+            }
+            if let Some(index) = matching {
+                candidates.remove(&index);
+                groups[index].boxes.insert(page.page, bounds);
             } else {
-                candidates.push(groups.len());
+                by_text
+                    .entry(text.clone())
+                    .or_default()
+                    .insert(groups.len());
                 groups.push(Group {
                     text,
                     length,
@@ -415,13 +486,13 @@ pub fn propose(pages: &[TextPage]) -> Vec<Proposal> {
     }
     groups.retain(|g| g.boxes.len() >= 3 && g.boxes.len() * 5 >= pages.len() * 3);
     groups.sort_by(rank);
-    groups
+    Ok(groups
         .into_iter()
         .take(3)
         .map(|g| {
             let median = median(&g, &ordered);
             Proposal {
-                fingerprint: hash(g.text.as_bytes()),
+                fingerprint: fingerprint(key, &g.text),
                 text: g.text,
                 boxes: ordered
                     .iter()
@@ -446,19 +517,31 @@ pub fn propose(pages: &[TextPage]) -> Vec<Proposal> {
                                 ],
                                 p.width,
                                 p.height,
-                                0.,
+                                2.,
                             ),
                         )
                     })
                     .collect(),
             }
         })
-        .collect()
+        .collect())
+}
+
+fn fingerprint(key: &[u8; 32], text: &str) -> String {
+    hex::encode(
+        Sha256::new()
+            .chain_update(key)
+            .chain_update(text.as_bytes())
+            .finalize(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn propose(pages: &[TextPage]) -> Vec<Proposal> {
+        propose_keyed(pages, &[0; 32]).unwrap()
+    }
     fn pages(count: u32, text: &str) -> Vec<TextPage> {
         (1..=count)
             .map(|page| TextPage {
@@ -488,6 +571,67 @@ mod tests {
             page.lines[0].bounds = [3.1, 2., 41., 12.];
         }
         assert_eq!(propose(&input)[0].boxes[&1][0], 3.1 - 2.);
+    }
+    #[test]
+    fn hostile_identical_lines_are_bounded() {
+        let mut input = pages(64, "same buyer mark");
+        for page in &mut input {
+            page.lines = vec![
+                worker::records::TextLine {
+                    text: "same buyer mark".into(),
+                    bounds: [1., 2., 41., 12.],
+                };
+                20_000
+            ];
+            worker::records::validate_lines(
+                &page.lines,
+                &worker::Page {
+                    n: page.page,
+                    width: page.width,
+                    height: page.height,
+                    rotate: 0,
+                    user_unit: 1.,
+                    transform: [1., 0., 0., -1., 0., page.height],
+                    visible: [0., 0., page.width, page.height],
+                    tagged: false,
+                },
+            )
+            .unwrap();
+        }
+        // Run away from the test thread so the old quadratic algorithm fails within
+        // a bounded interval rather than hanging the entire regression invocation.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = propose(&input);
+            tx.send(result.iter().map(|p| p.boxes.len()).collect::<Vec<_>>())
+                .unwrap();
+        });
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap(),
+            [64; 3]
+        );
+    }
+    #[test]
+    fn hostile_nonmatching_geometry_refuses_without_partial_proposals() {
+        let mut input = pages(3, "same text");
+        for page in &mut input {
+            page.lines = (0..2001)
+                .map(|i| {
+                    let left = f64::from(i) / 100.;
+                    let top = f64::from(page.page) * 20.;
+                    worker::records::TextLine {
+                        text: "same text".into(),
+                        bounds: [left, top, left + 0.005, top + 1.],
+                    }
+                })
+                .collect();
+        }
+        assert!(matches!(
+            propose_keyed(&input, &[0; 32]),
+            Err(AppError::Invalid(
+                "Repeated-text comparison limit reached; draw an exclusion by hand."
+            ))
+        ));
     }
     #[test]
     fn grouping_uses_seed_iou_not_transitive_overlap_and_one_line_per_page() {
@@ -577,7 +721,7 @@ mod tests {
         input[4].lines.clear();
         let result = propose(&input);
         assert_eq!(result[0].boxes[&2], [0., 2., 84., 26.]);
-        assert_eq!(result[0].absent[&5], [1.5, 2., 41.5, 12.]);
+        assert_eq!(result[0].absent[&5], [0., 0., 43.5, 14.]);
         let mut edge = pages(3, "test");
         for page in &mut edge {
             page.lines[0].bounds = [0., 199., 100., 200.];
@@ -598,7 +742,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].boxes.len(), 3);
         assert_eq!(result[0].boxes[&1], [0., 0., 43., 14.]);
-        assert_eq!(result[0].absent[&4], [1., 2., 41., 12.]);
+        assert_eq!(result[0].absent[&4], [0., 0., 43., 14.]);
         input.push(TextPage {
             page: 6,
             width: 100.,

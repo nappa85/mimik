@@ -572,13 +572,25 @@ async fn action(
             .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
         let query = m.clone();
         let query_id = id.clone();
-        let proposals =
-            blocking(move || query.propose_exclusions(&auth, &query_id, revision)).await?;
+        let proposals = match blocking(move || query.propose_exclusions(&auth, &query_id, revision))
+            .await
+        {
+            Ok(proposals) => proposals,
+            Err(StatusCode::CONFLICT) => {
+                let mut response = (StatusCode::CONFLICT, "Wait for the upload job to finish and reload the current selection before proposing exclusions.").into_response();
+                response
+                    .extensions_mut()
+                    .insert(super::errors::ErrorDocument);
+                return Ok(response);
+            }
+            Err(status) => return Err(status),
+        };
         let mut screen = model(&state, &session, id).await?;
         if screen.upload.revision != revision {
             return Err(StatusCode::CONFLICT);
         }
         screen.editors = Screen::editors(&screen.upload, proposals);
+        screen.refresh = false;
         return materials::html(&screen);
     }
     let target = if action == "discard" {

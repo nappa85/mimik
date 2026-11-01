@@ -3,6 +3,8 @@ mod availability;
 mod launch;
 pub use availability::{Availability, availability};
 #[cfg(test)]
+pub(crate) use launch::stderr_fixture;
+#[cfg(test)]
 mod live_tests;
 #[cfg(test)]
 pub(crate) use launch::RenderHook;

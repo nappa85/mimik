@@ -218,29 +218,49 @@ substituted fonts/text statistics, metadata, and limits (64 pages, 128 MiB PNG, 
 It refuses an incomplete/outdated rendering and includes the current exclusion and its revision.
 This is staging
 only: no permanent source, review approval or evidence is created. The later source-creation
-step must consume this contract and copy only permanent page facts/images/exclusion geometry,
+step must consume this contract and copy permanent page facts/images/exclusion geometry/rationale
+and the exclusion's opaque proposal fingerprint (when present),
 then discard staging; it must not parse the PDF again or retain staging text/proposals.
+The fingerprint's upload-local secret is not in the contract and is deleted with staging;
+after that deletion the copied fingerprint is provenance only, not a recomputable text hash.
+The contract refuses exclusions naming pages without a current selected rendering, including
+page rows removed by missing-file sweeps or render replacement.
 
 ### Repeated-text proposal
 
 `Uploads::propose_exclusions` reads staged text under the publication/deletion gate, checks
 its stored byte count and SHA-256, and validates the text-line schema and page bounds again.
-It requires a complete current selection and Owner read admission before and after the read.
-The pure `exclusions::propose` function normalizes NFKC, collapses whitespace, case-folds with
+It requires a complete current selection, no queued/running job, and Owner read admission
+before and after the read. Propose responses never include an automatic refresh.
+The pure proposal function normalizes NFKC, collapses whitespace, case-folds with
 `unicase`, and replaces each Unicode decimal-digit run with `#`. No text is written to SQLite,
-logs or error messages. Confirmation accepts only a current proposal fingerprint (SHA-256 of
-normalized text) or no fingerprint for a manually drawn/adjusted exclusion.
+logs or error messages. Confirmation accepts only a current proposal fingerprint or no
+fingerprint for a manually drawn/adjusted exclusion. Fingerprints are SHA-256 over a random
+32-byte per-upload secret followed by normalized UTF-8 text. `getrandom` supplies the secret;
+only the staging upload row stores it (schema 27), and upload deletion removes it. Migration
+27 clears legacy unkeyed proposal fingerprints while preserving confirmed geometry/history.
+Identical
+text in different uploads has different fingerprints, preventing offline text guessing from
+exclusion history. Confirmation computes proposals under the upload gate before opening
+the write transaction, leaving the shared Store available to other users during file reads,
+validation and grouping; the short transaction rechecks revisions/admission and appends.
 
 Lines are visited by PDF page, then top/left/bottom/right, normalized text bytes and original
 line ordinal. Each joins the first eligible group in creation order with the same normalized
 text and seed-box IoU at least 0.8 in page fractions, with at most one line per page per group.
 The IoU comparison tolerates four floating-point epsilons at the boundary to account for
-fraction conversion. Ranking is descending page count and normalized Unicode character count,
+fraction conversion. Ordered eligible-group indices remove already matched groups from the
+current page's search and omit newly created groups until the next page. At most 2,000,000
+IoU comparisons per page are allowed: shapes exceeding that bound refuse the whole proposal
+with a manual-editor remedy, never a truncated or differently grouped result. Thus even
+adversarial nonmatching geometry cannot impose quadratic unbounded comparison work.
+Ranking is descending page count and normalized Unicode character count,
 then ascending seed top/left/bottom/right, normalized bytes and group creation order. Only
 4–200-character groups on at least three pages and at least 60% of the entire selection qualify;
 the top three are offered. Matched boxes expand by 2 points and clip to the displayed page.
 Absent-page offers use the coordinate-wise median unpadded box in page fractions (the mean of
-the middle two coordinates for an even count), converted to that page's points and clipped.
+the middle two coordinates for an even count), converted to that page's points, padded by
+2 points on each side like matched boxes, and clipped.
 They are never selected automatically. Pages without text still count in the denominator.
 Path/image marks cannot generate proposals; manual boxes remain available.
 

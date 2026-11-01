@@ -423,7 +423,6 @@ async fn assert_upload_filename_not_stored(store: &Store) {
 #[cfg(feature = "dev-endpoint")]
 #[tokio::test]
 async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
-    use sha2::Digest;
     let (dir, app, session, m, path, id) = setup_rendered_upload_route().await;
     let request = |action: &str, fields: &str| upload_action(session, &path, action, fields);
     let response = app
@@ -436,7 +435,19 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
     assert!(text.contains("Repeated text: private-text-marker page #"));
     assert!(text.contains("Affected pages: 1 2 3"));
     assert!(text.contains("class=\"region-overlay\""));
-    let fingerprint = hex::encode(sha2::Sha256::digest(b"private-text-marker page #"));
+    assert_eq!(
+        text.matches("data-region-rectangle hidden").count(),
+        3,
+        "unchecked hand-editor defaults must be hidden"
+    );
+    assert!(!text.contains("http-equiv=\"refresh\""));
+    let fingerprint = text
+        .split("name=\"fingerprint\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
     let geometry = (1..=3)
         .map(|n| format!("exclude_{n}=1&box_{n}_0=3&box_{n}_1=3&box_{n}_2=97&box_{n}_3=17"))
         .collect::<Vec<_>>()
@@ -503,7 +514,6 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
     clean(&m, &dir).await;
 }
 
-#[cfg(feature = "dev-endpoint")]
 fn upload_action(session: Id, path: &str, action: &str, fields: &str) -> Request<Body> {
     let token = "a".repeat(64);
     let mut request = post_body(session, Body::from(format!("csrf={token}&{fields}")));
@@ -740,6 +750,15 @@ async fn upload_route_server_responds_while_job_runs() {
     let manager = m.clone();
     let running =
         blocking_test(move || manager.read(&upload_id).unwrap().job.state == "running").await;
+    let proposed = app
+        .clone()
+        .oneshot(upload_action(id, &path, "propose", "revision=1"))
+        .await
+        .unwrap();
+    assert_eq!(proposed.status(), StatusCode::CONFLICT);
+    let proposed = body_text(proposed).await;
+    assert!(proposed.contains("Wait for the upload job to finish"));
+    assert!(!proposed.contains("http-equiv=\"refresh\""));
     let mut req = post_body(id, Body::from(format!("csrf={token}")));
     *req.uri_mut() = format!("{path}/discard").parse().unwrap();
     req.headers_mut().insert(
