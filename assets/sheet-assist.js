@@ -656,7 +656,18 @@ async function bounded(path, body) {
       cache: 'no-store',
     });
     const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
-    return { status: response.status, answer: type === JSON_TYPE ? await response.json() : null };
+    let answer = null;
+    if (type === JSON_TYPE) {
+      // An unreadable body keeps its status: a 409 must still hold the field.
+      try {
+        answer = await response.json();
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          throw error;
+        }
+      }
+    }
+    return { status: response.status, answer };
   } catch {
     return { status: 0, answer: null };
   } finally {
