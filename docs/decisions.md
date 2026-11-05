@@ -147,7 +147,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **D4** (2026-10-16) Save precedence: 413, 400 parse, 403 (CSRF, rights, read-only), 400 keys and ops, op re-render 200, stale 409, 422 values and IDs, then the writer's 409/422.
 - **D5** (2026-10-16, refined 2026-10-17) On the create page and in the full form, Add, Remove, Move up/down re-render an unsaved draft and never write (on saved sheets D-V applies); edge moves are disabled (forged: 400) and Add stops at 256 rows.
 - **D6** (2026-10-16) List sheets render a "Save full private sheet" button (`op=save`) before the groups so Enter saves.
-- **D7** (2026-10-16, refined 2026-10-19) Create/edit POSTs accept 5 MiB after a cookie-only principal check; drafts over 1 MiB answer 422 unechoed; publication refuses a worst-case form over 32,768 units, 65,536 pairs or 32,768 nodes (`list-form-exceeds-limit`).
+- **D7** (2026-10-16, refined 2026-10-19, 1 MiB echo limit confirmed by the user 2026-11-05) Create/edit POSTs accept 5 MiB after a cookie-only principal check; drafts over 1 MiB answer 422 unechoed; publication refuses a worst-case form over 32,768 units, 65,536 pairs or 32,768 nodes (`list-form-exceeds-limit`).
 - **D8** (2026-10-16) History shows read-only rows and "Changes in revision N" against a revalidated N − 1 (names and addresses, at most 200 lines); any failure degrades to "unavailable".
 - **D9** (2026-10-16) List editing needs no engine change: derived fields cannot be lists, op and rejected re-renders show the saved revision's results, and `item.id` is the host ID.
 - **D10** (2026-10-16) Each list is a fieldset of row fieldsets with labelled controls and no tables; optional properties get a Set/Not set select.
@@ -261,7 +261,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **SRC-12** (2026-10-30, user) Route B's runtime is a pinned `uv` installing a pinned standalone Python and a hash-locked environment in Mimik's data folder, no system Python; the dev host may run it natively for its tests (like ASSIST-40).
 - **SRC-13** (2026-10-30, user) At import the owner can exclude a buyer watermark easily: Mimik proposes repeated same-place text, the owner confirms or draws the box once for all pages; it is masked in review and blacked out in everything sent to route C.
 - **SRC-14** (2026-10-30, user) Where two readings agree, the owner may accept a page's agreeing units in one action, each recorded as its own decision.
-- **SRC-9** (2026-10-11) Disagreeing sources (MÖRK BORG IT and EN) are both recorded; precedence is decided explicitly, never by merging.
+- **SRC-9** (2026-10-11, precedence 2026-11-05, user) Disagreeing sources (MÖRK BORG IT and EN) are both recorded, never merged; where they disagree the newest edition (IT 2025) takes precedence over EN 2019, as errata.
 - **EXT-1** (2026-10-11) Extraction is optional, containerised Python: Marker, keeping JSON blocks, polygons and table HTML; Markdown is a reading view only; generative `use_llm` repair is disabled.
 - **EXT-3** (2026-10-15) Scalable admission, not full human rereading: bounded frontier image/block review, then targeted human review of discrepancies and high-impact passages, then stratified checks; model review never counts as human approval.
 - **RET-1** (2026-10-15) Lookup is bundled SQLite FTS5, `unicode61 remove_diacritics 2` (not `porter`), bm25, over a derived search text from html2text `plain_no_decorate`; raw evidence rows are never rewritten; no vector server.

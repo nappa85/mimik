@@ -33,7 +33,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   record protocol, the hostile corpus, availability, notices, DEP-29) is merged. 3b (staging, ledger, jobs; upload route, screens, browser
   suite; DEP-30 multer) is complete on branch `source-upload-3b` (85f3189): reviewed (Sol and
   Opus, final rounds approve), full gate green 2026-11-01 (1708 passed), upload browser suite
-  4/4, cargo audit clean. Unmerged until its two host live tests run (pending question).
+  4/4, cargo audit clean. Unmerged until its two host live tests run: the user allows the
+  host run of the reviewed test binary (2026-11-05).
   3c (repeated-text exclusion; migration 027, DEP-31 unicase) is complete on branch
   `source-upload-3c` (fc78738, stacked on 3b): reviewed (Sol approve, Opus approve with changes,
   rest in SRC-REPEAT-COST), gate green 2026-11-01 (1734 passed), both browser suites 4/4, audit
@@ -41,8 +42,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   run on the host with the 3b live tests. Merge 3b then 3c (the 3b merge re-adds
   `!tools/fixtures/upload-three-pages.pdf.txt` to `.dockerignore`, narrowed on master). Step 4 (route A) has its plan
   (`docs/source-route-a-plan.md` on branch `source-route-a`, 809be8f, stacked on 3c; two review
-  rounds, final verdicts approve with changes, applied); execution waits for the owner decisions
-  below. Follow-ups:
+  rounds, final verdicts approve with changes, applied). Owner decisions 2026-11-05: change the
+  renderer pin rather than wrap MuPDF (find a crate/version exposing line direction, bidi and
+  structure safely, before 4a0); tags decided after the 4a0 preflight; the proposed extraction
+  flags; `CLIP` off; Claude drafts the Bare Bones reference from page images only, the owner
+  checks every row; the proposed probe-v1 as advice; a failed bar keeps step 4 blocked, with a
+  reviewed new version allowed. Next: record these in the plan, then 4a0. Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
   a MuPDF security-advisory watch at each release (DEP-29); Review-screen test
   hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
@@ -65,9 +70,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Next steps
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
-  (4d465f1; two review rounds, final verdicts approve with changes, applied). Execution waits
-  for its eight owner decisions ("Decisions the owner must make": meaning of opened, existing
-  sheets, NPC grouping, client, stream budget, own edits, NPCs on departure, NPC allowance).
+  (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
+  2026-11-05: GET + `/seen` (auto with JS, one click without); existing sheets are player sheets;
+  one shared NPC section; try the htmx SSE extension first under the unchanged strict CSP
+  (native EventSource only if that is impossible); 1 live stream per Master (newest tab wins);
+  own save on the latest revision counts as seen; departure keeps freezing NPCs in v1; NPCs
+  share the 32/2048 sheet limits. Next: record these in the plan, then slice (a).
 0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging
@@ -106,25 +114,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- **3b live tests (blocks only the 3b merge):** the two ignored upload live tests
-  (`sources::uploads::tests::live_staged_synthetic_pdf_inspect_render_and_discard`,
-  `live_staging_enospc_cleans_temporary_file_and_releases_reservation`) need the agent-built
-  test binary run on the host, which the permission classifier refused on 2026-11-01. Options:
-  allow that host run after review (recommended), a container with seccomp unconfined (a weaker
-  sandbox, needs an explicit opt-in), or rely on hosted CI. Work continues on the
-  `source-upload-3b` branch meanwhile.
-- **Route A plan decisions (blocks step 4 execution):** listed with options and
-  recommendations in `docs/source-route-a-plan.md` "Decisions the owner must make": the worker
-  wrapper for line direction/bidi and structure (or derived direction, no bidi, in v1); tag
-  partitioning kept in step 4 or deferred (informed by the bar PDFs' tag status in 4a0); the
-  extraction flags with ligature and synthetic-space policy; `CLIP` off (flag, scissoring
-  undetectable) or on (silently drops scissored glyphs); who makes the Bare Bones reference;
-  the probe thresholds; what happens if the 98% bar fails.
-- Does the correct-password login rejection seen on 2026-10-14 still happen? Diagnose or close.
 - Remaining LAN and multi-device scope to support.
-- M4 default Q5 (drafts over 1 MiB are not echoed back), applied without an answer: confirm or
-  change.
-- Precedence or errata policy between the MÖRK BORG IT 2025 and EN 2019 sources (SRC-9).
 - Exact editions for D&D, Pathfinder (remaster or not), Vampire and MÖRK BORG.
 - When that work starts: print/export priorities, UI and answer languages, acceptable latency,
   situation input, first-release features, games after the POC.
@@ -139,9 +129,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Field references (owner 2026-10-26: they stay; wrong results are a bug).** Experiments 1-4
   in `docs/results.md`. Live with the ASSIST-53 instructions (experiment 4) no arm passes:
   correct_ref reaches 24-25 but false_confident is 4-8 (cap 3); the errors are misreadings
-  (a factor added or dropped, the wrong sign, replace instead of add). Open (owner decision):
-  accept the 9B default with the owner's confirmation as the safeguard, change the bar, or try
-  further prompt work (for example examples of "per each" and of buying versus spending).
+  (a factor added or dropped, the wrong sign, replace instead of add). Owner 2026-11-05: more
+  prompt work (examples of "per each" and of buying versus spending), then re-screen (GPU).
+  - TwIL-8B (webAI, Granite 4.2 8B dense reasoning model, webAI Non-Commercial 1.0: local
+    evaluation only): owner 2026-11-05 asked to try it. Official Q4_K_M balanced at revision
+    58d49f0d, SHA-256 17bda82d…faa0e, in `/media/data/mimik/models/twil-8b-58d49f0d`; GPU
+    screen (104 replies, field refs) with thinking off and on, after 18:00 once the owner
+    confirms the fans.
   - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
   - Engines (ASSIST-54): re-screen when mistral.rs gains Vulkan or vllm.cpp has stable releases.
 
