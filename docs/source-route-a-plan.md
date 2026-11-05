@@ -310,8 +310,8 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 - **“MÖRK BORG Bare Bones EN (local, licence and hash recorded in the corpus table): a
   hand-checked reference of the weapons, armour, equipment and character-creation pages (rows
   counted as in the IT reference); at least 98% of rows intact in one unit, no digit, dice or
-  sign error.”** The Owner, or an owner-named local human transcriber, makes the reference by
-  eye from original page images, then the Owner checks every row before extraction is scored.
+  sign error.”** Claude drafts the reference from the original page images (never from route A
+  output), then the Owner checks every row before extraction is scored (owner decision).
   Freeze PDF SHA-256/licence, exact one-based page list, reference hash, row IDs and denominator
   N before the first measurement. Use the IT reference's actual local format/scorer, one fact
   per row (including wrapped facts as one row; table headers are not extra facts). First inspect
@@ -386,39 +386,24 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   local-corpus licence/hash entry; update CLI reference only if prepared v3 import is exposed.
   Remove finished sections here and the umbrella's finished step; retain only remaining work.
 
-## Decisions the owner must make
+## Owner decisions (2026-11-05)
 
-- **Wrapper gaps:** options: approve a narrow exception-safe worker-only wrapper for line
-   `dir`/character `bidi`, nested structures and any required span accessor; or change renderer
-   pin. For v1 direction specifically, either wrap line `dir`/character `bidi` and retain both
-   metadata fields with RTL serialized round trips, or freeze direction derived from origin/quad
-   sequence, exclude bidi from v1 and test derived direction in RTL/vertical goldens.
-   Recommendation: retain the pin and use the smallest reviewed wrapper for demonstrated gaps;
-   safe quads/font/flags need none. Freeze the direction choice in 4a0; stop if required fidelity
-   is unavailable. Do not substitute `structured()` or a second parser.
-- **Tag partitioning:** options: keep a separate versioned tag slice in step 4, or amend the
-  umbrella to defer it. Recommendation: use 4a0's aggregate statuses—defer if both bar PDFs
-  are untagged; otherwise retain and cost the slice. Initial 4a remains block-only either way.
-- **Flags/ligatures/spaces:** options: approve the exact 4a flag set above with raw ligatures
-  and flagged inferred spaces, or choose different explicit settings before freezing.
-   Recommendation: approve that set, CID diagnostics only, `CLIP` off and no dehyphenation;
-   search expansion is separate from frozen scorer normalization. A later change is versioned.
-- **Scissor clipping:** choose `CLIP` off (retain out-of-clip/page glyphs, flag clip-mode text
-  and Mimik-computed page-boundary status, but in-page scissoring is undetectable) or `CLIP` on
-  (match rendered clipping by silently dropping scissored glyphs, with no dropped-glyph record).
-  Recommendation: off to preserve diagnostic text, with the limitation visible to the Owner;
-  `CLIPPED` never identifies scissored-away text. Freeze the choice with the 4a0 fixtures/flags.
-- **Bare Bones gold:** options: Owner transcribes/checks it, or appoints a local human
-  transcriber with Owner checking. Recommendation: delegate transcription if convenient, Owner
-  signs off every row and the page set. Name that person and settle the exact IT-compatible
-  local format/page list before measuring; do not derive gold from route A or a remote model.
-- **Probe policy:** options: approve the conservative `probe-v1` thresholds above, or choose a
-  different explicit rule before measurements. Recommendation: approve the conservative rule
-  as advice, with visible reasons and Owner override; do not weaken the 18/18 acceptance bar.
-- **Bar failure:** options: leave step 4 blocked, or authorize a new reviewed/versioned
-  derivation and full remeasurement/re-review. Recommendation: preserve the frozen failure,
-  investigate split rows/token errors and try a new version only with an explicit rationale;
-  never waive the 98% or zero-error requirements by treating descriptive scores as a pass.
+- **Wrapper gaps:** change the renderer pin rather than wrap MuPDF. Before 4a0, find a
+  maintained crate or version that exposes line direction, per-character bidi and the
+  structure tree through safe APIs (licence, maintenance, build cost, REL-2), recorded as a
+  DEP decision; if none exists, come back to the owner before any wrapper.
+- **Tag partitioning:** decided after the 4a0 preflight from the bar PDFs' tag status (defer
+  if both are untagged; otherwise keep the later versioned tag slice and estimate its cost).
+- **Flags/ligatures/spaces:** the 4a flag set as proposed: raw ligature scalars, inferred
+  spaces allowed and flagged, CID diagnostics only, no dehyphenation.
+- **Scissor clipping:** `CLIP` off; clip-mode and off-page glyphs flagged, in-page scissoring a
+  documented limit caught by review against the render.
+- **Bare Bones reference:** Claude drafts it from the original page images only (never from
+  route A text, raw readings or a remote model) in the IT reference's format; the owner checks
+  every row and the page list before any scoring. The draft and the reference stay local.
+- **Probe policy:** `probe-v1` as proposed, advice only with visible reasons and an Owner override.
+- **Bar failure:** step 4 stays blocked; a new versioned derivation is allowed only with a
+  rationale, review and fresh measurements of both bars, never by waiving the bar.
 
 ## Risks
 
