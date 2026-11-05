@@ -25,12 +25,15 @@ use std::{
 
 static MANAGER_OPEN: AtomicBool = AtomicBool::new(false);
 
+#[path = "upload_exclusions.rs"]
+pub mod exclusions;
+
 #[cfg(feature = "dev-endpoint")]
 #[path = "upload_development.rs"]
 pub mod development;
 #[cfg(test)]
 #[path = "upload_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// Constructed only by authenticated handlers; a caller cannot supply an actor label.
 #[derive(Clone)]
@@ -217,6 +220,8 @@ pub struct Job {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Upload {
+    pub exclusion_revision: i64,
+    pub exclusion: Option<exclusions::Exclusion>,
     pub already_document: Option<i64>,
     pub id: String,
     pub pdf_sha256: String,
@@ -255,7 +260,8 @@ pub struct StagedContract {
     pub pages: Vec<PageModel>,
     pub metadata: Metadata,
     pub limits: SourceLimits,
-    pub exclusion: Option<serde_json::Value>,
+    pub exclusion_revision: i64,
+    pub exclusion: Option<exclusions::Exclusion>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Renderer {
@@ -486,6 +492,8 @@ impl Uploads {
         let mut random = [0; 16];
         getrandom::fill(&mut random).map_err(|_| AppError::Worker)?;
         let id = hex::encode(random);
+        let mut fingerprint_key = [0; 32];
+        getrandom::fill(&mut fingerprint_key).map_err(|_| AppError::Worker)?;
         self.0.files.create(&id)?;
         let result = (|| {
             self.0.files.publish_spool(
@@ -501,8 +509,8 @@ impl Uploads {
                 tx.execute(
                     "INSERT INTO source_uploads
                      (id, pdf_sha256, pdf_bytes, actor, actor_id, actor_epoch, session_digest,
-                      created_at, updated_at, state, system_id, edition, language)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,'uploaded',?9,?10,?11)",
+                       created_at, updated_at, state, system_id, edition, language, fingerprint_key)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?8,'uploaded',?9,?10,?11,?12)",
                     params![
                         id,
                         sha256,
@@ -514,7 +522,8 @@ impl Uploads {
                         t,
                         metadata.system_id,
                         metadata.edition,
-                        metadata.language
+                        metadata.language,
+                        fingerprint_key.as_slice()
                     ],
                 )?;
                 queue(tx, &id, 1, "inspect", 0)?;
@@ -868,6 +877,9 @@ impl Uploads {
             return Err(AppError::Conflict);
         }
         u.inspection.as_ref().ok_or(AppError::Conflict)?;
+        if let Some(e) = &u.exclusion {
+            exclusions::validate(e, &u).map_err(|_| AppError::Conflict)?;
+        }
         Ok(StagedContract {
             contract_version: "mimik-staged-v1".into(),
             pdf_sha256: u.pdf_sha256,
@@ -890,7 +902,8 @@ impl Uploads {
                 png_bytes: 128 * MIB,
                 units: 20000,
             },
-            exclusion: None,
+            exclusion_revision: u.exclusion_revision,
+            exclusion: u.exclusion,
         })
     }
     fn remove_page(&self, id: &str, n: u32) -> Result<(), AppError> {
@@ -1447,6 +1460,14 @@ fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), Ap
     if revision != u.revision {
         return Err(AppError::Conflict);
     }
+    if u.exclusion
+        .as_ref()
+        .is_some_and(|e| e.pages.iter().any(|n| !selected.contains(n)))
+    {
+        return Err(AppError::Invalid(
+            "Replace or remove the exclusion before deselecting its pages.",
+        ));
+    }
     let Some(i) = u.inspection.as_ref() else {
         return if selected.is_empty() {
             Ok(())
@@ -1476,6 +1497,8 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
             [id],
             |r| {
                 Ok(Upload {
+                    exclusion_revision: 0,
+                    exclusion: None,
                     already_document: r.get(8)?,
                     id: r.get(0)?,
                     pdf_sha256: r.get(1)?,
@@ -1526,6 +1549,7 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
         },
     )?;
     u.pages = load_pages(db, id)?;
+    (u.exclusion_revision, u.exclusion) = exclusions::load(db, id)?;
     Ok(u)
 }
 fn load_pages(db: &Connection, id: &str) -> Result<Vec<PageModel>, AppError> {

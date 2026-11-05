@@ -62,6 +62,8 @@ thiserror = "2"
 unicode-general-category = "=1.1.0"
 # Already in the dependency tree (url); diacritic folding of the assistant's fraction words.
 unicode-normalization = "=0.1.25"
+# Full Unicode case folding for repeated-text proposals; already locked through mime_guess.
+unicase = "=2.10.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
 cel = { version = "=0.15.0", default-features = false }
 # Interpretation assistant (step 2c-1, D-H, ASSIST-39): the provider client; Mimik's own

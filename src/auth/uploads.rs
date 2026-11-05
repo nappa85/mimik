@@ -3,7 +3,10 @@ use super::{AuthResult, AuthState, csrf_admission, materials, owner_auth};
 use crate::{
     AppError,
     sources::{
-        uploads::{Metadata, OwnerWrite, Upload, UploadPhase, Uploads},
+        uploads::{
+            Metadata, OwnerWrite, PageModel, Upload, UploadPhase, Uploads,
+            exclusions::{COMPARISON_LIMIT, Exclusion, Proposal},
+        },
         worker,
     },
 };
@@ -44,7 +47,10 @@ pub(super) fn routes() -> Router<AuthState> {
         )
         .route("/admin/materials/uploads/{id}", get(page))
         .route("/admin/materials/uploads/{id}/progress", get(progress))
-        .route("/admin/materials/uploads/{id}/{action}", post(action))
+        .route(
+            "/admin/materials/uploads/{id}/{action}",
+            post(action).layer(DefaultBodyLimit::max(131_072)),
+        )
         .route(
             "/admin/materials/uploads/{id}/pages/{page}/image",
             get(image),
@@ -390,6 +396,21 @@ struct StagedConflict {
     id: String,
 }
 #[derive(Template)]
+#[template(
+    source = "{% extends \"material_base.html\" %}{% block content %}<p>{{ message }}</p>{% endblock %}",
+    ext = "html"
+)]
+struct ProposalError {
+    message: &'static str,
+}
+
+fn proposal_error(status: StatusCode, message: &'static str) -> AuthResult {
+    let mut response = materials::html(&ProposalError { message })?;
+    *response.status_mut() = status;
+    response.extensions_mut().insert(materials::TrustedDraft);
+    Ok(response)
+}
+#[derive(Template)]
 #[template(path = "upload_form.html")]
 struct UploadForm {
     csrf: String,
@@ -420,8 +441,89 @@ struct Screen {
     upload: Upload,
     csrf: String,
     refresh: bool,
+    editors: Vec<Editor>,
+}
+struct Editor {
+    title: String,
+    text: String,
+    fingerprint: String,
+    pages: Vec<EditorPage>,
+}
+struct EditorPage {
+    page: PageModel,
+    bounds: [f64; 4],
+    selected: bool,
+    absent: bool,
+}
+struct Mask {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 impl Screen {
+    fn mask(&self, n: u32) -> Option<Mask> {
+        self.upload.exclusion.as_ref()?.boxes.get(&n).map(|b| Mask {
+            x: b[0],
+            y: b[1],
+            width: b[2] - b[0],
+            height: b[3] - b[1],
+        })
+    }
+    fn editors(upload: &Upload, proposals: Vec<Proposal>) -> Vec<Editor> {
+        let mut editors: Vec<_> = proposals
+            .into_iter()
+            .map(|p| Editor {
+                title: "Confirm or adjust repeated text".into(),
+                text: p.text,
+                fingerprint: p.fingerprint,
+                pages: upload
+                    .pages
+                    .iter()
+                    .filter(|page| upload.selected_pages.contains(&page.pdf_page))
+                    .map(|page| EditorPage {
+                        page: page.clone(),
+                        selected: p.boxes.contains_key(&page.pdf_page),
+                        absent: p.absent.contains_key(&page.pdf_page),
+                        bounds: p
+                            .boxes
+                            .get(&page.pdf_page)
+                            .or_else(|| p.absent.get(&page.pdf_page))
+                            .copied()
+                            .unwrap_or([0., 0., 1., 1.]),
+                    })
+                    .collect(),
+            })
+            .collect();
+        editors.push(Editor {
+            title: "Draw or adjust an exclusion by hand".into(),
+            text: String::new(),
+            fingerprint: String::new(),
+            pages: upload
+                .pages
+                .iter()
+                .filter(|p| upload.selected_pages.contains(&p.pdf_page))
+                .map(|page| {
+                    let saved = upload
+                        .exclusion
+                        .as_ref()
+                        .and_then(|e| e.boxes.get(&page.pdf_page));
+                    EditorPage {
+                        page: page.clone(),
+                        bounds: saved.copied().unwrap_or([
+                            page.width_points / 4.,
+                            page.height_points / 4.,
+                            page.width_points / 2.,
+                            page.height_points / 2.,
+                        ]),
+                        selected: saved.is_some(),
+                        absent: false,
+                    }
+                })
+                .collect(),
+        });
+        editors
+    }
     fn selected(&self, n: u32) -> bool {
         self.upload.selected_pages.contains(&n)
     }
@@ -438,6 +540,7 @@ async fn model(state: &AuthState, session: &Session, id: String) -> Result<Scree
     let upload = blocking(move || m.read_for_owner(&auth, &id)).await?;
     let refresh = matches!(upload.job.state.as_str(), "queued" | "running");
     Ok(Screen {
+        editors: Screen::editors(&upload, vec![]),
         upload,
         csrf: super::token(session).await?.ok_or(StatusCode::FORBIDDEN)?,
         refresh,
@@ -475,8 +578,41 @@ async fn action(
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
     let csrf = csrf_admission(&session, &form.remove("csrf").ok_or(StatusCode::FORBIDDEN)?).await?;
-    let owner = OwnerWrite::new(auth, csrf);
+    let owner = OwnerWrite::new(auth.clone(), csrf);
     let m = manager(&state)?;
+    if action == "propose" {
+        let revision = form
+            .get("revision")
+            .and_then(|v| v.parse().ok())
+            .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
+        let query = m.clone();
+        let query_id = id.clone();
+        let proposals = match tokio::task::spawn_blocking(move || {
+            query.propose_exclusions(&auth, &query_id, revision)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            Ok(proposals) => proposals,
+            Err(AppError::Conflict) => {
+                return proposal_error(
+                    StatusCode::CONFLICT,
+                    "Wait for the upload job to finish and reload the current selection before proposing exclusions.",
+                );
+            }
+            Err(AppError::Invalid(COMPARISON_LIMIT)) => {
+                return proposal_error(StatusCode::UNPROCESSABLE_ENTITY, COMPARISON_LIMIT);
+            }
+            Err(error) => return Err(materials::error(&error)),
+        };
+        let mut screen = model(&state, &session, id).await?;
+        if screen.upload.revision != revision {
+            return Err(StatusCode::CONFLICT);
+        }
+        screen.editors = Screen::editors(&screen.upload, proposals);
+        screen.refresh = false;
+        return materials::html(&screen);
+    }
     let target = if action == "discard" {
         "/admin/materials/uploads".into()
     } else {
@@ -492,6 +628,27 @@ async fn action(
             "cancel" => m.cancel(&owner, &id),
             "discard" => m.discard(&owner, &id),
             "inspect" | "render" => m.start(&owner, &id, revision()?, action == "inspect"),
+            "exclude" | "remove-exclusion" => {
+                let revision = revision()?;
+                let excluded = form
+                    .get("exclusion_revision")
+                    .and_then(|v| v.parse().ok())
+                    .ok_or(AppError::Invalid("Invalid exclusion revision."))?;
+                let rationale = form.get("rationale").cloned().unwrap_or_default();
+                if action == "remove-exclusion" {
+                    m.remove_exclusion(&owner, &id, revision, excluded, &rationale)
+                } else {
+                    let exclusion = exclusion_form(&form, rationale)?;
+                    m.set_exclusion(
+                        &owner,
+                        &id,
+                        revision,
+                        excluded,
+                        &exclusion,
+                        form.get("extend_absent").is_some_and(|v| v == "1"),
+                    )
+                }
+            }
             "set" => {
                 let revision = revision()?;
                 let metadata = Metadata {
@@ -517,6 +674,31 @@ async fn action(
     })
     .await?;
     Ok(Redirect::to(&target).into_response())
+}
+fn exclusion_form(
+    form: &std::collections::BTreeMap<String, String>,
+    rationale: String,
+) -> Result<Exclusion, AppError> {
+    let mut boxes = std::collections::BTreeMap::new();
+    for key in form.keys().filter(|k| k.starts_with("exclude_")) {
+        let page: u32 = key[8..]
+            .parse()
+            .map_err(|_| AppError::Invalid("Invalid exclusion page."))?;
+        let mut bounds = [0.; 4];
+        for (i, value) in bounds.iter_mut().enumerate() {
+            *value = form
+                .get(&format!("box_{page}_{i}"))
+                .and_then(|s| s.parse().ok())
+                .ok_or(AppError::Invalid("Invalid displayed exclusion box."))?;
+        }
+        boxes.insert(page, bounds);
+    }
+    Ok(Exclusion {
+        pages: boxes.keys().copied().collect(),
+        boxes,
+        rationale,
+        proposal_fingerprint: form.get("fingerprint").filter(|s| !s.is_empty()).cloned(),
+    })
 }
 async fn image(
     State(state): State<AuthState>,

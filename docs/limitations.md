@@ -12,6 +12,11 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   After admission explicit Pending boundaries every 64 KiB bound parser read-ahead to two
   64 KiB batches plus multipart delimiter lookbehind, apart from the pending transport frame.
 
+- **SRC-REPEAT-COST** [repeated text] The comparison budget is per normalised text: the lazy
+  per-page copy of a text's eligible groups is not counted against it, and there is no overall
+  cap across texts (total work is bounded only by the 20,000-lines-per-page and staged-text size
+  limits). Proposal runs on a blocking thread under the upload gate with no cancellation. A text
+  that exhausts its budget is dropped without a notice when other texts still produce proposals.
 - **SRC-STAGING-AUDIT** [staging] Staging writes are not recorded in the permanent source review-event log; add upload events if a staging history is required.
 - **SRC-FUZZ** [testing, TODO follow-up] No cargo-fuzz runs yet. Add containerized fuzzing
   of the record parser and sandboxed MuPDF entry points; the generated hostile corpus is

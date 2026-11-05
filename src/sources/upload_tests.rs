@@ -15,6 +15,703 @@ use std::{
 const PDF: &[u8] = b"%PDF-1.7\nsynthetic spool; the fake inspects without parsing\n";
 const ID: &str = "11111111111111111111111111111111";
 
+fn exclusion() -> exclusions::Exclusion {
+    exclusions::Exclusion {
+        pages: vec![1, 2, 3],
+        boxes: (1..=3).map(|n| (n, [1., 2., 4., 5.])).collect(),
+        proposal_fingerprint: None,
+        rationale: "RATIONALE-PRIVATE-MARKER".into(),
+    }
+}
+
+#[test]
+fn exclusion_confirmation_proposal_does_not_hold_store_mutex() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    let mut e = exclusion();
+    e.proposal_fingerprint = Some(
+        m.propose_exclusions(&o.auth, &id, revision).unwrap()[0]
+            .fingerprint
+            .clone(),
+    );
+    let store = m.0.store.clone();
+    exclusions::PROPOSAL_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                store
+                    .upload_storage(|db| {
+                        db.query_row("SELECT 1", [], |_| Ok(()))?;
+                        Ok(())
+                    })
+                    .unwrap();
+                let _ = tx.send(());
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_secs(2)).is_ok(),
+                "Store user blocked during proposal computation"
+            );
+        }));
+    });
+    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+}
+
+#[test]
+fn exclusion_fingerprints_are_upload_private_and_discard_removes_key() {
+    let (_dir, m, o, _) = fixture();
+    let mut fingerprints = Vec::new();
+    for _ in 0..2 {
+        let id = create(&m, &o);
+        selected(&m, &o, &id, &[1, 2, 3]);
+        start(&m, &o, &id);
+        wait(&m);
+        let revision = m.read(&id).unwrap().revision;
+        let first = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+        let second = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+        assert_eq!(first[0].fingerprint, second[0].fingerprint);
+        assert_ne!(first[0].fingerprint, hash(first[0].text.as_bytes()));
+        let key =
+            m.0.store
+                .upload_storage(|db| {
+                    let key: Vec<u8> = db.query_row(
+                        "SELECT fingerprint_key FROM source_uploads WHERE id=?1",
+                        [&id],
+                        |r| r.get(0),
+                    )?;
+                    assert_eq!(key.len(), 32);
+                    Ok(key)
+                })
+                .unwrap();
+        assert!(
+            !serde_json::to_string(&m.contract(&id).unwrap())
+                .unwrap()
+                .contains(&hex::encode(key))
+        );
+        fingerprints.push(first[0].fingerprint.clone());
+        m.discard(&o, &id).unwrap();
+        m.0.store
+            .upload_storage(|db| {
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM source_uploads", [], |r| r
+                        .get::<_, i64>(0))?,
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+    assert_ne!(fingerprints[0], fingerprints[1]);
+}
+
+#[test]
+fn exclusion_migration_removes_legacy_guessable_fingerprints() {
+    let (dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
+        .unwrap();
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_upload_exclusions SET proposal_fingerprint=?1",
+                [hash(b"test")],
+            )?;
+            db.execute_batch(
+                "ALTER TABLE source_uploads DROP COLUMN fingerprint_key; PRAGMA user_version=26;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let upgraded = Store::open(&dir.path().join("db")).unwrap();
+    upgraded
+        .upload_storage(|db| {
+            let fingerprint: Option<String> = db.query_row(
+                "SELECT proposal_fingerprint FROM source_upload_exclusions",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(fingerprint.is_none());
+            assert_eq!(
+                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+                27
+            );
+            Ok(())
+        })
+        .unwrap();
+    // Existing staging acquires a fresh getrandom key on first use.
+    let proposed = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    assert_ne!(proposed[0].fingerprint, hash(b"test"));
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+}
+
+#[test]
+fn exclusion_contract_refuses_a_missing_deselected_rendering() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
+        .unwrap();
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=3",
+                [&id],
+            )?;
+            db.execute(
+                "UPDATE source_uploads SET selected_pages='[1,2]' WHERE id=?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(m.contract(&id).is_err());
+}
+
+#[test]
+fn exclusion_propose_refuses_queued_and_running_jobs() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    for state in ["queued", "running"] {
+        m.0.store
+            .upload_storage(|db| {
+                db.execute(
+                    "UPDATE source_jobs SET state=?2 WHERE upload_id=?1",
+                    params![id, state],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            m.propose_exclusions(&o.auth, &id, revision),
+            Err(AppError::Conflict)
+        ));
+    }
+}
+
+#[test]
+fn exclusion_revision_replace_remove_concurrent_writes_and_cascade() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let original_png = m.0.files.read_image(&id, 1).unwrap();
+    let revision = m.read(&id).unwrap().revision;
+    assert!(matches!(
+        m.set_exclusion(&o, &id, revision - 1, 0, &exclusion(), false),
+        Err(AppError::Conflict)
+    ));
+    let mut writers = Vec::new();
+    for _ in 0..2 {
+        let m = m.clone();
+        let o = o.clone();
+        let id = id.clone();
+        writers.push(std::thread::spawn(move || {
+            m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
+        }));
+    }
+    assert_eq!(
+        writers
+            .into_iter()
+            .filter(|w| w.thread().id() != std::thread::current().id())
+            .map(|w| w.join().unwrap().is_ok())
+            .filter(|ok| *ok)
+            .count(),
+        1
+    );
+    let first = m.read(&id).unwrap();
+    assert_eq!(first.exclusion_revision, 1);
+    assert_eq!(first.revision, revision);
+    assert!(m.remove_exclusion(&o, &id, revision, 0, "stale").is_err());
+    let mut replacement = exclusion();
+    replacement.boxes.get_mut(&1).unwrap()[2] = 6.;
+    replacement.rationale = "replacement".into();
+    m.set_exclusion(&o, &id, revision, 1, &replacement, false)
+        .unwrap();
+    assert_eq!(
+        m.contract(&id).unwrap().exclusion.unwrap().boxes[&1],
+        [1., 2., 6., 5.]
+    );
+    assert!(m.set(&o, &id, revision, &metadata(), &[1, 2]).is_err());
+    assert!(matches!(
+        m.set(&o, &id, revision - 1, &metadata(), &[1, 2]),
+        Err(AppError::Conflict)
+    ));
+    m.remove_exclusion(&o, &id, revision, 2, "removed").unwrap();
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 3);
+    assert!(m.contract(&id).unwrap().exclusion.is_none());
+    assert_eq!(m.0.files.read_image(&id, 1).unwrap(), original_png);
+    m.0.store
+        .upload_storage(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_upload_exclusions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))?,
+                3
+            );
+            Ok(())
+        })
+        .unwrap();
+    m.discard(&o, &id).unwrap();
+    m.0.store
+        .upload_storage(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_upload_exclusions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn exclusion_proposal_is_current_hash_verified_and_extension_is_explicit() {
+    let (dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3, 4]);
+    start(&m, &o, &id);
+    wait(&m);
+    let text = dir.path().join("staging").join(&id).join("text-4.json");
+    std::fs::write(&text, b"[]").unwrap();
+    m.0.store.upload_storage(|db| {
+        db.execute("UPDATE source_upload_pages SET text_sha256=?2,text_bytes=2 WHERE upload_id=?1 AND pdf_page=4",
+            params![id, hash(b"[]")])?; Ok(())
+    }).unwrap();
+    let revision = m.read(&id).unwrap().revision;
+    let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].boxes.len(), 3);
+    let mut e = exclusion();
+    e.proposal_fingerprint = Some(proposals[0].fingerprint.clone());
+    e.pages.push(4);
+    e.boxes.insert(4, proposals[0].absent[&4]);
+    assert!(m.set_exclusion(&o, &id, revision, 0, &e, false).is_err());
+    m.set_exclusion(&o, &id, revision, 0, &e, true).unwrap();
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+    std::fs::write(text, b"[PRIVATE-TEXT-MARKER]").unwrap();
+    let error = m.propose_exclusions(&o.auth, &id, revision).err().unwrap();
+    assert!(!error.to_string().contains("PRIVATE-TEXT-MARKER"));
+    assert!(!format!("{error:?}").contains("PRIVATE-TEXT-MARKER"));
+    let corrupt = b"[PRIVATE-TEXT-MARKER]";
+    m.0.store.upload_storage(|db| {
+        db.execute("UPDATE source_upload_pages SET text_sha256=?2,text_bytes=?3 WHERE upload_id=?1 AND pdf_page=4",
+            params![id, hash(corrupt), corrupt.len()])?; Ok(())
+    }).unwrap();
+    let error = m.propose_exclusions(&o.auth, &id, revision).err().unwrap();
+    assert!(!error.to_string().contains("PRIVATE-TEXT-MARKER"));
+    assert!(!format!("{error:?}").contains("PRIVATE-TEXT-MARKER"));
+    assert!(m.propose_exclusions(&o.auth, &id, revision - 1).is_err());
+}
+
+#[test]
+fn exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row() {
+    let (dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    let invalid = OwnerWrite {
+        auth: o.auth.clone(),
+        csrf: o.auth.stale_csrf_fixture(),
+    };
+    assert!(
+        m.set_exclusion(&invalid, &id, revision, 0, &exclusion(), false)
+            .is_err()
+    );
+    assert!(
+        m.remove_exclusion(&invalid, &id, revision, 0, "private")
+            .is_err()
+    );
+    for bounds in [
+        [f64::NAN, 0., 1., 1.],
+        [-1., 0., 1., 1.],
+        [1., 1., 1., 2.],
+        [0., 0., 11., 1.],
+        [0., 0., 1., 11.],
+    ] {
+        let mut e = exclusion();
+        e.boxes.insert(1, bounds);
+        let error = m
+            .set_exclusion(&o, &id, revision, 0, &e, false)
+            .unwrap_err();
+        assert!(!error.to_string().contains(&e.rationale));
+    }
+    let mut forged = exclusion();
+    forged.proposal_fingerprint = Some("PRIVATE-TEXT-MARKER".into());
+    let error = m
+        .set_exclusion(&o, &id, revision, 0, &forged, true)
+        .unwrap_err();
+    assert!(!format!("{error:?}").contains("PRIVATE-TEXT-MARKER"));
+    let marker = "PRIVATE-TEXT-MARKER";
+    let bytes = worker::records::json(&vec![worker::records::TextLine {
+        text: marker.into(),
+        bounds: [1., 1., 3., 3.],
+    }])
+    .unwrap();
+    for n in 1..=3 {
+        std::fs::write(
+            dir.path()
+                .join("staging")
+                .join(&id)
+                .join(format!("text-{n}.json")),
+            &bytes,
+        )
+        .unwrap();
+    }
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_upload_pages SET text_sha256=?2,text_bytes=?3 WHERE upload_id=?1",
+                params![id, hash(&bytes), bytes.len()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    assert_eq!(proposals[0].text, "private-text-marker");
+    let mut e = exclusion();
+    e.proposal_fingerprint = Some(proposals[0].fingerprint.clone());
+    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+    assert_private_upload_rows(&m);
+}
+
+fn assert_private_upload_rows(m: &Uploads) {
+    m.0.store
+        .upload_storage(|db| {
+            let tables = db
+                .prepare("SELECT name FROM sqlite_schema WHERE type='table'")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut rationales = 0;
+            for table in tables {
+                let mut q =
+                    db.prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))?;
+                let columns = q.column_count();
+                let mut rows = q.query([])?;
+                while let Some(row) = rows.next()? {
+                    for column in 0..columns {
+                        let value = match row.get_ref(column)? {
+                            rusqlite::types::ValueRef::Text(bytes)
+                            | rusqlite::types::ValueRef::Blob(bytes) => {
+                                String::from_utf8_lossy(bytes).into_owned()
+                            }
+                            other => format!("{other:?}"),
+                        };
+                        assert!(!value.to_lowercase().contains("private-text-marker"));
+                        assert!(!value.contains("BUYER-MARKER-NAME"));
+                        assert!(
+                            !value
+                                .to_lowercase()
+                                .contains("worker-stderr-planted-marker")
+                        );
+                        if value.contains("RATIONALE-PRIVATE-MARKER") {
+                            assert_eq!(table, "source_upload_exclusions");
+                            rationales += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(rationales, 1);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn exclusion_private_markers_do_not_escape_stdout_stderr() {
+    // Capture the ordinary test harness and application stderr, including diagnostics from
+    // malformed staged text and refused writes. Each child runs exactly one marker fixture.
+    let mut filters = vec![
+        "sources::uploads::tests::exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row",
+        "sources::uploads::tests::exclusion_proposal_is_current_hash_verified_and_extension_is_explicit",
+        "sources::uploads::tests::exclusion_stderr_helper_discards_markers_and_maps_exit",
+        "auth::tests::upload_route_tests::upload_route_filename_not_stored_and_actions_admitted",
+    ];
+    if cfg!(feature = "dev-endpoint") {
+        filters.push("auth::tests::upload_route_tests::upload_route_propose_confirm_adjust_remove_displayed_boxes");
+    }
+    for filter in filters {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([filter, "--exact", "--nocapture"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Private-data fixture subprocess failed."
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.starts_with("test result: ok. 1 passed;")),
+            "Private-data fixture did not run exactly one test."
+        );
+        for capture in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(capture).to_lowercase();
+            for marker in [
+                "private-text-marker",
+                "buyer-marker-name",
+                "rationale-private-marker",
+                "worker-stderr-planted-marker",
+            ] {
+                assert!(
+                    !text.contains(marker),
+                    "Private marker escaped into log/stderr capture."
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exclusion_history_expires_with_its_upload() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    m.set_exclusion(
+        &o,
+        &id,
+        m.read(&id).unwrap().revision,
+        0,
+        &exclusion(),
+        false,
+    )
+    .unwrap();
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_uploads SET created_at=1,updated_at=1 WHERE id=?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    m.sweep().unwrap();
+    assert!(m.read(&id).is_err());
+    m.0.store
+        .upload_storage(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_upload_exclusions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn exclusion_stderr_helper_discards_markers_and_maps_exit() {
+    // Helper-level drain/exit mapping through a fake Worker, not runner launch coverage.
+    struct StderrWorker(bool);
+    impl Worker for StderrWorker {
+        fn inspect(&self, _: &Path, _: &Cancel) -> Result<Inspection, Reason> {
+            worker::stderr_fixture(self.0)?;
+            Ok(inspection())
+        }
+        fn render(
+            &self,
+            _: &Path,
+            _: &[Page],
+            _: &Cancel,
+            _: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
+        ) -> Result<(), Reason> {
+            unreachable!()
+        }
+    }
+    for success in [true, false] {
+        let (_dir, m, o) = fixture_worker(Arc::new(StderrWorker(success)));
+        let id = create(&m, &o);
+        let u = m.read(&id).unwrap();
+        assert_eq!(u.job.state, if success { "succeeded" } else { "failed" });
+        m.0.store
+            .upload_storage(|db| {
+                let diagnostic: Option<String> = db.query_row(
+                    "SELECT reason FROM source_jobs WHERE upload_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                assert_eq!(
+                    diagnostic.as_deref(),
+                    if success { None } else { Some("unreadable") }
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn rotated_displayed_exclusion_round_trips_without_applying_transform_twice() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    let mut inspection = inspection();
+    inspection.pages[0].rotate = 90;
+    inspection.pages[0].transform = [0., 1., 1., 0., 0., 0.];
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_uploads SET inspection=?2 WHERE id=?1",
+                params![id, json(&InspectionData::from(inspection))?],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    let mut e = exclusion();
+    e.pages = vec![1];
+    e.boxes.retain(|n, _| *n == 1);
+    let revision = m.read(&id).unwrap().revision;
+    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+    let contract = m.contract(&id).unwrap();
+    assert_eq!(contract.pages[0].transform, [0., 1., 1., 0., 0., 0.]);
+    assert_eq!(contract.exclusion.unwrap().boxes[&1], e.boxes[&1]);
+}
+
+pub(crate) fn assert_rendered_exclusion_round_trip(inspection: Inspection, rendered: RenderedPage) {
+    struct Synthetic {
+        inspection: Inspection,
+        rendered: Mutex<Option<RenderedPage>>,
+    }
+    impl Worker for Synthetic {
+        fn inspect(&self, _: &Path, _: &Cancel) -> Result<Inspection, Reason> {
+            Ok(self.inspection.clone())
+        }
+        fn render(
+            &self,
+            _: &Path,
+            _: &[Page],
+            _: &Cancel,
+            publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
+        ) -> Result<(), Reason> {
+            publish(self.rendered.lock().unwrap().take().unwrap())?;
+            Ok(())
+        }
+    }
+    let fact = inspection.pages[0].clone();
+    let expected = [
+        fact.width / 10.,
+        fact.height / 8.,
+        fact.width / 3.,
+        fact.height / 2.,
+    ];
+    let worker = Synthetic {
+        inspection,
+        rendered: Mutex::new(Some(rendered)),
+    };
+    let (_dir, m, o) = fixture_worker(Arc::new(worker));
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    let e = exclusions::Exclusion {
+        pages: vec![1],
+        boxes: [(1, expected)].into(),
+        rationale: "Synthetic rotated page".into(),
+        proposal_fingerprint: None,
+    };
+    m.set_exclusion(&o, &id, m.read(&id).unwrap().revision, 0, &e, false)
+        .unwrap();
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.exclusion.unwrap().boxes[&1], expected);
+    let contract = m.contract(&id).unwrap();
+    assert_eq!(contract.pages[0].transform, fact.transform);
+    assert_eq!(contract.exclusion.unwrap().boxes[&1], expected);
+}
+
+fn live_repeated_text(environment: &str, require_proposal: bool) {
+    let path =
+        std::env::var_os(environment).expect("Set the local PDF path for this ignored check.");
+    let selection = std::env::var("MIMIK_3C_LIVE_PAGES")
+        .expect("Set MIMIK_3C_LIVE_PAGES to selected PDF page numbers, separated by commas.");
+    let pages = selection
+        .split(',')
+        .map(|p| p.parse::<u32>().expect("Invalid page number."))
+        .collect::<Vec<_>>();
+    let bytes = crate::local_file::read_path(Path::new(&path), 128 * 1024 * 1024).unwrap();
+    let (_dir, m, o) = fixture_worker(Arc::new(PdfWorker));
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(&bytes).unwrap();
+    let id = m
+        .create(&o, phase, &hash(&bytes), bytes.len() as u64, &metadata())
+        .unwrap();
+    wait(&m);
+    selected(&m, &o, &id, &pages);
+    start(&m, &o, &id);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    let proposals = m.propose_exclusions(&o.auth, &id, u.revision).unwrap();
+    if require_proposal {
+        assert!(!proposals.is_empty(), "No repeated-text proposal.");
+    }
+    // Never print text, filename, rationale, fingerprint or worker diagnostics.
+    println!("selected page count: {}", pages.len());
+    for proposal in proposals {
+        println!(
+            "affected page count: {}; boxes: {:?}",
+            proposal.boxes.len(),
+            proposal.boxes
+        );
+    }
+    m.discard(&o, &id).unwrap();
+}
+
+#[test]
+#[ignore = "coordinator-only local PDF and confinement: MIMIK_IT_BUYER_PDF, MIMIK_3C_LIVE_PAGES"]
+fn live_repeated_text_it_buyer_boxes_only() {
+    live_repeated_text("MIMIK_IT_BUYER_PDF", true);
+}
+
+#[test]
+#[ignore = "coordinator-only local PDF and confinement: MIMIK_BARE_BONES_PDF, MIMIK_3C_LIVE_PAGES"]
+fn live_repeated_text_bare_bones_boxes_only() {
+    live_repeated_text("MIMIK_BARE_BONES_PDF", false);
+}
+
+#[test]
+fn staged_contract_includes_confirmed_displayed_exclusion() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    m.write(&o, |tx| {
+        tx.execute(
+            "INSERT INTO source_upload_exclusions
+             (upload_id,revision,actor,actor_id,actor_epoch,session_digest,rationale,pages,boxes,created_at)
+             VALUES(?1,1,'account:1',1,1,?2,'Synthetic rationale','[1]',
+                    '{\"1\":[1,2,3,4]}',?3)",
+            params![id, o.auth.digest(), now()?],
+        )?;
+        Ok(())
+    }).unwrap();
+    assert!(m.contract(&id).unwrap().exclusion.is_some());
+}
+
 fn metadata() -> Metadata {
     Metadata {
         system_id: "mork-borg".into(),

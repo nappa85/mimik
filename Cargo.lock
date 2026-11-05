@@ -2177,6 +2177,7 @@ dependencies = [
  "toml_edit",
  "tower",
  "tower-sessions",
+ "unicase",
  "unicode-general-category",
  "unicode-normalization",
  "url",

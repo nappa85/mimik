@@ -60,10 +60,10 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         require(response.headers.get("content-security-policy") == STRICT_CSP, "Upload CSP changed")
         clean()
 
-    def submit(kind):
+    def submit(kind, redirect=True):
         from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
-        form = page.locator(f'form[data-form="{kind}"]')
+        form = page.locator(f'form[data-form="{kind}"]').first
         target = ORIGIN + form.get_attribute("action")
         posted = []
 
@@ -82,11 +82,17 @@ def scenario(browser, binary, directory, viewport, javascript, password):
                 and previous.url == target
             )
 
+        if not redirect:
+            with page.expect_navigation(wait_until="load") as response:
+                form.locator('button:not([type="button"])').click()
+            require(response.value.status == 200, f"Upload {kind} failed")
+            clean()
+            return
         with page.expect_response(is_post) as response:
             with page.expect_response(is_redirect_get) as following:
                 for attempt in range(10):
                     try:
-                        form.locator("button").click(timeout=1000)
+                        form.locator('button:not([type="button"])').click(timeout=1000)
                         break
                     except PlaywrightTimeout:
                         if posted:
@@ -190,6 +196,70 @@ def scenario(browser, binary, directory, viewport, javascript, password):
             page.locator('[data-upload-zoom="2"]').first.click()
             clean()
         require("BUYER-MARKER-NAME" not in page.content(), "Filename leaked into page")
+        hashes = rows(directory, "SELECT pdf_page,png_sha256 FROM source_upload_pages")
+        submit("propose", redirect=False)
+        proposal = page.locator('form[data-form="exclude"]').first
+        require(proposal.get_attribute("data-fingerprint"), "Proposal fingerprint missing")
+        require(
+            "Affected pages: 1 2 3" in page.locator("#repeated-text").inner_text(),
+            "Repeated-text pages missing",
+        )
+        require(
+            all(proposal.locator(f'[name="exclude_{n}"]').is_checked() for n in range(1, 4)),
+            "Proposal page selection changed",
+        )
+        proposal.locator('[name="rationale"]').fill("RATIONALE-PRIVATE-MARKER")
+        submit("exclude")
+        require(page.locator(".exclusion-mask").count() == 3, "Confirmed overlays missing")
+        for mask in page.locator(".exclusion-mask").all():
+            require(
+                mask.evaluate("e => getComputedStyle(e).fillOpacity") == "1",
+                "Exclusion overlay is not opaque",
+            )
+        require(
+            rows(directory, "SELECT pdf_page,png_sha256 FROM source_upload_pages") == hashes,
+            "Exclusion modified original PNGs",
+        )
+        # Numeric adjustment is exercised with JavaScript enabled and disabled.
+        editor = page.locator('form[data-form="exclude"]')
+        page.locator("#repeated-text details summary").click()
+        if javascript:
+            region = editor.locator("[data-region-editor]").first
+            region.locator("[data-region-keyboard]").click()
+            handle = region.locator('[data-corner="0"]')
+            before = float(editor.locator('[name="box_1_0"]').input_value())
+            handle.press("ArrowRight")
+            require(
+                float(editor.locator('[name="box_1_0"]').input_value()) == before + 1,
+                "Shared region keyboard handle lost displayed coordinates",
+            )
+        editor.locator('[name="box_1_0"]').fill("4")
+        editor.locator('[name="rationale"]').fill("Synthetic numeric adjustment")
+        submit("exclude")
+        require(
+            rows(directory, "SELECT revision FROM source_upload_exclusions ORDER BY revision")
+            == [(1,), (2,)],
+            "Replacement did not append history",
+        )
+        require(page.locator(".exclusion-mask").first.get_attribute("x") == "4", "Adjust lost")
+        page.locator('form[data-form="remove-exclusion"] [name="rationale"]').fill(
+            "Synthetic removal"
+        )
+        submit("remove-exclusion")
+        require(page.locator(".exclusion-mask").count() == 0, "Removal kept overlay")
+        require(
+            rows(directory, "SELECT rationale FROM source_upload_exclusions WHERE revision=1")
+            == [("RATIONALE-PRIVATE-MARKER",)],
+            "Rationale row changed",
+        )
+        for table in rows(directory, "SELECT name FROM sqlite_schema WHERE type='table'"):
+            name = table[0].replace('"', '""')
+            records = rows(directory, f'SELECT * FROM "{name}"')
+            rendered = repr(records).lower()
+            require("private-text-marker" not in rendered, "Staged text leaked into database")
+            require("buyer-marker-name" not in rendered, "Filename leaked into database")
+            if name != "source_upload_exclusions":
+                require("rationale-private-marker" not in rendered, "Rationale escaped its row")
         submit("discard")
         require(
             rows(directory, "SELECT count(*) FROM source_uploads") == [(0,)], "Discard kept rows"
@@ -199,6 +269,9 @@ def scenario(browser, binary, directory, viewport, javascript, password):
             "BUYER-MARKER-NAME" not in (directory / "server.log").read_text(),
             "Filename leaked into log",
         )
+        logged = (directory / "server.log").read_text().lower()
+        for marker in ("private-text-marker", "rationale-private-marker"):
+            require(marker not in logged, "Private text leaked into server/worker stderr capture")
     finally:
         context.close()
         if process.poll() is None:
