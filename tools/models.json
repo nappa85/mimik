@@ -476,7 +476,7 @@
     "twil-8b": {
       "label": "twil-8b-balanced-q4_k_m",
       "downloaded": true,
-      "path": "twil-8b-58d49f0d/TwIL-8B-Q4_K_M-balanced.gguf",
+      "path": "twil-8b/TwIL-8B-Q4_K_M-balanced.gguf",
       "sha256": "17bda82d2608ca61b6aca48394f212349ef1515d0d9a2e6edee06619152faa0e",
       "size": 5347917568,
       "source": {

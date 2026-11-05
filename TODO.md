@@ -124,7 +124,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   prompt work (examples of "per each" and of buying versus spending), then re-screen (GPU).
   - TwIL-8B (webAI, Granite 4.2 8B dense reasoning model, webAI Non-Commercial 1.0: local
     evaluation only): owner 2026-11-05 asked to try it. Official Q4_K_M balanced at revision
-    58d49f0d, SHA-256 17bda82d…faa0e, in `/media/data/mimik/models/twil-8b-58d49f0d`; GPU
+    58d49f0d, SHA-256 17bda82d…faa0e, in `/media/data/mimik/models/twil-8b`; GPU
     screen (104 replies, field refs) with thinking off and on, after 18:00 once the owner
     confirms the fans.
   - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
