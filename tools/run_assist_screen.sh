@@ -8,6 +8,8 @@
 # on the third server. llama-server runs on an internal network with no published port, CPU
 # only, pinned to CPUS (default 0,1) with 2 threads; the harness runs on HARNESS_CPU (7).
 # Environment: DEADLINE_EPOCH (default now + 10 h): no request starts after it.
+#   CTX (8192): server context size. REASONING (off): llama-server --reasoning (on for a
+#   thinking arm; raise MAX_TOKENS and CTX with it).
 #   MAX_TOKENS (384), VARIANT (exploratory prompt variant, empty = pre-registered prefix),
 #   PRIME (0): 1 sends the priming request (full fixed prefix, max_tokens 1) after every start,
 #   before any case, and records it as prime-<n>.jsonl.
@@ -39,6 +41,8 @@ CPUS=${CPUS:-0,1}
 HARNESS_CPU=${HARNESS_CPU:-7}
 DEADLINE_EPOCH=${DEADLINE_EPOCH:-$(( $(date +%s) + 36000 ))}
 MAX_TOKENS=${MAX_TOKENS:-384}
+CTX=${CTX:-8192}
+REASONING=${REASONING:-off}
 VARIANT=${VARIANT:-}
 PRIME=${PRIME:-0}
 DEVICE=${DEVICE:-cpu}
@@ -166,8 +170,8 @@ for key in "$@"; do
   mapfile -t ARGS < <(cd "$ROOT/tools" && python3 -c "
 import model_registry as m
 d = m.load(); e = m.model(d, '$key')
-for a in m.server_args(e, 8192, n_cpu_moe=int('$N_CPU_MOE') if '$N_CPU_MOE' else None, device='$DEVICE', threads=$THREADS): print(a)
-print('--threads-batch'); print('$THREADS'); print('--reasoning'); print('off')")
+for a in m.server_args(e, $CTX, n_cpu_moe=int('$N_CPU_MOE') if '$N_CPU_MOE' else None, device='$DEVICE', threads=$THREADS): print(a)
+print('--threads-batch'); print('$THREADS'); print('--reasoning'); print('$REASONING')")
   avail=$(awk '/^MemAvailable/{print int($2/1048576)}' /proc/meminfo)
   [ "$avail" -ge "$MIN_AVAIL_GB" ] || { log "$key: MemAvailable ${avail} GB < $MIN_AVAIL_GB GB; refusing"; exit 6; }
   log "$key: hashing $model (MemAvailable ${avail} GB)"

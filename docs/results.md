@@ -399,6 +399,36 @@ rates below are pessimistic and no CPU-baseline conclusion is drawn from them.
   the 180 s limit: on a machine where each sample takes more than about 90 s nothing can fit
   anyway (R at B 512 is then above 90 s), so the limit only decides how that is reported.
 
+## TwIL-8B screen (owner request, 2026-11-05)
+
+Prototype tier, exploratory (not pre-registered for this model; the bars are the existing ones).
+TwIL-8B (webAI, Granite 4.2 8B dense, post-trained for maths/code reasoning), official
+`TwIL-8B-Q4_K_M-balanced.gguf` at revision 58d49f0d (SHA-256 17bda82d…faa0e), webAI
+Non-Commercial License 1.0: local evaluation only, not a shippable default. Vulkan on the
+RX 6650 XT, fan manual 255, pinned llama.cpp image as the other screens, prompt D (v2-ids-53),
+temperature as the harness. Runs under `/media/data/mimik/assist-2c1/runs/twil-gpu-20261105`
+and `/media/data/mimik/fieldref/runs/twil-d53{,-think}-20261105`.
+
+| Screen | Model | Correct / false-confident / silent-or-abstained | Latency p50 / max | Output tokens max |
+|---|---|---|---|---|
+| 2b screen, 50 cases × 2 + 4 stress, thinking off | TwIL-8B | 44 / 4 / 2 (field refs 4 of 6) | 2.0 / 4.2 s | 124 |
+| same, earlier run | Qwen3.5-9B (GPU) | 42 / 4 / 4 (field refs 5 of 6) | 4.1 / 13.8 s | 178 |
+| field refs, 30 cases, thinking off (`--reasoning off`, 352 tokens) | TwIL-8B | 20 / 7 / 3 | — | — |
+| field refs, thinking on (`REASONING=on MAX_TOKENS=8192 CTX=16384`) | TwIL-8B | **26 / 3 / 1** | 18.4 / 40.2 s | 1,467 |
+| field refs, earlier run, D53 | Qwen3.5-9B (GPU) | 24 / 5 / 1 | 6.3 s p50 | — |
+
+- With thinking on, TwIL-8B is the first model to meet the field-reference screen bar
+  (correct_ref ≥ 24, false_confident ≤ 3): 8 cases changed, 7 for the better (fr-03, 05, 17,
+  18, 25, 26, 28) and one worse (fr-20). Thinking off, it is the best model on the general
+  2b screen but below the 9B on field references.
+- Cost: thinking generates 660 tokens per reply at the median (1,467 max), 18 s p50 and 40 s
+  max on this GPU; on the CPU path that would be minutes per reply. Pass agreement on the 2b
+  screen was 50/50 (thinking off). The 2b screen was not run with thinking on.
+- Limitations: one run per arm, n = 30 and 50, author-written synthetic cases; exploratory,
+  so a candidate for a pre-registered confirmation, not a decision; the licence forbids a
+  commercial or default use, so it can only inform which approach (a reasoning pass) to try
+  with a permissively licensed model.
+
 ## Assisted interpretation: shipped prompt D on the 2b screen (ASSIST-56, 2026-10-27)
 
 Prototype tier, one run (`tools/run_assist_screen.sh`, `CONTRACT=v2-ids-53 PRIME=1

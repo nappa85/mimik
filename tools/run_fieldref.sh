@@ -64,7 +64,7 @@ for arm in $ARMS; do
     *) echo "unknown arm $arm" >&2; exit 2 ;;
   esac
   CONTRACT=$contract PRIME=1 PASSES=1 STRESS=0 COLD=1 COLD_ONLY='' THREADS=$THREADS CPUS=$CPUS \
-    CASES=assist-eval/fieldref-cases.json MAX_TOKENS=352 NAME=fieldref DEADLINE_EPOCH=$deadline \
+    CASES=assist-eval/fieldref-cases.json MAX_TOKENS=${MAX_TOKENS:-352} NAME=fieldref DEADLINE_EPOCH=$deadline \
     "$ROOT/tools/run_assist_screen.sh" "$OUT/$arm" "$MODEL" </dev/null \
     || { echo "$(date '+%F %T') $arm: runner exit $?" | tee -a "$OUT/run.log"; failed=1; }
   if [ -s "$OUT/$arm/$MODEL/screen.jsonl" ]; then
