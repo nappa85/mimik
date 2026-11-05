@@ -30,17 +30,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **Source import plan** (`docs/source-import-plan.md`, reviewed, SRC-11 to SRC-14): steps 1
   (schema) and 2 (review screen, `mimik import-suggestions`, browser checks) merged. Step 3's plan
   (`docs/source-upload-plan.md`, reviewed) is merged; part 3a (the sandboxed MuPDF worker, its
-  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. 3b (staging, ledger, jobs; upload route, screens, browser
-  suite; DEP-30 multer) is complete on branch `source-upload-3b` (85f3189): reviewed (Sol and
-  Opus, final rounds approve), full gate green 2026-11-01 (1708 passed), upload browser suite
-  4/4, cargo audit clean. Unmerged until its two host live tests run: the user allows the
-  host run of the reviewed test binary (2026-11-05).
-  3c (repeated-text exclusion; migration 027, DEP-31 unicase) is complete on branch
-  `source-upload-3c` (fc78738, stacked on 3b): reviewed (Sol approve, Opus approve with changes,
-  rest in SRC-REPEAT-COST), gate green 2026-11-01 (1734 passed), both browser suites 4/4, audit
-  clean. Its two ignored real-PDF checks (IT buyer mark, Bare Bones; page counts and boxes only)
-  run on the host with the 3b live tests. Merge 3b then 3c (the 3b merge re-adds
-  `!tools/fixtures/upload-three-pages.pdf.txt` to `.dockerignore`, narrowed on master). Step 4 (route A) has its plan
+  record protocol, the hostile corpus, availability, notices, DEP-29) is merged. Steps 3b (staging, ledger, jobs, upload route and screens) and 3c (repeated-text exclusion)
+  are merged (2026-11-05, host live tests and real-PDF checks passed). Step 4 (route A) has its plan
   (`docs/source-route-a-plan.md` on branch `source-route-a`, 809be8f, stacked on 3c; two review
   rounds, final verdicts approve with changes, applied). Owner decisions 2026-11-05: change the
   renderer pin rather than wrap MuPDF (find a crate/version exposing line direction, bidi and
