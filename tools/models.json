@@ -472,6 +472,52 @@
       "vram_budget_source": "candidate sheet: 4.7 GiB (Q4_0, sliding-window KV) + 0.6 GiB buffers (estimate)",
       "licence": "Apache-2.0 (Gemma 4 licence page; separate prohibited-use policy page)",
       "notes": "docs/results.md (CPU S40 screens) S2. Official ggml-org Q4_0 chosen (the sheet's VRAM estimate is for Q4_0); the third-party unsloth Q4_K_M (4,977,171,584 B, 85a896a0...ab87) is the alternative. Downloaded and sha256-verified 1792162902 (unix)."
+    },
+    "twil-8b": {
+      "label": "twil-8b-balanced-q4_k_m",
+      "downloaded": true,
+      "path": "twil-8b-58d49f0d/TwIL-8B-Q4_K_M-balanced.gguf",
+      "sha256": "17bda82d2608ca61b6aca48394f212349ef1515d0d9a2e6edee06619152faa0e",
+      "size": 5347917568,
+      "source": {
+        "repo": "webAI-Official/TwIL-8B",
+        "revision": "58d49f0d9909e62f9c2fb09e99fc5c76f3f2d630",
+        "file": "TwIL-8B-Q4_K_M-balanced.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": "q8_0",
+        "cache_type_v": "q8_0",
+        "flash_attn": "on",
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "card: template opens <think> by default; chat_template_kwargs enable_thinking=False and reasoning_effort='low' accepted",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card generation_config: temperature 1.0, top_p 0.95 (metadata only; arms set sampling)"
+      },
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 55,
+      "seconds_per_episode_source": "estimate: unmeasured, as Granite 4.2 8B (same architecture and size)",
+      "vram_budget_bytes": 7945689497,
+      "vram_budget_source": "as Granite 4.2 8B: about 7.0 GiB with q8_0 KV at 24k plus buffers (estimate)",
+      "licence": "webAI Non-Commercial License ver. 1.0 (LICENSE.md at the pinned revision): non-commercial research and educational use only; local evaluation only, never a shipped default",
+      "notes": "Owner request 2026-11-05. Granite 4.2 8B post-trained by webAI for maths/code reasoning (dense GraniteForCausalLM, 8.79B). Thinking on by default (enable_thinking/reasoning_effort in the template); card recommends large generation budgets."
     }
   }
 }
