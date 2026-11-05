@@ -5,6 +5,14 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 ## PDF source uploads
 
+- **SRC-UPLOAD-POLL** [HTTP admission] The server is HTTP/1 only. Before CSRF admission the
+  parser receives at most 4 KiB; the process holds at most the pending frame plus hyper's
+  channel slot and read buffer (a small constant multiple of hyper's approximately 408 KiB
+  maximum buffer). No file byte is spooled before admission; only one upload streams at a time.
+  After admission explicit Pending boundaries every 64 KiB bound parser read-ahead to two
+  64 KiB batches plus multipart delimiter lookbehind, apart from the pending transport frame.
+
+- **SRC-STAGING-AUDIT** [staging] Staging writes are not recorded in the permanent source review-event log; add upload events if a staging history is required.
 - **SRC-FUZZ** [testing, TODO follow-up] No cargo-fuzz runs yet. Add containerized fuzzing
   of the record parser and sandboxed MuPDF entry points; the generated hostile corpus is
   deterministic coverage, not fuzzing. Watch MuPDF's C security advisories at each release;
@@ -14,6 +22,7 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   fonts. Only owner-source comparison can establish visual fidelity.
 - **SRC-PLATFORMS** [upload] macOS and Windows have no PDF upload worker; Linux confinement
   must pass the real worker probe, with no unconfined fallback.
+- **BUILD-PLATFORMS** [CI] Non-Linux builds are not compiled in CI.
 - **SRC-TYPE3** [diagnostics] The font diagnostic skips Type3 fonts and does not scan their
   glyph resources. Substituted fonts used there are not reported; extend the bounded scan
   with synthetic fixtures if this diagnostic coverage is required.
@@ -167,6 +176,21 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **L-LIC-2** [licensing] Marker's weights carry modified OpenRAIL-M terms, read only from the upstream README; check the installed version's code and weight terms before using its output beyond local preparation.
 
 ## Sources and retrieval
+
+- **L-SRC-12** [sources] `mupdf_stays_in_worker` is a source/dependency lint, not a complete Rust or Cargo parser. The process sandbox is the boundary for PDF parsing and rendering.
+  It does not read `.cargo/config*` source redirection (`paths` or config `[patch]`);
+  repository-root `.cargo/config` and `.cargo/config.toml` are refused. Ancestor/global
+  configuration, `.cargo/config*` files below the root (read when Cargo runs from a
+  subdirectory) and environment-driven Cargo changes are outside this lint.
+  Literal out-of-line module declarations in macro token bodies are refused rather
+  than expanded; declarative macros that assemble a `mod` declaration from metavariables
+  (`$k shim;`, `mod shim $s`), procedural macros and other generated source are not modeled.
+  Module bases come only from crate roots and reachable declarations; unreachable
+  broad-walk files are linted as text without resolving their module declarations.
+  `include!` inherits file-level module/attribute bases, but includes nested inside
+  inline modules or blocks are not scoped separately by the token walker. Supporting
+  those layouts requires a context-aware include visitor. Block-level `mod x;`
+  retains the conservative directory-resolution over-approximation.
 
 - **L-SRC-1** [sources] Extraction fidelity is measured on 18 pages of one manual (MÖRK BORG IT, `docs/results.md`); other manuals and full books are unmeasured. Even the chosen route (Marker with forced OCR) leaves text in no unit now and then (one footnote in 18 pages), and review cannot add a unit, so such text is evidence only through the page image.
 - **L-SRC-2** [sources] Scalable whole-book admission is an open policy and design question: model-checked material cannot become verified lookup without human review, no automated-coverage policy exists, and book-wide hierarchy is not in the schema. Italian Pathfinder errata coverage is unknown.

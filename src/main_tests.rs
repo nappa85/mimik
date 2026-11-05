@@ -1,5 +1,13 @@
 use super::*;
 #[test]
+fn synthetic_upload_worker_flag_is_development_only() {
+    let parsed = Args::try_parse_from(["mimik", "--upload-dev-worker-ms", "100"]);
+    #[cfg(all(target_os = "linux", feature = "dev-endpoint"))]
+    assert_eq!(parsed.unwrap().upload_dev_worker_ms, Some(100));
+    #[cfg(not(all(target_os = "linux", feature = "dev-endpoint")))]
+    assert!(parsed.is_err());
+}
+#[test]
 fn authentication_and_database_defaults_need_no_flags() {
     let normal = Args::try_parse_from(["mimik"]).unwrap();
     assert!(!normal.no_auth);

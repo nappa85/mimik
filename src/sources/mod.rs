@@ -2,7 +2,11 @@
 pub(crate) mod documents;
 mod import;
 mod reports;
+#[cfg(target_os = "linux")]
+pub mod staging;
 mod suggestions;
+#[cfg(target_os = "linux")]
+pub mod uploads;
 #[cfg(target_os = "linux")]
 pub mod worker;
 pub use documents::{OwnerUnit, PrimaryPageState, UnitDecision, parse_page_list};

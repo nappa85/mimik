@@ -1,0 +1,23 @@
+{% extends "material_base.html" %}
+{% block head %}{% if refresh %}<noscript><meta http-equiv="refresh" content="2"></noscript>{% endif %}<script src="/assets/source-upload.js" defer></script>{% endblock %}
+{% block content %}
+<h1>Staged PDF</h1><p>{{ upload.pdf_bytes }} bytes · SHA-256 {{ self.hash() }} · {{ upload.state }}</p>
+{% if let Some(document) = upload.already_document %}<p>already document {{ document }}; this upload can become a separate reading.</p>{% endif %}
+{% include "upload_progress.html" %}
+<form method="post" action="/admin/materials/uploads/{{ upload.id }}/set" data-form="set">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}">
+<label>System id<input name="system" value="{{ upload.metadata.system_id }}" required maxlength="100"></label>
+<label>Edition<input name="edition" value="{{ upload.metadata.edition }}" required maxlength="100"></label>
+<label>Language<input name="language" value="{{ upload.metadata.language }}" required maxlength="30"></label>
+{% if let Some(inspection) = upload.inspection %}<h2>Inspection: {{ inspection.document.pages }} pages</h2><p>{% if inspection.document.encrypted %}Encrypted PDF opened without a password.{% else %}Not encrypted.{% endif %}</p>
+<fieldset><legend>Select at most 64 pages</legend>{% for page in inspection.pages %}<label><input type="checkbox" name="page_{{ page.n }}" value="1" {% if self.selected(*page.n) %}checked{% endif %}>Page {{ page.n }} · {{ page.width }} × {{ page.height }} pt · rotation {{ page.rotate }}°</label>{% endfor %}</fieldset>{% endif %}
+<button>Save metadata and selection</button></form>
+{% if !self.busy() %}<form method="post" action="/admin/materials/uploads/{{ upload.id }}/inspect" data-form="inspect"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}"><button>Inspect again</button></form>
+{% if upload.inspection.is_some() %}<form method="post" action="/admin/materials/uploads/{{ upload.id }}/render" data-form="render"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}"><button>Render the remaining pages</button></form>{% endif %}{% endif %}
+<h2>Rendered pages</h2>{% for page in upload.pages %}<article class="panel"><h3>Page {{ page.pdf_page }}</h3><p>Text layer: {{ page.stats.chars }} characters; {{ page.stats.unmapped }} unmapped; image area {{ page.stats.image_area }}. {% if page.stats.incomplete %}Diagnostics incomplete.{% endif %}Substituted fonts: {% for font in page.stats.fonts_substituted %}{{ font }} {% endfor %}</p>
+<a href="/admin/materials/uploads/{{ upload.id }}/pages/{{ page.pdf_page }}/image" target="_blank" rel="noopener">Open full-size image for zoom and pan</a>
+<div class="upload-zoom" hidden><button type="button" data-upload-zoom="fit">Fit width</button><button type="button" data-upload-zoom="1">100%</button><button type="button" data-upload-zoom="2">200%</button></div>
+<div class="review-image-scroll"><img class="upload-image" loading="lazy" src="/admin/materials/uploads/{{ upload.id }}/pages/{{ page.pdf_page }}/image" alt="Staged render of PDF page {{ page.pdf_page }}"></div></article>{% endfor %}
+<section class="panel"><h2>Read page text (not available yet)</h2><button disabled>PDF text — needs text-layer extraction and source creation</button><button disabled>Scanned text — needs OCR</button><button disabled>Image interpretation — needs a vision provider</button><button disabled>Owner-supplied text — suggestions only</button><p>Source creation is not available yet. Staged pages are not a source or approved evidence.</p></section>
+<form method="post" action="/admin/materials/uploads/{{ upload.id }}/discard" data-form="discard"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Discard</button></form>
+{% endblock %}

@@ -100,7 +100,7 @@ jobs:
           name: synthetic-smoke-inputs
           path: target/smoke-source/
           if-no-files-found: error
-      # A development build (the assistant's dev endpoint), for its browser check only: it is
+      # A development build for the assistant and upload browser checks: it is
       # never packaged or released.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -194,6 +194,14 @@ jobs:
             --mount "type=bind,src=$PWD/dev-endpoint/mimik,dst=/app/mimik-dev,readonly" \
             --mount "type=bind,src=$PWD/smoke-source,dst=/fixture,readonly" \
             mimik-browser /checks/assist_model_browser.py /app/mimik-dev --fixture /fixture
+
+      - name: Offline browser check of source uploads with the synthetic development worker
+        run: |
+          chmod 0755 dev-endpoint/mimik
+          docker run --rm --network=none --cpus=2 --memory=4g --shm-size=1g --pids-limit=1024 \
+            --cap-drop=ALL --security-opt=no-new-privileges --entrypoint python \
+            --mount "type=bind,src=$PWD/dev-endpoint/mimik,dst=/app/mimik-dev,readonly" \
+            mimik-browser /checks/upload_browser.py /app/mimik-dev
 
   lan-smoke:
     needs: checks

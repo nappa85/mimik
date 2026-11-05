@@ -5,6 +5,10 @@ mod account_cli;
 #[derive(Parser)]
 #[command(version, about = "Local sheet-first RPG companion")]
 struct Args {
+    /// Browser checks only: synthetic upload worker, delay in milliseconds per page.
+    #[cfg(all(target_os = "linux", feature = "dev-endpoint"))]
+    #[arg(long, conflicts_with = "no_auth", value_parser = clap::value_parser!(u64).range(0..=60000))]
+    upload_dev_worker_ms: Option<u64>,
     /// Development only: disable authentication and use the isolated loopback prototype.
     #[arg(long)]
     no_auth: bool,
@@ -393,6 +397,25 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.assistant.on {
         options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
     }
+    #[cfg(target_os = "linux")]
+    if auth {
+        let upload_store = store.clone();
+        let data = data_dir(&path)?;
+        options.uploads = Some(
+            tokio::task::spawn_blocking(move || {
+                #[cfg(feature = "dev-endpoint")]
+                if let Some(delay) = args.upload_dev_worker_ms {
+                    return mimik::sources::uploads::Uploads::open_development(
+                        upload_store,
+                        &data,
+                        std::time::Duration::from_millis(delay),
+                    );
+                }
+                mimik::sources::uploads::Uploads::open(upload_store, &data)
+            })
+            .await??,
+        );
+    }
     let assistant = options.assistant.clone();
     let served = serve(store, auth, options, &path).await;
     if let Some(assistant) = assistant {
@@ -504,6 +527,10 @@ async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn st
 }
 
 fn validate_serving_args(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(all(target_os = "linux", feature = "dev-endpoint"))]
+    if args.command.is_some() && args.upload_dev_worker_ms.is_some() {
+        return Err("Serving options cannot be combined with operator subcommands.".into());
+    }
     if args.command.is_some()
         && (args.no_auth
             || args.loopback
@@ -558,6 +585,7 @@ fn server_options(
         assistant: None,
         network,
         external_url,
+        ..mimik::auth::AuthOptions::default()
     })
 }
 

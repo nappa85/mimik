@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 25;
+pub const SCHEMA_VERSION: i64 = 26;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 25] = [
+const MIGRATIONS: [&str; 26] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -36,6 +36,7 @@ const MIGRATIONS: [&str; 25] = [
     include_str!("../migrations/023_assistant_downloads.sql"),
     include_str!("../migrations/024_source_documents.sql"),
     include_str!("../migrations/025_source_review.sql"),
+    include_str!("../migrations/026_source_uploads.sql"),
 ];
 
 #[derive(Clone)]
@@ -71,6 +72,14 @@ pub(crate) fn register_auth_clock(
 }
 
 impl Store {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn upload_storage<T>(
+        &self,
+        operation: impl FnOnce(&mut Connection) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        let mut connection = self.0.lock().map_err(|_| AppError::Worker)?;
+        operation(&mut connection)
+    }
     /// Open a local database and apply supported migrations.
     ///
     /// # Errors

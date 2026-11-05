@@ -2143,9 +2143,11 @@ dependencies = [
  "libc",
  "lopdf",
  "mime",
+ "multer",
  "mupdf",
  "object",
  "png",
+ "proc-macro2",
  "procfs",
  "proptest",
  "qrcode",
@@ -2166,11 +2168,13 @@ dependencies = [
  "sha2 0.11.0",
  "similar",
  "subtle",
+ "syn 2.0.119",
  "tempfile",
  "thiserror",
  "time",
  "tokio",
  "tokio-rustls",
+ "toml_edit",
  "tower",
  "tower-sessions",
  "unicode-general-category",
@@ -2214,6 +2218,23 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]

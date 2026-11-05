@@ -200,6 +200,8 @@ fn rewind_finalization(db: &rusqlite::Connection, remigrate: bool) {
             .unwrap();
         db.execute_batch(include_str!("../../migrations/025_source_review.sql"))
             .unwrap();
+        db.execute_batch(include_str!("../../migrations/026_source_uploads.sql"))
+            .unwrap();
         // Search objects (017+) were kept intact for the live session, so the schema is
         // current again; derived rows need no re-application.
         db.pragma_update(None, "user_version", current_schema())
@@ -242,6 +244,7 @@ pub fn rewind_documents(db: &rusqlite::Connection) {
 /// Recreate schema 24 suggestions, including its original guards. Refuse new-only fixture data.
 #[allow(dead_code, reason = "Shared historical fixture helper")]
 pub fn rewind_review(db: &rusqlite::Connection) {
+    rewind_uploads(db);
     db.create_scalar_function(
         "mimik_request_auth",
         0,
@@ -291,6 +294,34 @@ pub fn rewind_review(db: &rusqlite::Connection) {
         .split_once("CREATE INDEX source_suggestions_source")
         .unwrap();
     tx.execute_batch(&format!("CREATE TABLE source_suggestions ({table} INSERT INTO source_suggestions SELECT * FROM legacy_suggestions; DROP TABLE legacy_suggestions; CREATE INDEX source_suggestions_source{triggers}")).unwrap();
+}
+
+fn rewind_uploads(db: &rusqlite::Connection) {
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='source_uploads')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if !exists {
+        return;
+    }
+    for table in [
+        "source_upload_pages",
+        "source_upload_exclusions",
+        "source_jobs",
+        "source_uploads",
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "Cannot rewind populated {table}"
+        );
+    }
+    db.execute_batch("DROP VIEW source_upload_invalid_inspection; DROP VIEW source_upload_invalid_exclusion; DROP TABLE source_upload_pages; DROP TABLE source_upload_exclusions; DROP TABLE source_jobs; DROP TABLE source_uploads;").unwrap();
 }
 
 /// The migration-chain test pins the file count to the application schema version.

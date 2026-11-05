@@ -4,6 +4,8 @@ mod launch;
 pub use availability::{Availability, availability};
 #[cfg(test)]
 mod live_tests;
+#[cfg(test)]
+pub(crate) use launch::RenderHook;
 pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render};
 mod entry;
 mod filter;
@@ -15,6 +17,10 @@ pub use entry::{RenderSettings, Spec, run_entry};
 pub use geometry::pixel_size;
 use operations::Input;
 pub use records::{Inspection, Page, RenderedPage};
+
+/// Versions of the pinned renderer, retained with staged page provenance.
+pub const CRATE_VERSION: &str = "0.8.0";
+pub const MUPDF_VERSION: &str = "1.27.2";
 
 /// Fixed, non-sensitive reasons shared with the parent.
 #[derive(

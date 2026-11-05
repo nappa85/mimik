@@ -3,5 +3,6 @@
 !containers/**
 !tools/*.py
 !tools/*.txt
+!tools/fixtures/upload-three-pages.pdf.txt
 !schemas/
 !schemas/*.json

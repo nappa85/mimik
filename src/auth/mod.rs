@@ -7,6 +7,8 @@ mod errors;
 mod materials;
 mod persistence;
 mod rulesets;
+#[cfg(target_os = "linux")]
+mod uploads;
 pub use persistence::Principal;
 pub use persistence::SqliteSessions;
 
@@ -104,6 +106,8 @@ pub(crate) struct AuthState {
 
 #[derive(Clone, Default)]
 pub struct AuthOptions {
+    #[cfg(target_os = "linux")]
+    pub uploads: Option<crate::sources::uploads::Uploads>,
     pub development_owner_play: bool,
     /// The interpretation assistant (`--assistant`, step 2c-1); `None` is off.
     pub assistant: Option<crate::assistant::AssistantHandle>,
@@ -187,7 +191,7 @@ fn router_with_sessions(
         .with_http_only(true)
         .with_same_site(SameSite::Strict)
         .with_path("/");
-    Router::new()
+    let router = Router::new()
         .route("/", get(landing))
         .route("/auth/login", get(login_form).post(login))
         .route("/auth/logout", post(logout))
@@ -195,7 +199,10 @@ fn router_with_sessions(
         .merge(administration::routes())
         .merge(assistant::routes())
         .merge(materials::routes())
-        .merge(rulesets::routes())
+        .merge(rulesets::routes());
+    #[cfg(target_os = "linux")]
+    let router = router.merge(uploads::routes());
+    router
         .merge(crate::campaigns::web::routes(
             state.options.assistant.is_some(),
         ))
@@ -218,6 +225,19 @@ fn router_with_sessions(
 }
 
 async fn boundary(request: Request, next: Next) -> Response {
+    // The upload stream has its own idle and total deadlines. Other requests keep
+    // the short authentication-boundary deadline.
+    let deadline = if request.method() == Method::POST
+        && request.uri().path() == "/admin/materials/uploads"
+    {
+        Duration::from_secs(15 * 60 + 5)
+    } else if request.method() == Method::GET && request.uri().path() == "/admin/materials/uploads"
+    {
+        // The first upload-related read may run the confined 30-second probe.
+        Duration::from_secs(35)
+    } else {
+        Duration::from_secs(5)
+    };
     let browser_navigation = browser_auth_navigation(&request);
     let document = browser_document(&request);
     let response = if let Ok(_permit) = REQUESTS.clone().try_acquire_owned() {
@@ -227,10 +247,8 @@ async fn boundary(request: Request, next: Next) -> Response {
                 busy.clone(),
                 READ_ADMISSION.scope(
                     std::cell::Cell::new(None),
-                    DOCUMENT_PRESENTATION.scope(
-                        document,
-                        tokio::time::timeout(Duration::from_secs(5), next.run(request)),
-                    ),
+                    DOCUMENT_PRESENTATION
+                        .scope(document, tokio::time::timeout(deadline, next.run(request))),
                 ),
             )
             .await;
@@ -499,7 +517,14 @@ async fn post_origin(request: Request, next: Next) -> Response {
         let valid = content
             .next()
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.split(';').next() == Some("application/x-www-form-urlencoded"));
+            .is_some_and(|v| {
+                let expected = if request.uri().path() == "/admin/materials/uploads" {
+                    "multipart/form-data"
+                } else {
+                    "application/x-www-form-urlencoded"
+                };
+                v.split(';').next() == Some(expected)
+            });
         if !valid || content.next().is_some() {
             return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
         }

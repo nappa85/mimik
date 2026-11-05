@@ -7,6 +7,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     // Callers may already have selected an older migration fixture version.
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    db.execute_batch(
+        "DROP VIEW IF EXISTS source_upload_invalid_exclusion;
+         DROP VIEW IF EXISTS source_upload_invalid_inspection;
+         DROP TABLE IF EXISTS source_upload_exclusions;
+         DROP TABLE IF EXISTS source_upload_pages;
+         DROP TABLE IF EXISTS source_jobs;
+         DROP TABLE IF EXISTS source_uploads;",
+    )?;
     let review: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='source_suggestion_reports')",
         [],

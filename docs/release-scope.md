@@ -29,6 +29,12 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
 - **Owner materials.** The Owner registers games and editions at `/admin/rulesets`, and reviews
   imported source pages against the original page images at `/admin/materials`. Source import,
   definition publication and catalogue publication use the command line.
+- **PDF staging.** On Linux, the Owner uploads one PDF at `/admin/materials/uploads`, inspects
+  it, selects up to 64 pages, renders, cancels/retries jobs and discards staging. Upload needs
+  the sandbox's unprivileged user namespaces and successful availability probe; failure shows
+  remediation and never selects an unconfined parser. macOS and Windows have no upload.
+  Until source-import step 4, this stages pages only: it creates no source or lookup evidence.
+  The synthetic upload worker is confined to explicit `dev-endpoint` browser-check builds.
 - **Unauthenticated prototype.** `--no-auth` serves the old single-user editor on
   `127.0.0.1` only. It is not protected by accounts and does not see private campaign data.
 
