@@ -518,6 +518,190 @@
       "vram_budget_source": "as Granite 4.2 8B: about 7.0 GiB with q8_0 KV at 24k plus buffers (estimate)",
       "licence": "webAI Non-Commercial License ver. 1.0 (LICENSE.md at the pinned revision): non-commercial research and educational use only; local evaluation only, never a shipped default",
       "notes": "Owner request 2026-11-05. Granite 4.2 8B post-trained by webAI for maths/code reasoning (dense GraniteForCausalLM, 8.79B). Thinking on by default (enable_thinking/reasoning_effort in the template); card recommends large generation budgets."
+    },
+    "nemotron35-bolt-e4b": {
+      "label": "nemotron-3.5-bolt-e4b-q4_k_m",
+      "downloaded": true,
+      "path": "nemotron35-bolt-e4b/Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf",
+      "sha256": "c8af2b8aea10a690a1d9491db744a9446660173cb38fc489612b556615a69612",
+      "size": 6180446208,
+      "source": {
+        "repo": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB",
+        "revision": "1db54d5b12533ff1bcaa8e42cf4c667988a1f1be",
+        "file": "Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "card: chat_template_kwargs enable_thinking True/False (default on); client-side thinking budget",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card (metadata only; arms set sampling)"
+      },
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 30,
+      "seconds_per_episode_source": "estimate: unmeasured",
+      "vram_budget_bytes": 7000000000,
+      "vram_budget_source": "estimate: unmeasured; measure at the first screen",
+      "licence": "OpenMDW-1.1 (NVIDIA; model card: ready for commercial or non-commercial use); base Gemma 4 E4B (Apache-2.0)",
+      "notes": "Owner screen 2026-11-06. NVIDIA post-training of Gemma 4 E4B; Italian among supported languages; IFBench 63.8, StructEval-T 80.4 (card)."
+    },
+    "sparkx26-4b": {
+      "label": "spark-x2.6-4b-q4_k_m",
+      "downloaded": true,
+      "path": "sparkx26-4b/Spark-X2.6-4B-Q4_K_M.gguf",
+      "sha256": "91cb2811aebb47ac916aa619d27d4cdd7f4143106b7917accb8ead4cd7f5cbd9",
+      "size": 3543441312,
+      "source": {
+        "repo": "XHToken/Spark-X2.6-4B-GGUF",
+        "revision": "3c33ab38746828196b9b5979c739ee2d0bef894d",
+        "file": "Spark-X2.6-4B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 24576,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "card: enable_thinking (default on); none/low/high levels mentioned",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card (metadata only; arms set sampling)"
+      },
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 15,
+      "seconds_per_episode_source": "estimate: unmeasured",
+      "vram_budget_bytes": 4939212390,
+      "vram_budget_source": "estimate: unmeasured; measure at the first screen",
+      "licence": "Apache-2.0 (LICENSE in the GGUF repo)",
+      "notes": "Owner screen 2026-11-06. SparkLLM 4B dense, arch spark2_5 (needs llama.cpp >= b10828; the pinned image is b11610)."
+    },
+    "ornith15-9b": {
+      "label": "ornith-1.5-9b-q4_k_m",
+      "downloaded": true,
+      "path": "ornith15-9b/Ornith-1.5-9B-Q4_K_M.gguf",
+      "sha256": "70c112196e0b7023803c9762752e46d29e612a92c83f995bc3ba1ceb07e8fab6",
+      "size": 5780090816,
+      "source": {
+        "repo": "ornith-ai/Ornith-1.5-9B-GGUF",
+        "revision": "abdd624b12ebf020b767fff532ff44fe552b28c3",
+        "file": "Ornith-1.5-9B-Q4_K_M.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 16384,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": false,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "card: thinking always on (<think>); whether the template honours enable_thinking is UNVERIFIED",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card (metadata only; arms set sampling)"
+      },
+      "memory_limit": "14g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 51,
+      "seconds_per_episode_source": "estimate: unmeasured",
+      "vram_budget_bytes": 7516192768,
+      "vram_budget_source": "estimate: unmeasured; measure at the first screen",
+      "licence": "MIT (HF metadata)",
+      "notes": "Owner screen 2026-11-06. Qwen3.5-architecture 9B reasoning model (Ornith 1.5); text only here (mmproj not downloaded)."
+    },
+    "nemotron35-lightning-30b-a3b": {
+      "label": "nemotron-3.5-lightning-30b-a3b-q4_0",
+      "downloaded": true,
+      "path": "nemotron35-lightning-30b-a3b/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf",
+      "sha256": "61f87e75974e4b535dcdf9aad056541a9514f1dfa4538b463b081d19b7a00e3c",
+      "size": 18898091584,
+      "source": {
+        "repo": "ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF",
+        "revision": "8cd082170ed313484be1cf44f256a5caa2cfdad3",
+        "file": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Q4_0.gguf"
+      },
+      "server_image": "ghcr.io/ggml-org/llama.cpp@sha256:217d278eded30ca7b61321f4ce4dd86a0a56157f54b73e5600e2ad46070ddfff",
+      "server": {
+        "ctx": 16384,
+        "n_gpu_layers": 99,
+        "n_cpu_moe": null,
+        "n_cpu_moe_required": true,
+        "threads": 6,
+        "cache_ram": 0,
+        "cache_type_k": null,
+        "cache_type_v": null,
+        "flash_attn": null,
+        "extra_args": []
+      },
+      "capabilities": {
+        "tools": "handler",
+        "thinking": "toggle",
+        "thinking_evidence": "card: enable_thinking True/False (default on)",
+        "decision_readout": "untested"
+      },
+      "recommended_sampling": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "source": "model card (metadata only; arms set sampling)"
+      },
+      "memory_limit": "26g",
+      "prewarm": true,
+      "health_wait_seconds": 900,
+      "request_timeout_seconds": 180,
+      "seconds_per_episode": 240,
+      "seconds_per_episode_source": "estimate: unmeasured",
+      "vram_budget_bytes": 7516192768,
+      "vram_budget_source": "estimate: unmeasured; measure at the first screen",
+      "licence": "OpenMDW-1.1 (NVIDIA; model card: ready for commercial use)",
+      "notes": "Owner screen 2026-11-06. Hybrid Mamba-2/MoE/attention (nemotron_h), 30B total, 3B active; Italian supported; MTP head not used."
     }
   }
 }
