@@ -473,8 +473,42 @@ thinking on.
 - The small models without a thinking budget (Spark-X2.6-4B, Granite 4.2 3B) run away;
   a reasoning budget is needed before thinking is usable on them.
 - Limitations: one run per arm, n = 30/50 author-written dev cases already used for prompt
-  work; desktop load during the runs; b11610 only (the v0.9.0 comparison follows). Candidates
+  work; desktop load during the runs; b11610 (the v0.9.0 comparison is in its own section). Candidates
   for a pre-registered confirmation on fresh cases, not decisions.
+
+## llama.cpp v0.9.0 (b12110) against b11610 on the interpretation screens (owner request, 2026-11-06)
+
+Prototype tier, exploratory, one run per arm. The same screens, prompt D (v2-ids-53), cases and
+settings as the b11610 runs above, on the official Vulkan server image of release b12110
+(`ghcr.io/ggml-org/llama.cpp@sha256:dd0ca57c…a4`, `SERVER_IMAGE` override), GPU (RX 6650 XT,
+fan manual 255), evening of 2026-11-06 with `LOAD_MAX=3`. The b11610 runs had desktop load and,
+for the thinking-on arms, a 2-core build alongside, so the latency ratios are upper bounds of
+the speed-up, not clean measurements. Runs: `…/fieldref/runs/*-v090-20261106`,
+`…/assist-2c1/runs/*-v090-20261106`.
+
+| Model | 2b screen off, b11610 → v0.9.0 (p50) | Field refs off, b11610 → v0.9.0 | Field refs thinking on, b11610 → v0.9.0 (p50) |
+|---|---|---|---|
+| Ornith-1.5-9B | 45/2/3 (4.0 s) → 45/3/2 (2.1 s) | 23/6/1 → 24/4/2 | 27/2/1 (15 s) → **27/2/1** (5.4 s, max 29 s instead of 246 s) |
+| TwIL-8B | 44/4/2 (2.0 s) → 45/3/2 (1.4 s) | 20/7/3 → 21/6/3 | 26/3/1 (18 s) → 25/3/2 (18 s; one reply hit the 8,192 cap) |
+| Qwen3.5-9B | 42/4/4 (4.1 s, 2026-10-28) → 42/4/4 (2.0 s) | 24/5/1 (2026-10-27) → 25/4/1 | 25/4/1 (25 s) → 26/3/1 (9.5 s) |
+| Granite 4.2 8B | not run → 44/4/2 (1.4 s) | not run → 19/9/2 | 25/2/3 (92 s) → **28/0/2** (68 s, 2,770 thinking tokens p50) |
+| Granite 4.2 3B | CPU only → 39/7/4 (0.8 s) | 6/12/12 (CPU) → 6/13/11 | runs away (not re-run) |
+| Spark-X2.6-4B | 38/10/2 (2.0 s) → 38/10/2 (1.5 s) | 12/16/2 → 12/16/2 | runs away (not re-run) |
+| Nemotron-3.5-Bolt-E4B | — | not measurable | 25/4/1 (11 s) → 25/4/1 (8.5 s) |
+| Nemotron-3.5-Lightning-30B-A3B | 41/6/3 (12.4 s) → stopped by the swap guard at the second cold start | 8/18/4 (13 s) → 10/15/5 (12 s) | impractical (not re-run) |
+
+- Quality is the same within one-run noise: every arm moved by at most 3 cases, in both
+  directions, and every completed thinking-off 2b screen kept 100/100 schema-valid replies and
+  50/50 pass agreement.
+  Granite 4.2 8B thinking on (28/0/2) and Qwen3.5-9B thinking on (26/3/1) now meet the
+  field-reference bar too, but by 1–3 cases on n = 30, so neither is a finding on its own.
+- Speed: replies are 1.3–3× faster at the median on the dense models, under less host load
+  than the b11610 runs, so part of the gain is the quieter machine. The MoE model with experts
+  on the CPU gains nothing.
+- Bolt's 2b screen with thinking on is not comparable: the queue's fixed `MAX_TOKENS=384` won
+  over the thinking setting (15 of 100 replies truncated), unlike the b11610 run at 8,192.
+- Conclusion: no reason to stay on b11610 for the screens; the switch of the product runtime
+  pin is a separate change (branch `llama-v090`).
 
 ## Assisted interpretation: shipped prompt D on the 2b screen (ASSIST-56, 2026-10-27)
 
