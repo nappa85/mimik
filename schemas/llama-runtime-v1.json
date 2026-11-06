@@ -2,20 +2,20 @@
   "manifest": "mimik-llama-runtime-v1",
   "note": "The pinned official llama.cpp build Mimik ships and runs (ASSIST-33, ASSIST-42). Mimik embeds this file; llama-fetch and packaging read it. Shipped files carry their SONAME as their name (no links).",
   "llama_cpp": {
-    "tag": "b11609",
-    "build": 11609,
-    "commit": "fcac19079f3f2985fe74ed845f0880e7e9a8030a",
+    "tag": "b12110",
+    "build": 12110,
+    "commit": "cd959bae99ff4bed22bef2604f45241c09bbb8c8",
     "repository": "https://github.com/ggml-org/llama.cpp",
     "licence": "MIT",
-    "release": "https://github.com/ggml-org/llama.cpp/releases/tag/b11609",
-    "version_line": "version: 0.6.0-dev (build 11609, commit fcac19079)"
+    "release": "https://github.com/ggml-org/llama.cpp/releases/tag/b12110",
+    "version_line": "version: 0.9.0-dev (build 12110, commit cd959bae9)"
   },
   "source": {
-    "name": "llama.cpp-b11609-source.tar",
-    "how": "git archive --format=tar --prefix=llama.cpp-b11609/ <commit> from a shallow fetch of that commit",
-    "prefix": "llama.cpp-b11609/",
-    "tar_sha256": "7ca7d6261c85d749947d8938ecb101301c30acf95bba001d46999012871b02a5",
-    "tar_size": 180715520,
+    "name": "llama.cpp-b12110-source.tar",
+    "how": "git archive --format=tar --prefix=llama.cpp-b12110/ <commit> from a shallow fetch of that commit",
+    "prefix": "llama.cpp-b12110/",
+    "tar_sha256": "64906081b167eec0a62a13ffb3c149398705ff9b154e476d8e15c8604bf16ae3",
+    "tar_size": 186798080,
     "notices": [
       {
         "component": "llama.cpp and ggml",
@@ -47,7 +47,7 @@
         "path": "vendor/sheredom/subprocess.h",
         "lines": [
           7,
-          29
+          30
         ]
       },
       {
@@ -55,8 +55,8 @@
         "licence": "Unlicense OR MIT-0",
         "path": "vendor/miniaudio/miniaudio.h",
         "lines": [
-          95817,
-          95863
+          96902,
+          96948
         ]
       },
       {
@@ -91,10 +91,10 @@
   "builds": [
     {
       "path": "cpu",
-      "asset": "llama-b11609-bin-ubuntu-x64.tar.gz",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-ubuntu-x64.tar.gz",
-      "sha256": "f95cbb27dd6e377f2ce30f5cfd7ec987af3259c025fc7c98fff62927a16ff528",
-      "size": 17732148,
+      "asset": "llama-b12110-bin-ubuntu-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-x64.tar.gz",
+      "sha256": "368227edcc229be5f9bed16a2223d79b5e41d0ac2e19bcf5825e82291c060e55",
+      "size": 23051958,
       "directory": "cpu",
       "server": "llama-server",
       "system_libraries": [
@@ -118,154 +118,154 @@
       "files": [
         {
           "name": "llama-server",
-          "from": "llama-b11609/llama-server",
-          "sha256": "6983fb9d14f2e0874698548dc47cba6014fab4572c737c5a9ef314a08c0c1458",
+          "from": "llama-b12110/llama-server",
+          "sha256": "eaf9c1c664cc0ae1f4dea4b171bb91aac8409fcfea0574c9b6bcc93792ce2400",
           "size": 17864,
           "mode": "0755"
         },
         {
           "name": "libllama-server-impl.so",
-          "from": "llama-b11609/libllama-server-impl.so",
-          "sha256": "6f0de7db709d4a737df9efa46e0636c7c543cbb9fde0ba4e32bc56e6675efdea",
-          "size": 7505688,
+          "from": "llama-b12110/libllama-server-impl.so",
+          "sha256": "c88998d7402755b125e223f65b9a50b3e24ba1fe415a3e6fa74c02ffc71ea926",
+          "size": 8281496,
           "mode": "0755"
         },
         {
           "name": "libllama-common.so.0",
-          "from": "llama-b11609/libllama-common.so.0.6.0",
-          "sha256": "7ba2ed6ae36bb0705ed73d78b37b1ea33070f3ca530f9040959a17c0d84e0797",
-          "size": 6471952,
+          "from": "llama-b12110/libllama-common.so.0.9.0",
+          "sha256": "7453bbe828d4782723e8fd5026f669c0dee5915d845d48dd07d01fe84b116217",
+          "size": 6768888,
           "mode": "0755"
         },
         {
           "name": "libmtmd.so.0",
-          "from": "llama-b11609/libmtmd.so.0.6.0",
-          "sha256": "5245e1b79ad76ff4d1911cc320312422065119e63e04430611cc8d91d9ab5a92",
-          "size": 1929664,
+          "from": "llama-b12110/libmtmd.so.0.9.0",
+          "sha256": "bdc694a619533c33686b4ab4fdac15058876b430407c4da208c0cc23f99a7ec4",
+          "size": 2486256,
           "mode": "0755"
         },
         {
           "name": "libllama.so.0",
-          "from": "llama-b11609/libllama.so.0.6.0",
-          "sha256": "220468c633df4b24127df5af5a58dbbdcc46696c3cf571735049d0a1892beff3",
-          "size": 4947648,
+          "from": "llama-b12110/libllama.so.0.9.0",
+          "sha256": "5b67c7baa2461844f1baca027ad6b46edacfee1334d374e3e3c57c6430105b7b",
+          "size": 5455704,
           "mode": "0755"
         },
         {
           "name": "libggml.so.0",
-          "from": "llama-b11609/libggml.so.0.26.0",
+          "from": "llama-b12110/libggml.so.0.29.0",
           "sha256": "8643a58bb37af6fb153e2ea98b48efa227855725ee51c05f4ca76b9867956463",
           "size": 51040,
           "mode": "0755"
         },
         {
           "name": "libggml-base.so.0",
-          "from": "llama-b11609/libggml-base.so.0.26.0",
-          "sha256": "84c771ef5bd7351134d43de64292133da1218383a586af0a121b7c215171da85",
-          "size": 897792,
+          "from": "llama-b12110/libggml-base.so.0.29.0",
+          "sha256": "ad3e476d5eac14820b7db79c4233b0fafa1d6609aa31a0848c919eba586aa9b9",
+          "size": 937856,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-alderlake.so",
-          "from": "llama-b11609/libggml-cpu-alderlake.so",
-          "sha256": "50c8b810b9e26d88a0cc2d521aef559c78d8a44d779a2c0eb56fd98a83bce779",
-          "size": 1412200,
+          "from": "llama-b12110/libggml-cpu-alderlake.so",
+          "sha256": "ef0c2d96efb4cb9d20c20b0f5af8659a39cc1ef9c1a3911a9fd42e5e23e694ac",
+          "size": 1438128,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-cannonlake.so",
-          "from": "llama-b11609/libggml-cpu-cannonlake.so",
-          "sha256": "89944d7dbf0823c778c5c2757b764fb92ea9f142f0d5df49a9bb4679abcae4d9",
-          "size": 1561576,
+          "from": "llama-b12110/libggml-cpu-cannonlake.so",
+          "sha256": "bed0bdb27b4f46f06fc267412ba4dfad02bc23789005e686c49340155ddab29c",
+          "size": 1583408,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-cascadelake.so",
-          "from": "llama-b11609/libggml-cpu-cascadelake.so",
-          "sha256": "7dc668118370dadd4a442633ea1c2ee70e2d79bb61b828b1336c311db01f21cd",
-          "size": 1573568,
+          "from": "llama-b12110/libggml-cpu-cascadelake.so",
+          "sha256": "cda9c09fd8ddea587927ed8beceea3730d2db29b25a551f7d74301a389975a09",
+          "size": 1599496,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-cooperlake.so",
-          "from": "llama-b11609/libggml-cpu-cooperlake.so",
-          "sha256": "ab3a3b037275d820e9d04fa477b7c4b75b682b491aa2551e1d71a04bb29997ee",
-          "size": 1573640,
+          "from": "llama-b12110/libggml-cpu-cooperlake.so",
+          "sha256": "c3aa8670be6f5be0dc3451073d93849cfb6bfd7833a1ac75039cbbb78be2e3dc",
+          "size": 1599568,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-haswell.so",
-          "from": "llama-b11609/libggml-cpu-haswell.so",
-          "sha256": "c17103d0406928eb5ebf08ba2040317ca171a1c4570abe4afef59822ee694288",
-          "size": 1416296,
+          "from": "llama-b12110/libggml-cpu-haswell.so",
+          "sha256": "bdbfb31ba054ec76f02297874feed48731887d493d12d8141de6d8412339623e",
+          "size": 1438128,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-icelake.so",
-          "from": "llama-b11609/libggml-cpu-icelake.so",
-          "sha256": "69fa2bca90ff7af7bba5fdf2329aeb9cb15042cfccc58e51d5dcc2055d4bf453",
-          "size": 1573568,
+          "from": "llama-b12110/libggml-cpu-icelake.so",
+          "sha256": "7e28dd0cfa7275651fc8887b19d4aef9c0ff15c2e7fcf0c7558031f8cdfbe377",
+          "size": 1599496,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-ivybridge.so",
-          "from": "llama-b11609/libggml-cpu-ivybridge.so",
-          "sha256": "c4b87e1a767ea639694aff812a31bc82c0c118cd9adf589e3475e6845bb68ca7",
-          "size": 1347848,
+          "from": "llama-b12110/libggml-cpu-ivybridge.so",
+          "sha256": "fd7b1a685d6d483b1129c42617a05aa5a55efd987614efa3c5c09a46bdac34a2",
+          "size": 1373752,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-piledriver.so",
-          "from": "llama-b11609/libggml-cpu-piledriver.so",
-          "sha256": "aa52a7951b674327287f3d0f1bb6c3165b1fa8b6bdfd92764f74285da9418c51",
-          "size": 1343752,
+          "from": "llama-b12110/libggml-cpu-piledriver.so",
+          "sha256": "ae9c07b8b8e3ba77deb700e1d5b37835bf79c62d5e71e06fe3cdd9a438940e1a",
+          "size": 1369656,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-sandybridge.so",
-          "from": "llama-b11609/libggml-cpu-sandybridge.so",
-          "sha256": "fd588706b8b3cc784085baf70a93c2b877c83f33183f778bb31784f0057f9f14",
-          "size": 1346800,
+          "from": "llama-b12110/libggml-cpu-sandybridge.so",
+          "sha256": "68e333609ffe51a66a07d8fe914c190d60c3f983a0dc2b6390d12f86c8b68ec6",
+          "size": 1372800,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-sapphirerapids.so",
-          "from": "llama-b11609/libggml-cpu-sapphirerapids.so",
-          "sha256": "edd34053ce919ebecab29fc4a07a0063c6193dc4f6705fac4c7be16be290d004",
-          "size": 1827680,
+          "from": "llama-b12110/libggml-cpu-sapphirerapids.so",
+          "sha256": "2db1fbc9324979df8c1e08161b53b311d252c76c8d834cea2e055269b91f1660",
+          "size": 1865872,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-skylakex.so",
-          "from": "llama-b11609/libggml-cpu-skylakex.so",
-          "sha256": "725df7b17c75ee2598b43d029fa15b1c9114c340365256bf5eeb6ac5c03d6232",
-          "size": 1561576,
+          "from": "llama-b12110/libggml-cpu-skylakex.so",
+          "sha256": "b3c5b47510cfc76549b72d75bc36d2551f971313580809c884b2a2e712b4d150",
+          "size": 1583408,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-sse42.so",
-          "from": "llama-b11609/libggml-cpu-sse42.so",
-          "sha256": "9868b6a0e8f26ad1972d3f347c6d8dfeba31ee2cbf78ea89529ff72e2c1237a6",
-          "size": 954440,
+          "from": "llama-b12110/libggml-cpu-sse42.so",
+          "sha256": "7b5f33881eab4b5e30ad2e0515eb9c2cfa4036debeaceb1bc2aa760b92c98607",
+          "size": 980440,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-x64.so",
-          "from": "llama-b11609/libggml-cpu-x64.so",
-          "sha256": "37626deedabb4bfe6ba850f12f6b1d38828d6bb11ef69b6115c1216fc2f19899",
-          "size": 946392,
+          "from": "llama-b12110/libggml-cpu-x64.so",
+          "sha256": "81fc5986e76acd220b826582549ddfa29f0523541a76c209cd3d5eeb787e3e11",
+          "size": 976464,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-zen4.so",
-          "from": "llama-b11609/libggml-cpu-zen4.so",
-          "sha256": "47d8938c89f5aed9494d206cabaae080fe60cd0bca8a8aaaac40aa8a987c1e5b",
-          "size": 1573640,
+          "from": "llama-b12110/libggml-cpu-zen4.so",
+          "sha256": "f537440e3e928ff4d252c7863924a8af890883b1ccbc487cf96cd98a1d556eee",
+          "size": 1599568,
           "mode": "0755"
         },
         {
           "name": "LICENSE",
-          "from": "llama-b11609/LICENSE",
+          "from": "llama-b12110/LICENSE",
           "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
           "size": 1078,
           "mode": "0644"
@@ -274,10 +274,10 @@
     },
     {
       "path": "vulkan",
-      "asset": "llama-b11609-bin-ubuntu-vulkan-x64.tar.gz",
-      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11609/llama-b11609-bin-ubuntu-vulkan-x64.tar.gz",
-      "sha256": "8aff188828de76492343e19905f72408c10f5b870a03592155b0e7dd19b76ed0",
-      "size": 30359149,
+      "asset": "llama-b12110-bin-ubuntu-vulkan-x64.tar.gz",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-vulkan-x64.tar.gz",
+      "sha256": "a5d741940956ec62e8783aee7e5a4c7c761af867d6f027c3277a51e1a3ac59b0",
+      "size": 35858360,
       "directory": "vulkan",
       "server": "llama-server",
       "system_libraries": [
@@ -302,161 +302,161 @@
       "files": [
         {
           "name": "llama-server",
-          "from": "llama-b11609/llama-server",
-          "sha256": "6983fb9d14f2e0874698548dc47cba6014fab4572c737c5a9ef314a08c0c1458",
+          "from": "llama-b12110/llama-server",
+          "sha256": "eaf9c1c664cc0ae1f4dea4b171bb91aac8409fcfea0574c9b6bcc93792ce2400",
           "size": 17864,
           "mode": "0755"
         },
         {
           "name": "libllama-server-impl.so",
-          "from": "llama-b11609/libllama-server-impl.so",
-          "sha256": "6f0de7db709d4a737df9efa46e0636c7c543cbb9fde0ba4e32bc56e6675efdea",
-          "size": 7505688,
+          "from": "llama-b12110/libllama-server-impl.so",
+          "sha256": "c88998d7402755b125e223f65b9a50b3e24ba1fe415a3e6fa74c02ffc71ea926",
+          "size": 8281496,
           "mode": "0755"
         },
         {
           "name": "libllama-common.so.0",
-          "from": "llama-b11609/libllama-common.so.0.6.0",
-          "sha256": "7ba2ed6ae36bb0705ed73d78b37b1ea33070f3ca530f9040959a17c0d84e0797",
-          "size": 6471952,
+          "from": "llama-b12110/libllama-common.so.0.9.0",
+          "sha256": "7453bbe828d4782723e8fd5026f669c0dee5915d845d48dd07d01fe84b116217",
+          "size": 6768888,
           "mode": "0755"
         },
         {
           "name": "libmtmd.so.0",
-          "from": "llama-b11609/libmtmd.so.0.6.0",
-          "sha256": "5245e1b79ad76ff4d1911cc320312422065119e63e04430611cc8d91d9ab5a92",
-          "size": 1929664,
+          "from": "llama-b12110/libmtmd.so.0.9.0",
+          "sha256": "bdc694a619533c33686b4ab4fdac15058876b430407c4da208c0cc23f99a7ec4",
+          "size": 2486256,
           "mode": "0755"
         },
         {
           "name": "libllama.so.0",
-          "from": "llama-b11609/libllama.so.0.6.0",
-          "sha256": "220468c633df4b24127df5af5a58dbbdcc46696c3cf571735049d0a1892beff3",
-          "size": 4947648,
+          "from": "llama-b12110/libllama.so.0.9.0",
+          "sha256": "5b67c7baa2461844f1baca027ad6b46edacfee1334d374e3e3c57c6430105b7b",
+          "size": 5455704,
           "mode": "0755"
         },
         {
           "name": "libggml.so.0",
-          "from": "llama-b11609/libggml.so.0.26.0",
+          "from": "llama-b12110/libggml.so.0.29.0",
           "sha256": "8643a58bb37af6fb153e2ea98b48efa227855725ee51c05f4ca76b9867956463",
           "size": 51040,
           "mode": "0755"
         },
         {
           "name": "libggml-base.so.0",
-          "from": "llama-b11609/libggml-base.so.0.26.0",
-          "sha256": "84c771ef5bd7351134d43de64292133da1218383a586af0a121b7c215171da85",
-          "size": 897792,
+          "from": "llama-b12110/libggml-base.so.0.29.0",
+          "sha256": "ad3e476d5eac14820b7db79c4233b0fafa1d6609aa31a0848c919eba586aa9b9",
+          "size": 937856,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-alderlake.so",
-          "from": "llama-b11609/libggml-cpu-alderlake.so",
-          "sha256": "50c8b810b9e26d88a0cc2d521aef559c78d8a44d779a2c0eb56fd98a83bce779",
-          "size": 1412200,
+          "from": "llama-b12110/libggml-cpu-alderlake.so",
+          "sha256": "ef0c2d96efb4cb9d20c20b0f5af8659a39cc1ef9c1a3911a9fd42e5e23e694ac",
+          "size": 1438128,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-cannonlake.so",
-          "from": "llama-b11609/libggml-cpu-cannonlake.so",
-          "sha256": "89944d7dbf0823c778c5c2757b764fb92ea9f142f0d5df49a9bb4679abcae4d9",
-          "size": 1561576,
+          "from": "llama-b12110/libggml-cpu-cannonlake.so",
+          "sha256": "bed0bdb27b4f46f06fc267412ba4dfad02bc23789005e686c49340155ddab29c",
+          "size": 1583408,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-cascadelake.so",
-          "from": "llama-b11609/libggml-cpu-cascadelake.so",
-          "sha256": "7dc668118370dadd4a442633ea1c2ee70e2d79bb61b828b1336c311db01f21cd",
-          "size": 1573568,
+          "from": "llama-b12110/libggml-cpu-cascadelake.so",
+          "sha256": "cda9c09fd8ddea587927ed8beceea3730d2db29b25a551f7d74301a389975a09",
+          "size": 1599496,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-cooperlake.so",
-          "from": "llama-b11609/libggml-cpu-cooperlake.so",
-          "sha256": "ab3a3b037275d820e9d04fa477b7c4b75b682b491aa2551e1d71a04bb29997ee",
-          "size": 1573640,
+          "from": "llama-b12110/libggml-cpu-cooperlake.so",
+          "sha256": "c3aa8670be6f5be0dc3451073d93849cfb6bfd7833a1ac75039cbbb78be2e3dc",
+          "size": 1599568,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-haswell.so",
-          "from": "llama-b11609/libggml-cpu-haswell.so",
-          "sha256": "c17103d0406928eb5ebf08ba2040317ca171a1c4570abe4afef59822ee694288",
-          "size": 1416296,
+          "from": "llama-b12110/libggml-cpu-haswell.so",
+          "sha256": "bdbfb31ba054ec76f02297874feed48731887d493d12d8141de6d8412339623e",
+          "size": 1438128,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-icelake.so",
-          "from": "llama-b11609/libggml-cpu-icelake.so",
-          "sha256": "69fa2bca90ff7af7bba5fdf2329aeb9cb15042cfccc58e51d5dcc2055d4bf453",
-          "size": 1573568,
+          "from": "llama-b12110/libggml-cpu-icelake.so",
+          "sha256": "7e28dd0cfa7275651fc8887b19d4aef9c0ff15c2e7fcf0c7558031f8cdfbe377",
+          "size": 1599496,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-ivybridge.so",
-          "from": "llama-b11609/libggml-cpu-ivybridge.so",
-          "sha256": "c4b87e1a767ea639694aff812a31bc82c0c118cd9adf589e3475e6845bb68ca7",
-          "size": 1347848,
+          "from": "llama-b12110/libggml-cpu-ivybridge.so",
+          "sha256": "fd7b1a685d6d483b1129c42617a05aa5a55efd987614efa3c5c09a46bdac34a2",
+          "size": 1373752,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-piledriver.so",
-          "from": "llama-b11609/libggml-cpu-piledriver.so",
-          "sha256": "aa52a7951b674327287f3d0f1bb6c3165b1fa8b6bdfd92764f74285da9418c51",
-          "size": 1343752,
+          "from": "llama-b12110/libggml-cpu-piledriver.so",
+          "sha256": "ae9c07b8b8e3ba77deb700e1d5b37835bf79c62d5e71e06fe3cdd9a438940e1a",
+          "size": 1369656,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-sandybridge.so",
-          "from": "llama-b11609/libggml-cpu-sandybridge.so",
-          "sha256": "fd588706b8b3cc784085baf70a93c2b877c83f33183f778bb31784f0057f9f14",
-          "size": 1346800,
+          "from": "llama-b12110/libggml-cpu-sandybridge.so",
+          "sha256": "68e333609ffe51a66a07d8fe914c190d60c3f983a0dc2b6390d12f86c8b68ec6",
+          "size": 1372800,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-sapphirerapids.so",
-          "from": "llama-b11609/libggml-cpu-sapphirerapids.so",
-          "sha256": "edd34053ce919ebecab29fc4a07a0063c6193dc4f6705fac4c7be16be290d004",
-          "size": 1827680,
+          "from": "llama-b12110/libggml-cpu-sapphirerapids.so",
+          "sha256": "2db1fbc9324979df8c1e08161b53b311d252c76c8d834cea2e055269b91f1660",
+          "size": 1865872,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-skylakex.so",
-          "from": "llama-b11609/libggml-cpu-skylakex.so",
-          "sha256": "725df7b17c75ee2598b43d029fa15b1c9114c340365256bf5eeb6ac5c03d6232",
-          "size": 1561576,
+          "from": "llama-b12110/libggml-cpu-skylakex.so",
+          "sha256": "b3c5b47510cfc76549b72d75bc36d2551f971313580809c884b2a2e712b4d150",
+          "size": 1583408,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-sse42.so",
-          "from": "llama-b11609/libggml-cpu-sse42.so",
-          "sha256": "9868b6a0e8f26ad1972d3f347c6d8dfeba31ee2cbf78ea89529ff72e2c1237a6",
-          "size": 954440,
+          "from": "llama-b12110/libggml-cpu-sse42.so",
+          "sha256": "7b5f33881eab4b5e30ad2e0515eb9c2cfa4036debeaceb1bc2aa760b92c98607",
+          "size": 980440,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-x64.so",
-          "from": "llama-b11609/libggml-cpu-x64.so",
-          "sha256": "37626deedabb4bfe6ba850f12f6b1d38828d6bb11ef69b6115c1216fc2f19899",
-          "size": 946392,
+          "from": "llama-b12110/libggml-cpu-x64.so",
+          "sha256": "81fc5986e76acd220b826582549ddfa29f0523541a76c209cd3d5eeb787e3e11",
+          "size": 976464,
           "mode": "0755"
         },
         {
           "name": "libggml-cpu-zen4.so",
-          "from": "llama-b11609/libggml-cpu-zen4.so",
-          "sha256": "47d8938c89f5aed9494d206cabaae080fe60cd0bca8a8aaaac40aa8a987c1e5b",
-          "size": 1573640,
+          "from": "llama-b12110/libggml-cpu-zen4.so",
+          "sha256": "f537440e3e928ff4d252c7863924a8af890883b1ccbc487cf96cd98a1d556eee",
+          "size": 1599568,
           "mode": "0755"
         },
         {
           "name": "libggml-vulkan.so",
-          "from": "llama-b11609/libggml-vulkan.so",
-          "sha256": "3a9242b2390044b7244efb49b3ac167b9fab94bdc646c8f979a1ee85000e8d7e",
-          "size": 40612936,
+          "from": "llama-b12110/libggml-vulkan.so",
+          "sha256": "9c775957fc4436711764ae88cb94c58093dda79f8d7acdb5b5d36a5b47251ca3",
+          "size": 41196176,
           "mode": "0755"
         },
         {
           "name": "LICENSE",
-          "from": "llama-b11609/LICENSE",
+          "from": "llama-b12110/LICENSE",
           "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
           "size": 1078,
           "mode": "0644"

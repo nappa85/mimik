@@ -85,11 +85,9 @@ natively for these tests (ASSIST-40).
 
 - **Pinned build (ASSIST-33):** a manifest, the data file `schemas/llama-runtime-v1.json`
   embedded into Mimik with `include_str!` (a test asserts the embedded copy equals the file),
-  also read by `llama-fetch` and by packaging, so CI and the binary verify the same set, pins one llama.cpp build (b11609,
-  ASSIST-42: b11610, measured in 2b, has no release assets, and b11609's CPU and Vulkan source
-  is identical to it) for Linux x86_64: the official GitHub release assets for the Vulkan and
-  the CPU build (`llama-b11609-bin-ubuntu-vulkan-x64.tar.gz`, SHA-256 `8aff1888…`, and
-  `llama-b11609-bin-ubuntu-x64.tar.gz`, SHA-256 `f95cbb27…`; gzip tarballs), each asset's SHA-256, and the path and
+  also read by `llama-fetch` and by packaging, so CI and the binary verify the same set, pins one llama.cpp build (b12110, ASSIST-42) for Linux x86_64: the official GitHub release assets for the Vulkan and
+  the CPU build (`llama-b12110-bin-ubuntu-vulkan-x64.tar.gz`, SHA-256 `a5d74194…`, and
+  `llama-b12110-bin-ubuntu-x64.tar.gz`, SHA-256 `368227ed…`; gzip tarballs), each asset's SHA-256, and the path and
   SHA-256 of every file Mimik runs from them. Before 2c-2 depends on them, the manifest entry
   records the exact asset names, the system libraries each binary needs (from its ELF
   dependencies: glibc version floor, `libvulkan.so.1`, others), how the CPU backend is chosen
@@ -125,8 +123,8 @@ natively for these tests (ASSIST-40).
   measurement before it ships): `--jinja`, `--n-gpu-layers`, `--fit`, threads, `--ctx-size`,
   `--parallel`, `--cache-ram`, `--reasoning`, plus the per-request `cache_prompt: true`,
   `stream: true` and the greedy sampler (temperature 0, top-k 1, seed 0). `--parallel 1`: jobs
-  run one at a time (ASSIST-32). The b11610 `--help` (checked on the dev host,
-  2026-10-22, from the 2b image; the pinned b11609 is the same source) lists `--api-key-file`, `--api-key` with the environment variable
+  run one at a time (ASSIST-32). The pinned b12110 `--help` (checked in a container,
+  2026-11-06) lists `--api-key-file`, `--api-key` with the environment variable
   `LLAMA_API_KEY`, `--ignore-eos`, `--slots`/`--no-slots`, `-dev`/`--device`,
   `--list-devices`, and `--host` accepting Unix socket paths. The runtime check (CI, below)
   runs the pinned binary's `--version` and `--help` for every flag; behaviour that help text
@@ -299,7 +297,7 @@ natively for these tests (ASSIST-40).
   0700 private directory, deleted once `/health` answers (`LLAMA_API_KEY` in the runner's
   environment, readable only by Mimik's user, is the documented alternative), never in an
   argument. A pinned build without either channel would not start the assistant ("the model
-  server cannot receive its token safely"); b11609 has both. It never runs without a token
+  server cannot receive its token safely"); b12110 has both. It never runs without a token
   and never passes it on a command line. `/health` without a token is a live-checked property
   of the pinned build; every other request carries it.
 - **Endpoint check, per connection, before its first byte:** level 1: `SO_PEERCRED` on the

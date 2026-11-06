@@ -201,9 +201,9 @@ class GpuBuildTests(unittest.TestCase):
         self.assertEqual(sorted(builds), ["cpu", "vulkan"])
         cpu, vulkan = builds["cpu"], builds["vulkan"]
         self.assertEqual(vulkan["directory"], "vulkan")
-        self.assertEqual(vulkan["asset"], "llama-b11609-bin-ubuntu-vulkan-x64.tar.gz")
+        self.assertEqual(vulkan["asset"], "llama-b12110-bin-ubuntu-vulkan-x64.tar.gz")
         self.assertEqual(
-            vulkan["sha256"], "8aff188828de76492343e19905f72408c10f5b870a03592155b0e7dd19b76ed0"
+            vulkan["sha256"], "a5d741940956ec62e8783aee7e5a4c7c761af867d6f027c3277a51e1a3ac59b0"
         )
         shared = {entry["name"]: entry for entry in cpu["files"]}
         extra = [entry for entry in vulkan["files"] if entry["name"] not in shared]
@@ -362,7 +362,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_the_release_scope_no_longer_lists_the_llama_source_archive(self):
         readme = Path(__file__).resolve().parents[1] / "docs" / "release-scope.md"
-        self.assertNotIn("llama.cpp-b11609-source", readme.read_text(encoding="utf-8"))
+        self.assertNotIn("llama.cpp-b12110-source", readme.read_text(encoding="utf-8"))
 
     def test_ci_expects_three_archives_and_uploads_no_llama_source(self):
         ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(

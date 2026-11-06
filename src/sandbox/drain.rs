@@ -266,8 +266,8 @@ mod tests {
             Some(Output::Listening)
         );
         assert_eq!(
-            classify("version: 0.6.0-dev (build 11609, commit fcac19079)"),
-            Some(Output::Build(11609))
+            classify("version: 0.9.0-dev (build 12110, commit cd959bae9)"),
+            Some(Output::Build(12110))
         );
         assert_eq!(
             classify("load_tensors: offloaded 41/41 layers to GPU"),

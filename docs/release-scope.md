@@ -39,7 +39,7 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
   `127.0.0.1` only. It is not protected by accounts and does not see private campaign data.
 
 No language model file is part of this release. The archive carries the pinned official
-llama.cpp CPU and Vulkan builds (`llama/`, b11609, MIT; pinned and hash-checked, its source is at the upstream commit named in `SOURCE.txt`) for the
+llama.cpp CPU and Vulkan builds (`llama/`, b12110, MIT; pinned and hash-checked, its source is at the upstream commit named in `SOURCE.txt`) for the
 optional interpretation assistant, which is off unless started with `--assistant` and proposes
 readings the player must confirm; it never applies sheet changes on its own. Its scope is
 Linux `x86_64` on the CPU: the model server runs only inside Mimik's own sandbox (Hakoniwa, built into the binary: nothing to install), where the
@@ -178,7 +178,7 @@ or storage guard for sheet history and notes).
   `THIRD-PARTY-NOTICES.md` (Rust dependencies, then llama.cpp and each component compiled
   into `llama/` with its licence text), `htmx-LICENSE`, `response-targets-LICENSE`,
   `SQLITE-NOTICE.txt`, `BUILD.txt` (version, revision, Rust version, llama.cpp build),
-  `SOURCE.txt`, and `llama/`: exactly the pinned files of the official llama.cpp b11609 CPU
+  `SOURCE.txt`, and `llama/`: exactly the pinned files of the official llama.cpp b12110 CPU
   build in `llama/cpu/` and Vulkan build in `llama/vulkan/` (their hashes and modes are in the
   manifest built into `mimik`).
 - `mimik-0.1.0-source.crate`: corresponding source: Rust code, templates, migrations, assets
