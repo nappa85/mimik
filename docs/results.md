@@ -460,7 +460,7 @@ HF scan for ≤ 9B dense or ≤ 35B-A3B MoE with GGUFs; downloads pinned by revi
 |---|---|---|---|---|
 | Ornith-1.5-9B (MIT) | 23 / 6 / 1 | **27 / 2 / 1** (240 tokens, 15 s p50, max 246 s) | **45 / 2 / 3** off, 4.0 s p50 | best on both screens; Qwen3.5 architecture |
 | Nemotron-3.5-Bolt-E4B (OpenMDW-1.1) | not measurable | 25 / 4 / 1 (290 tokens, 11 s p50) | 43 / 5 / 2 **on**, 8.3 s p50, pass agreement 49/50 | `--reasoning off` does not stop its thinking (empty content, 384-token cap reached in 49 of 61 replies), so its thinking-off arms are invalid |
-| Nemotron-3.5-Lightning-30B-A3B (OpenMDW-1.1) | 8 / 18 / 4 | running | 41 / 6 / 3 off, 12.4 s p50 | experts on the CPU (`--n-cpu-moe 32`); thinking on about 8 min per case |
+| Nemotron-3.5-Lightning-30B-A3B (OpenMDW-1.1) | 8 / 18 / 4 | not completed: impractical (6 cases in 65 min, 4,500–8,192 tokens, 2 hit the cap; stopped by the swap guard) | 41 / 6 / 3 off, 12.4 s p50 | experts on the CPU (`--n-cpu-moe 32`) |
 | Spark-X2.6-4B (Apache-2.0) | 12 / 16 / 2 | 13 / 1 / 16 (16 of 30 hit the 8,192 cap) | 38 / 10 / 2 off, 2.0 s p50 | needs llama.cpp ≥ b10828 (runs on b11610); thinks without bound |
 
 Reference points (same screens, earlier runs): TwIL-8B field refs 26/3 thinking on, 2b 44/4/2;
