@@ -34,8 +34,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   are merged (2026-11-05, host live tests and real-PDF checks passed). Step 4 (route A) has its plan
   (`docs/source-route-a-plan.md` on branch `source-route-a`, 809be8f, stacked on 3c; two review
   rounds, final verdicts approve with changes, applied). Owner decisions 2026-11-05: change the
-  renderer pin rather than wrap MuPDF (find a crate/version exposing line direction, bidi and
-  structure safely, before 4a0); tags decided after the 4a0 preflight; the proposed extraction
+  renderer pin rather than wrap MuPDF: no crate exposes them safely (mupdf 0.8.0 and main,
+  pdfium-render 0.9.5 checked 2026-11-06), so the owner chose a local fork of mupdf-rs
+  (`/home/marco/Progetti/mupdf-rs`, branch from v0.8.0) adding safe `TextLine::dir`,
+  `TextChar::bidi` and struct-block traversal, vendored into Mimik via `[patch.crates-io]`
+  until the owner's upstream PR is merged and released; tags decided after the 4a0 preflight; the proposed extraction
   flags; `CLIP` off; Claude drafts the Bare Bones reference from page images only, the owner
   checks every row; the proposed probe-v1 as advice; a failed bar keeps step 4 blocked, with a
   reviewed new version allowed. Next: record these in the plan, then 4a0. Follow-ups:
