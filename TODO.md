@@ -17,6 +17,14 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   ran (`docs/results.md`). Next: 3. Level 3's return is its
   own later step (plan, "Level 3 behind an owner opt-in").
 
+- **llama.cpp v0.9.0 runtime pin (b12110)**: branch `llama-v090` (`mimik-wt/llama090`, Opus
+  approved). Host checks 2026-11-06: confinement suite 82 passed, 8 failed; all 8 are the live
+  launch tests, and llama-server dies at start with `libssl.so.3: cannot open shared object
+  file`. Since the 2026-11-03 OpenSSL 4 upgrade the host has only `libssl.so.4`, so no official
+  llama.cpp build runs natively here, old pin or new. Blocked on an owner choice: OpenSSL 3
+  compat libraries on the host, or a runtime without SSL. Then: re-run the suite, the weekend GPU
+  live tests and the grammar-reply check, and merge.
+
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
   22–39 extracted with Marker and forced OCR (`docs/results.md`, extractor screen), bundle
   `data/extractions/review-ready-dbb400754fb94e87af95cce347903ea8` with two suggestion reports
