@@ -69,7 +69,7 @@ data directory is the database's folder; `run/` lives there.
 
 ## Pinned build
 
-The manifest pins release b12110 (llama.cpp v0.9.0, commit `cd959ba`), its CPU asset
+The manifest pins release b12110 (the commit tagged v0.9.0, `cd959ba`), its CPU asset
 `llama-b12110-bin-ubuntu-x64.tar.gz` (size and SHA-256), the 22 files Mimik runs from it
 (each under its SONAME, no links: `llama-server`, `libllama-server-impl.so`,
 `libllama-common.so.0`, `libmtmd.so.0`, `libllama.so.0`, `libggml.so.0`, `libggml-base.so.0`,

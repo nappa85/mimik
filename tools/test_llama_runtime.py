@@ -1,6 +1,7 @@
 import hashlib
 import io
 import os
+import re
 import stat
 import tarfile
 import tempfile
@@ -362,7 +363,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_the_release_scope_no_longer_lists_the_llama_source_archive(self):
         readme = Path(__file__).resolve().parents[1] / "docs" / "release-scope.md"
-        self.assertNotIn("llama.cpp-b12110-source", readme.read_text(encoding="utf-8"))
+        self.assertIsNone(re.search(r"llama\.cpp-b\d+-source", readme.read_text(encoding="utf-8")))
 
     def test_ci_expects_three_archives_and_uploads_no_llama_source(self):
         ci = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml").read_text(
