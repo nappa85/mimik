@@ -8,6 +8,8 @@
 # on the third server. llama-server runs on an internal network with no published port, CPU
 # only, pinned to CPUS (default 0,1) with 2 threads; the harness runs on HARNESS_CPU (7).
 # Environment: DEADLINE_EPOCH (default now + 10 h): no request starts after it.
+#   SERVER_IMAGE (the registry's server_image): override the llama-server image for a
+#   build comparison.
 #   CTX (8192): server context size. REASONING (off): llama-server --reasoning (on for a
 #   thinking arm; raise MAX_TOKENS and CTX with it).
 #   MAX_TOKENS (384), VARIANT (exploratory prompt variant, empty = pre-registered prefix),
@@ -166,7 +168,7 @@ for key in "$@"; do
   stopped && { log "thermal stop before $key"; exit 4; }
   model=$(realpath -e "${MODELS_DIR:-/media/data/mimik/models}/$(reg "$key" "['path']")")
   SHA=$(reg "$key" "['sha256']"); LABEL_M=$(reg "$key" "['label']")
-  IMAGE=$(reg "$key" "['server_image']")
+  IMAGE=${SERVER_IMAGE:-$(reg "$key" "['server_image']")}
   mapfile -t ARGS < <(cd "$ROOT/tools" && python3 -c "
 import model_registry as m
 d = m.load(); e = m.model(d, '$key')
