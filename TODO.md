@@ -20,8 +20,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - **llama.cpp v0.9.0 runtime pin (b12110)**: branch `llama-v090` (`mimik-wt/llama090`, Opus
   approved). Since the 2026-11-03 OpenSSL 4 upgrade the host needs `dev-libs/openssl-compat:3`
   (installed 2026-11-06) for the official llama-server's `libssl.so.3`. With it, all 31 CPU launch
-  live tests pass. Left: the whole confinement suite in one run, the weekend GPU live tests
-  (`tools/assist_gpu_live.py`), the grammar-reply check, then merge. Follow-up: a runtime built
+  live tests pass, and the full container gate passed on the branch (2026-11-06). Left: the
+  weekend GPU live tests (`tools/assist_gpu_live.py`), the grammar-reply check, then merge. Follow-up: a runtime built
   without OpenSSL (`LLAMA_OPENSSL=OFF`), so other OpenSSL 4 hosts can run it too.
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
