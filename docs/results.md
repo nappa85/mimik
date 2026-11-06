@@ -447,6 +447,35 @@ and `/media/data/mimik/fieldref/runs/twil-d53{,-think}-20261105`.
   commercial or default use, so it can only inform which approach (a reasoning pass) to try
   with a permissively licensed model.
 
+## New candidate models on the interpretation screens (owner request, 2026-11-06)
+
+Prototype tier, exploratory, one run per arm; GPU (RX 6650 XT, Vulkan, fan manual 255), pinned
+llama.cpp b11610 image, prompt D (v2-ids-53); daytime under the owner's one-day window override
+with `LOAD_MAX=3` (desktop use meanwhile, so latencies are indicative only). Models found by an
+HF scan for ≤ 9B dense or ≤ 35B-A3B MoE with GGUFs; downloads pinned by revision and SHA-256
+(`tools/models.json`). Field refs: 30 cases (correct_ref / false_confident / abstained);
+2b screen: 50 cases × 2 passes + 4 stress (pass 1 correct / false-confident / silent).
+
+| Model (licence) | Field refs, thinking off | Field refs, thinking on | 2b screen | Notes |
+|---|---|---|---|---|
+| Ornith-1.5-9B (MIT) | 23 / 6 / 1 | **27 / 2 / 1** (240 tokens, 15 s p50, max 246 s) | **45 / 2 / 3** off, 4.0 s p50 | best on both screens; Qwen3.5 architecture |
+| Nemotron-3.5-Bolt-E4B (OpenMDW-1.1) | not measurable | 25 / 4 / 1 (290 tokens, 11 s p50) | 43 / 5 / 2 **on**, 8.3 s p50, pass agreement 49/50 | `--reasoning off` does not stop its thinking (empty content, 384-token cap reached in 49 of 61 replies), so its thinking-off arms are invalid |
+| Nemotron-3.5-Lightning-30B-A3B (OpenMDW-1.1) | 8 / 18 / 4 | running | 41 / 6 / 3 off, 12.4 s p50 | experts on the CPU (`--n-cpu-moe 32`); thinking on about 8 min per case |
+| Spark-X2.6-4B (Apache-2.0) | 12 / 16 / 2 | 13 / 1 / 16 (16 of 30 hit the 8,192 cap) | 38 / 10 / 2 off, 2.0 s p50 | needs llama.cpp ≥ b10828 (runs on b11610); thinks without bound |
+
+Reference points (same screens, earlier runs): TwIL-8B field refs 26/3 thinking on, 2b 44/4/2;
+Qwen3.5-9B field refs 25/4 thinking on, 24/5 off, 2b 42/4/4; Granite 4.2 8B field refs 25/2
+thinking on.
+
+- Ornith-1.5-9B is the strongest candidate so far and permissively licensed: best 2b score
+  thinking off and best field-reference score thinking on, with short median reasoning (one
+  case ran 3,900 tokens). Bolt-E4B is the best small model (4B effective) with thinking on.
+- The small models without a thinking budget (Spark-X2.6-4B, Granite 4.2 3B) run away;
+  a reasoning budget is needed before thinking is usable on them.
+- Limitations: one run per arm, n = 30/50 author-written dev cases already used for prompt
+  work; desktop load during the runs; b11610 only (the v0.9.0 comparison follows). Candidates
+  for a pre-registered confirmation on fresh cases, not decisions.
+
 ## Assisted interpretation: shipped prompt D on the 2b screen (ASSIST-56, 2026-10-27)
 
 Prototype tier, one run (`tools/run_assist_screen.sh`, `CONTRACT=v2-ids-53 PRIME=1
