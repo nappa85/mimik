@@ -37,8 +37,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   renderer pin rather than wrap MuPDF: no crate exposes them safely (mupdf 0.8.0 and main,
   pdfium-render 0.9.5 checked 2026-11-06), so the owner chose a local fork of mupdf-rs
   (`/home/marco/Progetti/mupdf-rs`, branch from v0.8.0) adding safe `TextLine::dir`,
-  `TextChar::bidi` and struct-block traversal, vendored into Mimik via `[patch.crates-io]`
-  until the owner's upstream PR is merged and released; tags decided after the 4a0 preflight; the proposed extraction
+  `TextChar::bidi`/`is_rtl` and struct-block traversal (`TextBlock::structure`, `TextStruct`,
+  `StructureType`), vendored into Mimik via `[patch.crates-io]` until the owner's upstream PR
+  is merged and released. Fork branch `mimik/text-direction-structure` (1adf801, 5 commits on
+  v0.8.0): implemented by a Sonnet subagent test-first, 17 text_page tests pass in the
+  container; Opus review approve with changes, confirmation approve with changes (doc only,
+  applied). Not covered: RTL text (no RTL font in base14); the fork's clippy -D warnings
+  fails only on the pre-existing src/error.rs:20 lint. For the PR the owner rebases onto
+  upstream main. Vendoring into Mimik, the boundary-lint allowance and the DEP-29 update
+  belong to 4a0; tags decided after the 4a0 preflight; the proposed extraction
   flags; `CLIP` off; Claude drafts the Bare Bones reference from page images only, the owner
   checks every row; the proposed probe-v1 as advice; a failed bar keeps step 4 blocked, with a
   reviewed new version allowed. Next: record these in the plan, then 4a0. Follow-ups:
