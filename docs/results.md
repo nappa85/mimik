@@ -417,6 +417,24 @@ and `/media/data/mimik/fieldref/runs/twil-d53{,-think}-20261105`.
 | field refs, thinking on (`REASONING=on MAX_TOKENS=8192 CTX=16384`) | TwIL-8B | **26 / 3 / 1** | 18.4 / 40.2 s | 1,467 |
 | field refs, earlier run, D53 | Qwen3.5-9B (GPU) | 24 / 5 / 1 | 6.3 s p50 | — |
 
+- **Thinking on for the other toggle models (owner request, 2026-11-06, GPU, same settings
+  `REASONING=on MAX_TOKENS=8192 CTX=16384`, prompt D53, 30 field-reference cases; a fork build
+  ran on 2 cores meanwhile, so `LOAD_MAX=3` and the latencies are not clean; Granite 3B ran
+  after 09:00 under the owner's one-day window override):**
+
+  | Model | correct_ref / false_confident / abstained | Thinking off (D53) | Tokens p50 / max | Latency p50 / max | Licence |
+  |---|---|---|---|---|---|
+  | TwIL-8B | **26 / 3** / 1 | 20 / 7 / 3 | 660 / 1,467 | 18 / 40 s | non-commercial |
+  | Granite 4.2 8B | **25 / 2** / 3 | not measured | 3,294 / 8,192 (some hit the cap) | 92 / 237 s | Apache-2.0 |
+  | Qwen3.5-9B | 25 / 4 / 1 | 24 / 5 / 1 | 381 / 2,426 | 25 / 153 s | Apache-2.0 |
+  | Granite 4.2 3B | 4 / 1 / 25 | 6 / 12 / 12 (CPU) | 8,192 / 8,192 (most hit the cap) | 243 / 245 s | Apache-2.0 |
+
+  Thinking cuts confident mistakes for every model that finishes its reasoning; two models meet
+  the bar (TwIL-8B and Granite 4.2 8B, the latter shippable but about 3,300 thinking tokens
+  per reply), Qwen3.5-9B misses it by one false-confident case. The 3B runs away (most replies
+  truncated at 8,192 tokens and scored abstained), so thinking is no fix for the CPU default.
+  Exploratory, one run each, n = 30 already-read dev cases: candidates for a pre-registered
+  confirmation (and a thinking budget), not a decision.
 - With thinking on, TwIL-8B is the first model to meet the field-reference screen bar
   (correct_ref ≥ 24, false_confident ≤ 3): 8 cases changed, 7 for the better (fr-03, 05, 17,
   18, 25, 26, 28) and one worse (fr-20). Thinking off, it is the best model on the general
