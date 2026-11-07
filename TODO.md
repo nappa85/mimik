@@ -86,7 +86,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   (native EventSource only if that is impossible); 1 live stream per Master (newest tab wins);
   own save on the latest revision counts as seen; departure keeps freezing NPCs in v1; NPCs
   share the 32/2048 sheet limits. Next: record these in the plan, then slice (a).
-0. llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
+0. llama.cpp built without OpenSSL (`LLAMA_OPENSSL=OFF`) so the runtime starts on hosts with only
+   OpenSSL 4; the official b12110 build needs `libssl.so.3` (this host: `openssl-compat:3`).
+   llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging
    (compatibility checks instead of a version pin; its own design).
