@@ -69,8 +69,8 @@ data directory is the database's folder; `run/` lives there.
 
 ## Pinned build
 
-The manifest pins release b11609 (commit `fcac190`), its CPU asset
-`llama-b11609-bin-ubuntu-x64.tar.gz` (size and SHA-256), the 22 files Mimik runs from it
+The manifest pins release b12110 (the commit tagged v0.9.0, `cd959ba`), its CPU asset
+`llama-b12110-bin-ubuntu-x64.tar.gz` (size and SHA-256), the 22 files Mimik runs from it
 (each under its SONAME, no links: `llama-server`, `libllama-server-impl.so`,
 `libllama-common.so.0`, `libmtmd.so.0`, `libllama.so.0`, `libggml.so.0`, `libggml-base.so.0`,
 the 14 `libggml-cpu-<variant>.so` backends and `LICENSE`; the RPC backend is not shipped)
@@ -80,8 +80,8 @@ floors GLIBC 2.34, GLIBCXX 3.4.30, OpenSSL 3.0.0), the documented minimum host (
 `x86_64`), the source archive (`git archive` of the commit, tar SHA-256; a build-time input for the notice texts only, never shipped, ASSIST-47) and the CI test model
 (`ggml-org/models-moved` at `499bc88…`, `tinyllamas/stories260K.gguf`, upstream MIT). ggml
 loads every `libggml-cpu-<variant>.so` beside the server and uses the best one the CPU
-supports. The Vulkan asset `llama-b11609-bin-ubuntu-vulkan-x64.tar.gz` (SHA-256
-`8aff1888…`, ASSIST-42) holds the same 22 files byte for byte plus `libggml-vulkan.so` (the
+supports. The Vulkan asset `llama-b12110-bin-ubuntu-vulkan-x64.tar.gz` (SHA-256
+`a5d74194…`, ASSIST-42) holds the same 22 files byte for byte plus `libggml-vulkan.so` (the
 Vulkan backend, which ggml loads from beside llama-server like the CPU backends and which needs
 the system's Vulkan loader `libvulkan.so.1` and a Vulkan driver); the manifest pins it as the
 `vulkan` build, shipped in `llama/vulkan/` (the CPU files are shipped twice, once per build
@@ -139,7 +139,7 @@ level 3 the verified llama-server descriptor, moved to number 1023 (close-on-exe
 
 The bundled build is `GGML_BACKEND_DL=ON` with `GGML_CPU_ALL_VARIANTS=ON`: ggml picks a CPU
 backend at run time by `dlopen`ing each `libggml-cpu-*.so` it finds and scoring it, and a
-candidate's constructors run while it is open (ASSIST-42, audited against the b11609 source,
+candidate's constructors run while it is open (ASSIST-42, audited against the b12110 source,
 `ggml/src/ggml-backend-reg.cpp`). `ggml_backend_load_best` searches, in order: `GGML_BACKEND_DIR`
 (a compile-time path, not set in this build); the executable's directory (`/proc/self/exe`'s
 folder); and the current working directory. It is not governed by `LD_LIBRARY_PATH`.

@@ -118,7 +118,7 @@ async fn restart_is_owner_only_and_csrf_checked() {
     } = assisted().await;
     let page = body(router_request(&app, &auth[0], "/admin/assistant", None).await).await;
     assert!(page.contains("<strong>Starting</strong>"), "{page}");
-    assert!(page.contains("llama.cpp b11609"), "{page}");
+    assert!(page.contains("llama.cpp b12110"), "{page}");
     assert_eq!(
         router_request(&app, &auth[1], "/admin/assistant", None)
             .await

@@ -104,8 +104,8 @@ mod tests {
     #[test]
     fn the_manifest_pins_the_cpu_build_completely() {
         let manifest = &*MANIFEST;
-        assert_eq!(manifest.llama_cpp.tag, "b11609");
-        assert_eq!(manifest.llama_cpp.build, 11609);
+        assert_eq!(manifest.llama_cpp.tag, "b12110");
+        assert_eq!(manifest.llama_cpp.build, 12110);
         assert_eq!(manifest.llama_cpp.commit.len(), 40);
         assert!(
             manifest

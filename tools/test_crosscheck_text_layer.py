@@ -225,7 +225,7 @@ class CrosscheckTests(unittest.TestCase):
 class OcrOptionTests(unittest.TestCase):
     def fetch(self, url):
         if url.endswith("/props"):
-            return {"model_path": "/m/surya-2.gguf", "build_info": "b11609"}
+            return {"model_path": "/m/surya-2.gguf", "build_info": "b12110"}
         return {"data": [{"id": "datalab-to/surya-ocr-2"}]}
 
     def test_ocr_needs_a_server_and_disabled_ocr_refuses_one(self):
@@ -245,19 +245,19 @@ class OcrOptionTests(unittest.TestCase):
         reported = ocr["server_reported"]
         self.assertEqual(reported["served_model"], ["datalab-to/surya-ocr-2"])
         self.assertEqual(reported["model_path"], "/m/surya-2.gguf")
-        self.assertEqual(reported["build_info"], "b11609")
+        self.assertEqual(reported["build_info"], "b12110")
         self.assertEqual(ocr["surya_version"], "0.22.1")
 
     def test_an_incomplete_or_foreign_server_report_is_refused(self):
         def fetch_with(props, models):
             return lambda url: props if url.endswith("/props") else {"data": models}
 
-        good = {"model_path": "/m/surya-2.gguf", "build_info": "b11609"}
+        good = {"model_path": "/m/surya-2.gguf", "build_info": "b12110"}
         for props, models in (
             (good, []),
             (good, [{"id": "other-model"}]),
             (good, [{"id": "datalab-to/surya-ocr-2"}, {"id": "other-model"}]),
-            ({"build_info": "b11609"}, [{"id": "datalab-to/surya-ocr-2"}]),
+            ({"build_info": "b12110"}, [{"id": "datalab-to/surya-ocr-2"}]),
             ({"model_path": "/m/surya-2.gguf"}, [{"id": "datalab-to/surya-ocr-2"}]),
         ):
             with self.subTest(props=props, models=models), self.assertRaises(ValueError):

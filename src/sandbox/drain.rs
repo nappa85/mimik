@@ -12,7 +12,7 @@ pub(crate) const LINE_BOUND: usize = 4096;
 /// What a line of the child's output can signal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Output {
-    /// `llama_server: listening on …` (a hint for when to connect, never the proof).
+    /// `srv  server_on_li: listening on unix://…` or `http://…` (a hint for when to connect, never the proof).
     Listening,
     /// `build: <n>` or `(build <n>, …)`.
     Build(u32),
@@ -30,7 +30,7 @@ static PATTERNS: LazyLock<[regex::Regex; 6]> = LazyLock::new(|| {
     [
         regex::Regex::new(r"(?i)(couldn't bind|could not bind|failed to bind|address already in use)")
             .expect("pattern"),
-        regex::Regex::new(r"llama_server: listening on ").expect("pattern"),
+        regex::Regex::new(r": listening on (unix|https?)://").expect("pattern"),
         regex::Regex::new(r"\bbuild[: ]+(\d{1,9})\b").expect("pattern"),
         regex::Regex::new(r"offloaded (\d{1,6})/(\d{1,6}) layers to GPU").expect("pattern"),
         regex::Regex::new(r"(?i)(failed to load model|error loading model|unable to load model)")
@@ -262,12 +262,28 @@ mod tests {
     #[test]
     fn fixed_patterns_from_the_pinned_build() {
         assert_eq!(
-            classify("0.00.029.302 I srv  llama_server: listening on unix:///run/llama/llama.sock"),
+            classify("0.01.458.189 I srv  server_on_li: listening on unix:///run/llama/llama.sock"),
             Some(Output::Listening)
         );
         assert_eq!(
-            classify("version: 0.6.0-dev (build 11609, commit fcac19079)"),
-            Some(Output::Build(11609))
+            classify("0.00.031.832 I srv  server_on_li: listening on http://127.0.0.1:9"),
+            Some(Output::Listening)
+        );
+        assert_eq!(
+            classify(
+                "0.00.014.401 I cmn  common_param: common_params_print_info: build 12110 (cd959bae9) with GNU 11.4.0 for Linux x86_64"
+            ),
+            Some(Output::Build(12110))
+        );
+        assert_eq!(
+            classify(
+                "0.00.014.363 E llama_model_load: error loading model: llama_model_loader: failed to load model from /m.gguf"
+            ),
+            Some(Output::ModelLoadError)
+        );
+        assert_eq!(
+            classify("version: 0.9.0-dev (build 12110, commit cd959bae9)"),
+            Some(Output::Build(12110))
         );
         assert_eq!(
             classify("load_tensors: offloaded 41/41 layers to GPU"),
@@ -287,7 +303,9 @@ mod tests {
             None
         );
         assert_eq!(
-            classify("srv    init: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 9"),
+            classify(
+                "0.00.011.752 E srv         start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 9000"
+            ),
             Some(Output::BindError)
         );
         // The CPU build's note on the CPU path is not a device error.
@@ -321,7 +339,7 @@ mod tests {
             text.extend_from_slice(format!("build: {}\n", n % 7).as_bytes());
         }
         text.extend_from_slice(
-            b"llama_server: listening on x\nload_tensors: offloaded 3/4 layers to GPU\n",
+            b"srv  server_on_li: listening on unix://x\nload_tensors: offloaded 3/4 layers to GPU\n",
         );
         let summary = std::sync::Arc::new(std::sync::Mutex::new(Summary::default()));
         let (sender, ended) = std::sync::mpsc::channel();
@@ -349,7 +367,7 @@ mod tests {
     fn a_line_of_a_mebibyte_and_endless_lines_stay_bounded() {
         // One line of 1 MiB with a pattern past the bound: cut, so it is not seen.
         let mut long = vec![b'x'; 1 << 20];
-        long.extend_from_slice(b" llama_server: listening on x\n");
+        long.extend_from_slice(b" srv  server_on_li: listening on unix://x\n");
         let mut seen = Vec::new();
         drain(long.as_slice(), |event| seen.push(event));
         assert_eq!(seen, []);
@@ -372,7 +390,7 @@ mod tests {
         assert_eq!(seen, []);
         // A pattern after a cut line is still found.
         let mut text = vec![b'z'; 10_000];
-        text.extend_from_slice(b"\nllama_server: listening on unix:///x\n");
+        text.extend_from_slice(b"\nsrv  server_on_li: listening on unix:///x\n");
         drain(text.as_slice(), |event| seen.push(event));
         assert_eq!(seen, vec![Output::Listening]);
     }

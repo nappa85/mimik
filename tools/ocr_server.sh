@@ -1,7 +1,7 @@
 #!/bin/sh
 # Optional prototype: serve surya's OCR model for tools/extract_manual.py --ocr-server.
 #
-# Runs the pinned llama.cpp llama-server (b11609, the build Mimik ships) in a container on
+# Runs the pinned llama.cpp llama-server (b12110, the build Mimik ships) in a container on
 # the internal Docker network mimik-ocr-net (no outside access), with surya-ocr-2 at a pinned
 # revision, hash-checked before start. DEVICE=gpu uses the Vulkan build and is refused on
 # weekdays 09:00-18:00 (the machine schedule; the fan must be on manual); the image encoder
