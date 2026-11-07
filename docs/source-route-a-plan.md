@@ -273,37 +273,56 @@ Remaining before any route-A measurement:
   inspection, not a server PDF parse. Derive each page's raw and units outside the Store mutex
   into a staged, hash-verified per-page file, one page in memory at a time. Before admission,
   reserve disk from the per-page upper bound (pages × (reading payload + unit bytes) plus PDF
-  and PNG copies), in addition to staging's ledger and 512 MiB margin; after derivation,
-  re-check against the actual staged sizes before writing.
-- Write in page batches, never one unbounded transaction (C6): a first IMMEDIATE transaction
-  rechecks Owner/session-bound CSRF, both revisions, current selection/render identities and
-  the active job, resolves the registered edition and inserts the source in a `finalizing`
-  state that no reader, search or review screen shows. Each following transaction inserts one
-  batch of pages (PDF BLOB once, original PNGs, page facts/probe provenance, raw and units
-  rows, units initially `unreviewed`, search projections), each a bounded write. A last
-  transaction verifies the source hash over the stored rows, applies the exclusion decisions
-  below and flips the source to visible together with the receipt. Startup and hourly cleanup
-  delete any source still `finalizing` without an active job; a failed batch fails the job and
-  leaves it to that cleanup. 4a/4c measure the batch duration so other requests are not held. Add permanent
-  exclusion provenance (pages, geometry, rationale, revisions, confirming actor/time and opaque
-  fingerprint), crossing flags and explicit rejection-event links. Migration guards make these
-  facts immutable without weakening 007/015/017. Obtain exclusion attribution from its staging
-  row: `StagedContract.exclusion` alone lacks actor/time. Recheck it in the transaction.
+  and PNG copies) for the staged per-page files and the database copies together (both exist
+  until cleanup), plus one batch's rollback-journal growth, in addition to staging's ledger and
+  512 MiB margin; after derivation, re-check against the actual staged sizes before writing.
+- Write in page batches, never one unbounded transaction (C6).
+  - **First** IMMEDIATE transaction: recheck Owner/session-bound CSRF, both revisions, current
+    selection/render identities, the registered active job and the exclusion staging row with
+    its attribution (`StagedContract.exclusion` alone lacks actor/time); resolve the registered
+    edition; insert the source as `finalizing`. At most one `finalizing` source per upload ID
+    (unique constraint): under the control lock, a retry first deletes a leftover hidden source
+    of the same upload before inserting its own.
+  - **Batch** transactions: each inserts one bounded batch of pages (PDF BLOB once, original
+    PNGs, page facts/probe provenance, raw and units rows, units initially `unreviewed`, search
+    projections, and the batch's exclusion rejections below), after checking that its own
+    source still exists and is `finalizing`.
+  - **Last** transaction: recheck everything the first one checked (Owner/session validity,
+    both revisions, selection/render identities, the job still registered and not cancelled,
+    the upload row and the exclusion staging row unchanged); verify the source hash over the
+    stored rows; call `documents::register_import`; delete the upload row, exclusions and
+    fingerprint key; record the receipt; flip the source to visible. Any mismatch fails the
+    job and leaves the hidden source to cleanup.
+  - **Hidden means hidden everywhere:** every query over sources, units, pages, documents and
+    search projections filters to visible sources (one shared predicate): review screens,
+    search/FTS, assistant retrieval, suggestion reports, edition coverage, exports and backups,
+    source lists and counts, duplicate-PDF-hash checks and receipt lookups.
+  - **Cleanup:** startup and hourly cleanup delete a `finalizing` source only after confirming,
+    under the lock the job holds when it registers and writes a batch, that no job owns it;
+    deletion runs in bounded batches too. Migration guards make raw, units, page facts and
+    exclusion provenance immutable without weakening 007/015/017, except that cleanup may delete
+    the rows of a `finalizing` source.
+  - 4a/4c measure batch and cleanup durations so other requests are not held.
+  Add permanent exclusion provenance (pages, geometry, rationale, revisions, confirming
+  actor/time and opaque fingerprint), crossing flags and explicit rejection-event links.
 - Apply the confirmed geometry **after** derivation: wholly contained unit rectangles (inclusive
   edges) receive attributed `rejected` decisions citing the exclusion; positive-area overlap
   without containment stays `unreviewed` and flagged. Mere edge contact is not crossing. Raw
   output stays complete. At creation confirmation the current Owner authorizes these rejections;
   retain the original confirmer separately. Check all expected revision-1 units first, then
   update/event/authenticated sidecar per unit, sharing operation ID/rationale. Reuse review
-  primitives; explicitly handle >1,024 excluded units by bounded internal chunks in the last
-  transaction (one operation), preserving the public batch limit. Any failure leaves the
-  source `finalizing` for cleanup. List decisions and allow normal revision-checked undo; never auto-complete a page.
-- Reuse `documents::register_import`: hash-keyed document/member, first uncovered page primary,
-  overlaps subject to the existing owner-choice rules. Do not replace a primary reading or
+  primitives; apply the rejections per page batch (one operation across batches), so >1,024
+  excluded units never make one transaction unbounded, preserving the public batch limit; the
+  last transaction's recheck keeps them from going stale. Any failure leaves the source
+  `finalizing` for cleanup. List decisions and allow normal revision-checked undo; never
+  auto-complete a page.
+- Reuse `documents::register_import` (in the last transaction only): hash-keyed
+  document/member, first uncovered page primary, overlaps subject to the existing owner-choice
+  rules. Do not replace a primary reading or
   merge runs. Schema 24 still stores PDF bytes per source; PDF deduplication (C5) is not an
   incidental migration in this slice.
-- Commit source creation and upload-row deletion (including exclusions and fingerprint key)
-  together; retain an upload-ID → source-ID completion receipt without private staging data
+- The flip transaction holds the upload-row deletion (with exclusions and fingerprint key) and
+  the receipt; retain an upload-ID → source-ID completion receipt without private staging data
   for retry/lost-response idempotency. Only after commit remove the staging folder and charge
   surviving bytes until cleanup succeeds; startup/hourly orphan cleanup retries. Failure before
   commit retains retryable staging; crash after commit cannot produce another reading. Copy
@@ -406,7 +425,11 @@ Remaining before any route-A measurement:
   mutation/bounds tests, raw equality, legacy import/reimport and sanitized projections.
 - **Later tags:** only under the owner's retained scope; new reading/derivation version,
   independent review, ownership/span fixtures and remeasured bars before completion.
-- **4c:** manager/source transaction, permanent facts/exclusion migration and cleanup receipts.
+- **4c:** manager, batched finalization, permanent facts/exclusion migration and cleanup
+  receipts; tests for a failure between batches, a retry with a leftover hidden source, the
+  sweep racing an active job, revision/exclusion/discard changes between the first and last
+  transactions, every reader filtering hidden sources (a search hitting a hidden source's
+  projection, documents, assistant) and cleanup deleting a hidden source's immutable rows.
   Independent review; migration/immutability tests, excluded/crossing/edge cases, >1,024
   decisions, stale revisions, attribution failure rollback, competing creation/discard/sweep,
   selection/metadata/exclusion changes during work, cancellation/restart and disk-full faults.
@@ -459,5 +482,6 @@ Remaining before any route-A measurement:
   close this gap; review against original renders remains necessary. `CLIP` on instead loses
   scissored glyphs silently and cannot provide complete dropped-text diagnostics.
 - SQLite BLOB copies/journaling block the single Store connection (C6); measure each page
-  batch's duration and the disk headroom on a 500-page synthetic source of dense pages. Do not promise filesystem/SQL
-  atomicity: the receipt, post-commit deletion and restart reconciliation bridge it.
+  batch's duration and the disk headroom on a 500-page synthetic source of dense pages. Do not
+  promise filesystem/SQL atomicity: the receipt, post-commit deletion and restart
+  reconciliation bridge it.
