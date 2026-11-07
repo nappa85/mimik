@@ -224,6 +224,18 @@ fn router_with_sessions(
         .layer(middleware::from_fn(boundary))
 }
 
+/// Header a test sets to lengthen the boundary deadline of one request (whole seconds), so a
+/// route test of a legitimately slow response does not depend on how loaded the machine is.
+/// Tests of the deadline itself send no such header.
+#[cfg(test)]
+pub(crate) const TEST_DEADLINE_HEADER: &str = "x-test-request-deadline-secs";
+
+#[cfg(test)]
+fn test_deadline(request: &Request) -> Option<Duration> {
+    let seconds = request.headers().get(TEST_DEADLINE_HEADER)?.to_str().ok()?;
+    seconds.parse().ok().map(Duration::from_secs)
+}
+
 async fn boundary(request: Request, next: Next) -> Response {
     // The upload stream has its own idle and total deadlines. Other requests keep
     // the short authentication-boundary deadline.
@@ -238,6 +250,8 @@ async fn boundary(request: Request, next: Next) -> Response {
     } else {
         Duration::from_secs(5)
     };
+    #[cfg(test)]
+    let deadline = test_deadline(&request).unwrap_or(deadline);
     let browser_navigation = browser_auth_navigation(&request);
     let document = browser_document(&request);
     let response = if let Ok(_permit) = REQUESTS.clone().try_acquire_owned() {

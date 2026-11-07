@@ -219,3 +219,39 @@ fn login_marker_cannot_preserve_unapproved_statuses() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_deadline_header_lengthens_only_its_own_request() {
+    let _guard = AUTH_TEST_LOCK.clone().lock_owned().await;
+    tokio::time::pause();
+    let app = Router::new()
+        .route(
+            "/slow",
+            axum::routing::get(|| async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                StatusCode::OK
+            }),
+        )
+        .layer(middleware::from_fn(boundary));
+    let slow = |header: Option<&str>| {
+        let mut builder = axum::http::Request::builder()
+            .uri("/slow")
+            .header("host", "127.0.0.1:3000");
+        if let Some(seconds) = header {
+            builder = builder.header(TEST_DEADLINE_HEADER, seconds);
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    };
+    assert_eq!(
+        app.clone().oneshot(slow(None)).await.unwrap().status(),
+        StatusCode::REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(slow(Some("60")))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}

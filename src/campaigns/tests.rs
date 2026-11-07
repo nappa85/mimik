@@ -93,6 +93,11 @@ async fn fixture_with_owner(
         sessions.create(&mut record).await.unwrap();
         auths.push(RequestAuth::fixture(account, record.id, 1000));
     }
+    // Tests that check byte, count or label budgets must not depend on wall-clock speed: the
+    // review read deadline cannot expire unless a test forces it (its own store only).
+    store
+        .update_read_deadlines(|hooks| hooks.default = Some(std::time::Duration::from_mins(10)))
+        .await;
     (dir, store, auths, clock)
 }
 

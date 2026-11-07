@@ -33,22 +33,63 @@ pub(super) fn read_with_deadline<T>(
     }
 }
 
+/// The production review read deadline.
+const READ_BUDGET: Duration = Duration::from_millis(250);
+
+/// Test-only review read deadline overrides, keyed by the store's database file so that
+/// concurrent tests (each with its own file) cannot consume each other's override.
 #[cfg(test)]
-pub(crate) static READ_DEADLINE: std::sync::Mutex<Option<(&str, Duration)>> =
+#[derive(Default)]
+pub(crate) struct ReadDeadlines {
+    /// Replaces the default deadline of every read of the store (a simulated slow machine).
+    pub default: Option<Duration>,
+    /// Replaces the deadline of the next read with this label.
+    pub once: Option<(&'static str, Duration)>,
+}
+
+#[cfg(test)]
+static READ_DEADLINES: std::sync::Mutex<Option<std::collections::HashMap<String, ReadDeadlines>>> =
     std::sync::Mutex::new(None);
+
+/// Changes the overrides of the store whose database file is `path` (starting from none).
+#[cfg(test)]
+pub(crate) fn update_read_deadlines(path: &str, change: impl FnOnce(&mut ReadDeadlines)) {
+    let mut hooks = READ_DEADLINES.lock().unwrap();
+    let hooks = hooks.get_or_insert_with(std::collections::HashMap::new);
+    change(hooks.entry(path.to_owned()).or_default());
+}
+
+/// Removes every override of the store whose database file is `path`.
+#[cfg(test)]
+pub(crate) fn clear_read_deadlines(path: &str) {
+    if let Some(hooks) = READ_DEADLINES.lock().unwrap().as_mut() {
+        hooks.remove(path);
+    }
+}
 
 fn read_deadline<'a>(db: &'a Connection, label: &str) -> super::search::Budget<'a> {
     #[cfg(not(test))]
     let _ = label;
     #[cfg(test)]
-    {
-        let mut hook = READ_DEADLINE.lock().unwrap();
-        if hook.as_ref().is_some_and(|(name, _)| *name == label) {
-            let duration = hook.take().unwrap().1;
-            return super::search::Budget::checking_every(db, duration, 1);
+    if let Some(path) = db.path() {
+        let mut hooks = READ_DEADLINES.lock().unwrap();
+        if let Some(hook) = hooks.as_mut().and_then(|hooks| hooks.get_mut(path)) {
+            if hook.once.is_some_and(|(name, _)| name == label) {
+                let duration = hook.once.take().unwrap().1;
+                return super::search::Budget::checking_every(db, duration, 1);
+            }
+            if let Some(duration) = hook.default {
+                // A generous deadline keeps the normal check interval; a forced expiry checks
+                // at every step so even a tiny read is interrupted.
+                return if duration >= Duration::from_secs(1) {
+                    super::search::Budget::start(db, duration)
+                } else {
+                    super::search::Budget::checking_every(db, duration, 1)
+                };
+            }
         }
     }
-    super::search::Budget::start(db, Duration::from_millis(250))
+    super::search::Budget::start(db, READ_BUDGET)
 }
 
 #[derive(Clone)]
