@@ -77,6 +77,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   4. A list of all units still to review (per page and per source), to jump between them.
   5. The decision form is too long: the exclusive choices belong in tabs or a segmented control.
   6. The page image with the unit boxes should stay visible while scrolling (sticky).
+  - The "Next page with units to review" link skips pages that need only a completeness
+    confirmation (no units, or all reviewed): add a separate "Next incomplete page" link.
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
