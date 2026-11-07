@@ -231,6 +231,19 @@ pub(crate) fn review_identity(actor: &str, rationale: &str) -> Result<(), crate:
     Ok(())
 }
 
+/// Like [`review_identity`], but an `accepted` unit decision (the extraction is taken as it is)
+/// may carry an empty rationale; every other decision still needs one.
+pub(crate) fn unit_review_identity(
+    actor: &str,
+    rationale: &str,
+    state: &str,
+) -> Result<(), crate::AppError> {
+    if state == "accepted" && rationale.trim().is_empty() {
+        return review_identity(actor, "-");
+    }
+    review_identity(actor, rationale)
+}
+
 #[cfg(test)]
 mod sanitizer_tests {
     /// RUSTSEC-2026-0373 (ammonia < 4.2.4 matched the CSS `url(` function case-sensitively

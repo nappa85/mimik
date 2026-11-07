@@ -439,7 +439,12 @@ pub(super) fn new_operation_id() -> String {
 }
 
 pub(super) fn validate_batch(decisions: &[UnitDecision], rationale: &str) -> Result<(), AppError> {
-    review_identity("batch", rationale)?;
+    let all_accepted = decisions.iter().all(|d| d.review.state == "accepted");
+    if all_accepted {
+        super::unit_review_identity("batch", rationale, "accepted")?;
+    } else {
+        review_identity("batch", rationale)?;
+    }
     if decisions.is_empty() || decisions.len() > 1024 {
         return Err(AppError::Invalid("Choose 1–1,024 unit decisions."));
     }

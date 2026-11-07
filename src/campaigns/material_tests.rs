@@ -3722,3 +3722,471 @@ async fn review_read_deadline_overrides_are_scoped_to_their_store() {
             .contains("Lookup not read (time limit)")
     );
 }
+
+fn accept_form(revision: i64, rationale: &str) -> Vec<(String, String)> {
+    review_form(&[
+        ("revision", &revision.to_string()),
+        ("state", "accepted"),
+        ("correction", ""),
+        ("rationale", rationale),
+    ])
+}
+
+fn location(response: &axum::response::Response) -> String {
+    response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .expect("redirect")
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Accept units 2..=51 in one batch so only unit 1 is left to review.
+async fn accept_all_but_first(store: &Store, auth: &RequestAuth) {
+    let decisions = (2..=51)
+        .map(|unit| crate::sources::UnitDecision {
+            page: 1,
+            unit,
+            review: crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: String::new(),
+            },
+        })
+        .collect();
+    store
+        .material_review_units_atomic(
+            auth.clone(),
+            auth.csrf_fixture(),
+            decisions,
+            "Checked".into(),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_accept_as_extracted_needs_no_rationale_but_keeps_the_audit_event() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    store
+        .run(|db| {
+            let (rationale, actor, state): (String, String, String) = db.query_row(
+                "SELECT rationale,actor,state FROM source_review_events WHERE unit_id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            assert_eq!((rationale.as_str(), state.as_str()), ("", "accepted"));
+            assert!(actor.starts_with("account:"));
+            let audited: i64 = db.query_row(
+                "SELECT count(*) FROM source_web_events w JOIN source_review_events e ON e.id=w.event_id WHERE e.unit_id=1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(audited, 1, "the decision keeps its authenticated audit event");
+            Ok(())
+        })
+        .await
+        .unwrap();
+    // Corrections and rejections still need a rationale.
+    for (state, correction) in [("corrected", "Fixed"), ("rejected", "")] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/units/2",
+            review_form(&[
+                ("revision", "1"),
+                ("state", state),
+                ("correction", correction),
+                ("rationale", "  "),
+            ]),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{state}"
+        );
+    }
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(
+        !scraper::Html::parse_document(&html)
+            .select(
+                &scraper::Selector::parse("[data-form=unit] textarea[name=rationale][required]")
+                    .unwrap()
+            )
+            .any(|_| true),
+        "the rationale field is not browser-required"
+    );
+}
+
+#[tokio::test]
+async fn material_save_confirms_and_lands_on_the_next_unreviewed_unit() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    let target = location(&response);
+    assert_eq!(
+        target,
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit#unit-2"
+    );
+    let html = body(router_get(&app, &auth[0], &target).await).await;
+    assert!(
+        html.contains("Saved unit 1: accepted as extracted."),
+        "{html}"
+    );
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(
+        parsed
+            .select(&scraper::Selector::parse("#unit-2 strong").unwrap())
+            .next()
+            .is_some(),
+        "the landing card repeats the confirmation"
+    );
+    // Unknown words are refused, not echoed.
+    for forged in ["saved=%3Cb%3E", "saved=accepted&saved_unit=1&then=%3Cb%3E"] {
+        let path = format!("/admin/materials/pages/1?{forged}");
+        let response = router_get(&app, &auth[0], &path).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{forged}");
+    }
+    // A well-formed link that claims a save that did not happen shows no notice.
+    for false_link in [
+        "saved=rejected&saved_unit=1&then=unit",
+        "saved=accepted&saved_unit=30&then=unit",
+        "saved=accepted&saved_unit=1&then=done",
+        "saved=accepted&saved_unit=999&then=unit",
+    ] {
+        let path = format!("/admin/materials/pages/1?{false_link}");
+        let response = router_get(&app, &auth[0], &path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{false_link}");
+        assert!(!body(response).await.contains("Saved unit"), "{false_link}");
+    }
+}
+
+#[tokio::test]
+async fn material_save_moves_to_the_next_page_or_the_summary_when_done() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    accept_all_but_first(&store, &auth[0]).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    assert_eq!(
+        location(&response),
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&then=done#complete"
+    );
+    let html = body(router_get(&app, &auth[0], &location(&response)).await).await;
+    assert!(html.contains("No unit is left to review"));
+
+    // With a second page that still has an unreviewed unit, the save moves there.
+    store
+        .run(|db| {
+            db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47')", [])?;
+            db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(100,2,'p2','Text','[]','<p>Two</p>','Two')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let next = store
+        .material_next_after_review(auth[0].clone(), 1, 1)
+        .await
+        .unwrap();
+    assert!(matches!(
+        next,
+        crate::sources::materials::ReviewNext::Page(2)
+    ));
+}
+
+#[tokio::test]
+async fn material_overlay_boxes_carry_their_review_state_and_a_legend() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            db.execute(
+                "UPDATE source_units SET polygon='[[1,1],[20,1],[20,20],[1,20]]' WHERE id<=4",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    finalize_material(&store).await;
+    for (unit, state, correction) in [
+        (2, "accepted", ""),
+        (3, "corrected", "Fixed"),
+        (4, "rejected", ""),
+    ] {
+        store
+            .material_review_unit(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                unit,
+                crate::sources::UnitReview {
+                    revision: 1,
+                    state: state.into(),
+                    correction: correction.into(),
+                    actor: String::new(),
+                    rationale: "Checked".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    for (unit, state) in [
+        (1, "unreviewed"),
+        (2, "accepted"),
+        (3, "corrected"),
+        (4, "rejected"),
+    ] {
+        let polygon = parsed
+            .select(
+                &scraper::Selector::parse(&format!("polygon[data-overlay-unit=\"{unit}\"]"))
+                    .unwrap(),
+            )
+            .next()
+            .unwrap_or_else(|| panic!("unit {unit} box"));
+        assert!(
+            polygon
+                .value()
+                .classes()
+                .any(|c| c == format!("state-{state}")),
+            "unit {unit}"
+        );
+        assert!(html.contains(&format!("aria-label=\"Review unit {unit} ({state})\"")));
+    }
+    for label in [
+        "Unreviewed (dashed blue)",
+        "Accepted (solid green)",
+        "Corrected (dotted orange)",
+        "Rejected (dash-dot red)",
+    ] {
+        assert!(html.contains(label), "legend {label}");
+    }
+}
+
+#[tokio::test]
+async fn material_primary_pages_checkbox_is_labelled_and_explained() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = router_get(&app, &auth[0], "/admin/materials/sources/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let labels: Vec<String> = parsed
+        .select(&scraper::Selector::parse("label:has(input[type=checkbox])").unwrap())
+        .map(|label| label.text().collect())
+        .collect();
+    assert_eq!(labels.len(), 1, "one page row: {labels:?}");
+    assert!(
+        labels
+            .iter()
+            .all(|text| text.contains("primary reading for PDF page")),
+        "{labels:?}"
+    );
+    assert!(html.contains("Ticking alone changes nothing."));
+}
+
+#[tokio::test]
+async fn material_save_lookup_failure_is_unknown_not_finished() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    accept_all_but_first(&store, &auth[0]).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    store
+        .force_read_deadline("next", std::time::Duration::ZERO)
+        .await;
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    let target = location(&response);
+    assert_eq!(
+        target,
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&then=unknown#unit-1"
+    );
+    let html = body(router_get(&app, &auth[0], &target).await).await;
+    assert!(html.contains("The next unit could not be found in time"));
+    assert!(!html.contains("No unit is left to review"));
+}
+
+#[tokio::test]
+async fn material_save_redirects_with_card_cursor_and_to_the_next_page() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // Units 2..=50 are accepted, so after unit 1 the next unreviewed unit is #51 (position 51).
+    let decisions = (2..=50)
+        .map(|unit| crate::sources::UnitDecision {
+            page: 1,
+            unit,
+            review: crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: String::new(),
+            },
+        })
+        .collect();
+    store
+        .material_review_units_atomic(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            decisions,
+            "  ".into(),
+        )
+        .await
+        .unwrap();
+    store
+        .run(|db| {
+            let empty: i64 = db.query_row(
+                "SELECT count(*) FROM source_review_events WHERE state='accepted' AND rationale=''",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                empty, 49,
+                "every event of an all-accepted batch stores an empty rationale"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, " \n "),
+    )
+    .await;
+    assert_eq!(
+        location(&response),
+        "/admin/materials/pages/1?units=50&saved=accepted&saved_unit=1&to=51&then=unit#unit-51"
+    );
+    store
+        .run(|db| {
+            let rationale: String = db.query_row(
+                "SELECT rationale FROM source_review_events WHERE unit_id=1",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                rationale, "",
+                "whitespace-only accepted rationale is stored empty"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let html = body(router_get(&app, &auth[0], &location(&response)).await).await;
+    assert!(html.contains("No rationale given."));
+}
+
+#[tokio::test]
+async fn material_save_moves_to_the_next_page_with_a_true_notice() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    accept_all_but_first(&store, &auth[0]).await;
+    store
+        .run(|db| {
+            db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47')", [])?;
+            db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(100,2,'p2','Text','[]','<p>Two</p>','Two')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    let target = location(&response);
+    assert_eq!(
+        target,
+        "/admin/materials/pages/2?saved=accepted&saved_unit=1&then=page#saved-notice"
+    );
+    let html = body(router_get(&app, &auth[0], &target).await).await;
+    assert!(html.contains("Saved unit 1: accepted as extracted."));
+    assert!(html.contains("this is the next page with units to review"));
+    // The same link is false once its unit is not in that state.
+    let false_link = "/admin/materials/pages/2?saved=rejected&saved_unit=1&then=page";
+    assert!(
+        !body(router_get(&app, &auth[0], false_link).await)
+            .await
+            .contains("Saved unit")
+    );
+}
+#[tokio::test]
+async fn material_mixed_batch_needs_a_rationale() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let decision = |unit, state: &str, correction: &str| crate::sources::UnitDecision {
+        page: 1,
+        unit,
+        review: crate::sources::UnitReview {
+            revision: 1,
+            state: state.into(),
+            correction: correction.into(),
+            actor: String::new(),
+            rationale: String::new(),
+        },
+    };
+    let result = store
+        .material_review_units_atomic(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            vec![
+                decision(1, "accepted", ""),
+                decision(2, "corrected", "Fixed"),
+            ],
+            " ".into(),
+        )
+        .await;
+    assert!(matches!(result, Err(crate::AppError::Invalid(_))));
+}

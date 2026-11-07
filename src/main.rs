@@ -459,9 +459,7 @@ async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn st
         ),
         Command::ImportSource { bundle, pdf } => {
             let id = store.import_source(&bundle, &pdf).await?;
-            println!(
-                "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Open /sources."
-            );
+            println!("{}", import_source_message(id));
         }
         Command::ImportSuggestions { source, report } => {
             let summary = store.import_suggestion_report(source, &report).await?;
@@ -759,6 +757,13 @@ async fn catalogue_command(
         other => return Ok(Some(other)),
     }
     Ok(None)
+}
+
+/// What `import-source` prints; the review screen is the Owner materials page.
+fn import_source_message(id: impl std::fmt::Display) -> String {
+    format!(
+        "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Review it at /admin/materials."
+    )
 }
 
 #[cfg(test)]

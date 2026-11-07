@@ -125,3 +125,9 @@ fn data_folder_child() {
     create_data_dir(&data).unwrap();
     println!("data folders checked");
 }
+#[test]
+fn import_source_points_to_the_owner_review_screen() {
+    let message = import_source_message(7);
+    assert!(message.contains("/admin/materials"), "{message}");
+    assert!(!message.contains("Open /sources"), "{message}");
+}
