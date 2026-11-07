@@ -10,7 +10,8 @@ How this directory was made (reproduce exactly to check it):
    checksum), extracted.
 2. `tests/` and `examples/` removed (upstream fixtures, about 11 MB), and their `[[test]]` and
    `[[example]]` sections removed from `Cargo.toml`; the upstream CI and git files
-   (`.github/`, `.gitignore`, `.gitmodules`) and `Cargo.lock` (unused for a dependency) removed. The unit tests inside `src/` need those
+   (`.github/`, `.gitignore`, `.gitmodules`), `Cargo.lock` (unused for a dependency) and `Cargo.toml.orig` (it still listed the removed
+   targets) removed. The unit tests inside `src/` need those
    fixtures; they run in the fork's own repository, not here.
 3. The fork's change applied: `git diff v0.8.0 1adf801 -- src` in mupdf-rs
    (branch `mimik/text-direction-structure`, commits bd4b703, f84972e, fe37046, 230e6eb,
@@ -20,3 +21,10 @@ How this directory was made (reproduce exactly to check it):
 
 `mupdf-sys` is unchanged and still comes from crates.io (`=0.8.0`, MuPDF 1.27.2).
 Licence: AGPL-3.0, as upstream (`LICENSE`).
+
+Wiring: the root `Cargo.toml` has `[patch.crates-io] mupdf = { path = "vendor/mupdf" }`.
+`cargo package` drops that entry and omits this directory (it is a nested package), so
+`tools/vendored_fork.py package` adds both back to the source package (DEP-29). The exact file
+list with SHA-256 is pinned in `vendor/mupdf.sha256` (outside this directory); the tool and
+`verify_source_package.py` refuse any extra, missing or changed file. After an intended change
+run `python tools/vendored_fork.py inventory`.

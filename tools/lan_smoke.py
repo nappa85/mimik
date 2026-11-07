@@ -59,8 +59,8 @@ def main():
     require(
         not (source / "data").exists()
         and not (source / ".env").exists()
-        and (source / "vendor").is_dir(),
-        "Use unpacked allowlisted corresponding source/vendor, not an owner workspace",
+        and (source / "vendored-crates").is_dir(),
+        "Use unpacked allowlisted corresponding source/vendored-crates, not an owner workspace",
     )
     tag = "mimik-lan-" + uuid.uuid4().hex[:12]
     primary, secondary, server = tag + "-primary", tag + "-secondary", tag + "-server"

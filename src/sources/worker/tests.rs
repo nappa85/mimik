@@ -722,6 +722,8 @@ fn boundary_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+const VENDORED_MUPDF: &str = "vendor/mupdf";
+
 fn boundary_crate_roots(
     root: &std::path::Path,
     files: &mut Vec<std::path::PathBuf>,
@@ -739,6 +741,19 @@ fn boundary_crate_roots(
                 !target.starts_with(root.join("src/sources/worker")),
                 "Cargo {kind} inside worker: {path}"
             );
+            // The single vendored renderer fork is the dependency's own source (DEP-29): it is
+            // allowed only as the root manifest's exact patch entry, and is not walked.
+            if kind == "vendored-patch" {
+                assert!(
+                    manifest == root.join("Cargo.toml") && path == VENDORED_MUPDF,
+                    "Cargo {kind} outside the allowed form: {path}"
+                );
+                assert!(
+                    target == root.join(VENDORED_MUPDF) && target.join("Cargo.toml").is_file(),
+                    "Cargo {kind} missing: {path}"
+                );
+                continue;
+            }
             assert!(
                 ["src", "tests", "examples", "benches", "tools"]
                     .iter()
@@ -930,8 +945,15 @@ fn cargo_source_paths(manifest: &std::path::Path) -> Vec<(String, &'static str)>
 }
 
 fn cargo_dependencies(item: &toml_edit::Item, paths: &mut Vec<(String, &'static str)>) {
+    cargo_dependencies_except(item, None, paths);
+}
+fn cargo_dependencies_except(
+    item: &toml_edit::Item,
+    skip: Option<&str>,
+    paths: &mut Vec<(String, &'static str)>,
+) {
     if let Some(table) = item.as_table_like() {
-        for (_, dependency) in table.iter() {
+        for (_, dependency) in table.iter().filter(|(name, _)| Some(*name) != skip) {
             if let Some(path) = dependency.get("path") {
                 paths.push((
                     path.as_str().expect("invalid dependency path").to_owned(),
@@ -954,9 +976,24 @@ fn cargo_dependency_sections(item: &toml_edit::Item, paths: &mut Vec<(String, &'
     }
     for name in ["target", "patch"] {
         if let Some(table) = item.get(name).and_then(toml_edit::Item::as_table_like) {
-            for (_, child) in table.iter() {
+            for (registry, child) in table.iter() {
                 if name == "patch" {
-                    cargo_dependencies(child, paths);
+                    // Exactly `[patch.crates-io] mupdf = { path = "vendor/mupdf" }` (no other
+                    // keys, so no rename or feature change) is the vendored fork (DEP-29).
+                    let vendored = (registry == "crates-io")
+                        .then(|| child.get("mupdf").and_then(toml_edit::Item::as_table_like))
+                        .flatten()
+                        .filter(|dep| {
+                            dep.len() == 1
+                                && dep.get("path").and_then(toml_edit::Item::as_str)
+                                    == Some(VENDORED_MUPDF)
+                        });
+                    if vendored.is_some() {
+                        paths.push((VENDORED_MUPDF.to_owned(), "vendored-patch"));
+                        cargo_dependencies_except(child, Some("mupdf"), paths);
+                    } else {
+                        cargo_dependencies(child, paths);
+                    }
                 } else {
                     cargo_dependency_sections(child, paths);
                 }
@@ -1838,8 +1875,20 @@ fn native_reference() -> regex::Regex {
 }
 fn cargo_alias_reference(text: &str) -> bool {
     let dependency = regex::Regex::new(r"^(?:mupdf|mupdf-sys)\s*=\s*\S").unwrap();
-    text.lines()
-        .any(|line| line.to_ascii_lowercase().contains("mupdf") && !dependency.is_match(line))
+    // The package allowlist names the vendored fork's directory and inventory (DEP-29). Only
+    // those exact entries, on the `include` line, are exempt; any other mention still counts.
+    text.lines().any(|line| {
+        let line = if line.starts_with("include = [") {
+            line.replacen("\"/vendor/mupdf/**\", ", "", 1).replacen(
+                "\"/vendor/mupdf.sha256\", ",
+                "",
+                1,
+            )
+        } else {
+            line.to_owned()
+        };
+        line.to_ascii_lowercase().contains("mupdf") && !dependency.is_match(&line)
+    })
 }
 
 fn native_rust_reference(text: &str) -> bool {
@@ -1869,6 +1918,18 @@ fn boundary_matchers_cover_aliases_and_imports() {
         "MuPDF = '0.8'",
         " mupdf = '0.8'",
         "# MuPDF dependency",
+    ] {
+        assert!(cargo_alias_reference(text), "{text}");
+    }
+    // Only the exact vendored-directory entry of the package allowlist is exempt.
+    assert!(!cargo_alias_reference(
+        "include = [\"/src/**\", \"/vendor/mupdf/**\", \"/tools/*.py\"]"
+    ));
+    for text in [
+        "include = [\"/vendor/mupdf/**\", \"/mupdf/**\"]",
+        "include = [\"/vendor/mupdf.sha256\", \"/vendor/mupdf.sha256\"]",
+        "include = [\"/vendor/mupdf-sys/**\"]",
+        "other = [\"/vendor/mupdf/**\"]",
     ] {
         assert!(cargo_alias_reference(text), "{text}");
     }
@@ -1934,4 +1995,117 @@ fn boundary_matchers_cover_aliases_and_imports() {
         assert!(!native_rust_reference(text), "{text}");
         assert!(!operations.is_match(text), "{text}");
     }
+}
+
+// DEP-29: the worker builds against the vendored mupdf fork (`vendor/mupdf`), which adds the
+// safe text-direction accessors. This fails to compile against crates.io mupdf 0.8.0.
+#[test]
+fn vendored_mupdf_fork_exposes_text_direction() {
+    let bytes = fixture(0, [0, 0, 200, 300], 1.0, false);
+    let page = mupdf::pdf::PdfDocument::from_bytes(&bytes)
+        .unwrap()
+        .load_pdf_page(0)
+        .unwrap();
+    let text = page.to_text_page(mupdf::TextPageFlags::empty()).unwrap();
+    let mut chars = 0;
+    for block in text.blocks() {
+        let _ = block.structure();
+        for line in block.lines() {
+            let dir = line.dir();
+            assert!((dir.x - 1.0).abs() < 1e-3 && dir.y.abs() < 1e-3, "{dir:?}");
+            for ch in line.chars() {
+                chars += 1;
+                assert_eq!(ch.bidi() & 1, 0);
+                assert!(!ch.is_rtl());
+            }
+        }
+    }
+    assert_eq!(chars, "Corner".len());
+}
+
+#[test]
+fn boundary_allows_only_the_exact_vendored_mupdf_patch() {
+    let layout = |root: &std::path::Path, manifest: &str, vendor: &str| {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(vendor)).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join(vendor).join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+    };
+    let allowed = "[patch.crates-io]\nmupdf = { path = \"vendor/mupdf\" }\n";
+    let dir = tempfile::tempdir().unwrap();
+    layout(dir.path(), allowed, "vendor/mupdf");
+    assert!(boundary_files(dir.path()).contains(&dir.path().join("Cargo.toml")));
+    assert!(!cargo_alias_reference(allowed.lines().nth(1).unwrap()));
+    for (manifest, vendor) in [
+        // Other paths, registries, keys and crates are not allowed.
+        (
+            "[patch.crates-io]\nmupdf = { path = \"vendor/other\" }\n",
+            "vendor/other",
+        ),
+        (
+            "[patch.crates-io]\nmupdf = { path = \"vendor/mupdf/\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.crates-io]\nmupdf = { path = \"./vendor/mupdf\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.crates-io]\nmupdf = { path = \"vendor/mupdf\", features = [\"x\"] }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.crates-io]\nmupdf = { path = \"vendor/mupdf\", package = \"other\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.other]\nmupdf = { path = \"vendor/mupdf\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.crates-io]\nmupdf-sys = { path = \"vendor/mupdf\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.crates-io]\nother = { path = \"vendor/mupdf\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[patch.crates-io]\nmupdf = { path = \"vendor/mupdf\" }\nother = { path = \"vendor/other\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[dependencies]\nmupdf = { path = \"vendor/mupdf\" }\n",
+            "vendor/mupdf",
+        ),
+        (
+            "[replace]\n\"mupdf:0.8.0\" = { path = \"vendor/mupdf\" }\n",
+            "vendor/mupdf",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        layout(dir.path(), manifest, vendor);
+        let root = dir.path();
+        assert!(
+            std::panic::catch_unwind(|| boundary_files(root)).is_err(),
+            "{manifest}"
+        );
+    }
+    // The allowance is for the root manifest only, and the directory must exist.
+    let dir = tempfile::tempdir().unwrap();
+    layout(dir.path(), allowed, "vendor/mupdf");
+    std::fs::remove_file(dir.path().join("vendor/mupdf/Cargo.toml")).unwrap();
+    let root = dir.path();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
+    let dir = tempfile::tempdir().unwrap();
+    layout(
+        dir.path(),
+        "[workspace]\nmembers = ['tools/helper']\n",
+        "vendor/mupdf",
+    );
+    std::fs::create_dir_all(dir.path().join("tools/helper")).unwrap();
+    std::fs::write(dir.path().join("tools/helper/Cargo.toml"), allowed).unwrap();
+    let root = dir.path();
+    assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
 }
