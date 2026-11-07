@@ -93,6 +93,11 @@ async fn fixture_with_owner(
         sessions.create(&mut record).await.unwrap();
         auths.push(RequestAuth::fixture(account, record.id, 1000));
     }
+    // Tests that check byte, count or label budgets must not depend on wall-clock speed: the
+    // review read deadline cannot expire unless a test forces it (its own store only).
+    store
+        .update_read_deadlines(|hooks| hooks.default = Some(std::time::Duration::from_mins(10)))
+        .await;
     (dir, store, auths, clock)
 }
 
@@ -571,6 +576,9 @@ async fn router_request(
     let mut req = axum::http::Request::builder()
         .uri(path)
         .header("host", "127.0.0.1:3000")
+        // Load must not decide route tests (real argon2 and large renders run inside the 5 s
+        // boundary deadline); the deadline itself is tested elsewhere.
+        .header(crate::auth::TEST_DEADLINE_HEADER, "120")
         .header("cookie", auth.fixture_cookie());
     let body = if let Some(form) = form {
         req = req

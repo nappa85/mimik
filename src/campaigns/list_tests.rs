@@ -649,6 +649,8 @@ async fn raw_post(setup: &Setup, path: &str, body: String) -> axum::response::Re
         .method("POST")
         .header("host", "127.0.0.1:3000")
         .header("cookie", setup.auth[1].fixture_cookie())
+        // Big renders can take most of the 5 s boundary deadline; load must not decide them.
+        .header(crate::auth::TEST_DEADLINE_HEADER, "120")
         .header("origin", "http://127.0.0.1:3000")
         .header("content-type", "application/x-www-form-urlencoded")
         .body(axum::body::Body::from(body))

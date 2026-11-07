@@ -36,8 +36,9 @@ async fn material_final_all_review_reads_have_deadlines() {
     let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
     let mut missing = Vec::new();
     for label in ["page", "cursor", "list", "detail"] {
-        *crate::sources::review::READ_DEADLINE.lock().unwrap() =
-            Some((label, std::time::Duration::ZERO));
+        store
+            .force_read_deadline(label, std::time::Duration::ZERO)
+            .await;
         let result = match label {
             "page" => store
                 .material_page(auth[0].clone(), 1, 0, 0)
@@ -53,7 +54,7 @@ async fn material_final_all_review_reads_have_deadlines() {
                 .map(|_| ()),
             _ => store.material_advice(auth[0].clone(), id).await.map(|_| ()),
         };
-        crate::sources::review::READ_DEADLINE.lock().unwrap().take();
+        store.clear_forced_read_deadline().await;
         eprintln!("{label} forced expiry: {result:?}");
         if !matches!(result, Err(AppError::Invalid(message)) if message.contains("time limit")) {
             missing.push(label);
@@ -67,7 +68,7 @@ async fn material_final_all_review_reads_have_deadlines() {
         missing.is_empty(),
         "reads missing clear deadline errors: {missing:?}"
     );
-    let app = crate::auth::app(store).await.unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
     for (label, path) in [
         ("page", "/admin/materials/pages/1".to_owned()),
         (
@@ -80,8 +81,9 @@ async fn material_final_all_review_reads_have_deadlines() {
         ),
         ("detail", format!("/admin/materials/suggestions/{id}")),
     ] {
-        *crate::sources::review::READ_DEADLINE.lock().unwrap() =
-            Some((label, std::time::Duration::ZERO));
+        store
+            .force_read_deadline(label, std::time::Duration::ZERO)
+            .await;
         assert_eq!(
             router_get(&app, &auth[0], &path).await.status(),
             StatusCode::REQUEST_TIMEOUT,
@@ -101,9 +103,10 @@ async fn material_final_deadline_lookup_is_not_a_text_preview() {
     let (_dir, store, auth, _clock) = fixture().await;
     seed(&store).await;
     finalize_material(&store).await;
-    let app = crate::auth::app(store).await.unwrap();
-    *crate::sources::review::READ_DEADLINE.lock().unwrap() =
-        Some(("screen", std::time::Duration::ZERO));
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    store
+        .force_read_deadline("screen", std::time::Duration::ZERO)
+        .await;
     let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
@@ -562,6 +565,8 @@ async fn material_confirmation_escaped_screen_sections_fit_budget() {
 async fn material_confirmation_distinct_merge_read_budget() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    // A performance bound on the real 250 ms read deadline: keep the production deadline.
+    store.clear_read_deadlines().await;
     seed(&store).await;
     store.run(|db| {
         db.execute_batch("WITH RECURSIVE ids(id) AS (VALUES(52) UNION ALL SELECT id+1 FROM ids WHERE id<1073) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT id,1,'unit-'||id,'Text','[[1,1],[20,1],[20,20],[1,20]]','<p>Fixture</p>','Fixture' FROM ids;")?;
@@ -1165,6 +1170,9 @@ async fn material_review_response_bounds_and_labels() {
 async fn material_review_worst_case_merge_response() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    // Checks the production path (reduced screen after the 250 ms read deadline) inside the
+    // request window, so it keeps the production deadline.
+    store.clear_read_deadlines().await;
     seed(&store).await;
     store.run(|db| {
         for id in 52..=1024 {
@@ -3657,5 +3665,60 @@ async fn material_refusals_and_login_redirect_keep_default_policy() {
     assert_eq!(
         response.headers()[axum::http::header::CONTENT_SECURITY_POLICY],
         "frame-ancestors 'none'"
+    );
+}
+
+/// A slow machine (every review read of one store hitting its deadline) must not reach a
+/// concurrent test's store: the overrides are keyed to the store's database file, and a
+/// store without overrides gets a deadline that cannot expire under load.
+#[tokio::test]
+async fn review_read_deadline_overrides_are_scoped_to_their_store() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_slow_dir, slow, slow_auth, _slow_clock) = fixture().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    for store in [&slow, &store] {
+        seed(store).await;
+        finalize_material(store).await;
+    }
+    slow.update_read_deadlines(|hooks| {
+        hooks.default = Some(std::time::Duration::ZERO);
+        hooks.force_expiry = true;
+    })
+    .await;
+    // A pending one-shot override of the same label on the other store is not consumed here.
+    store
+        .force_read_deadline("screen", std::time::Duration::ZERO)
+        .await;
+    let slow_app = crate::auth::app(slow.clone()).await.unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // Every read of the slow store expires (the reduced fallback too), on every request.
+    for _ in 0..2 {
+        let status = router_get(&slow_app, &slow_auth[0], "/admin/materials/pages/1")
+            .await
+            .status();
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT, "slow store");
+    }
+    // The other store's one-shot override fires exactly once, on its own store.
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(
+        html.contains("Lookup not read (time limit)"),
+        "own one-shot"
+    );
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(
+        !html.contains("Lookup not read (time limit)"),
+        "one-shot spent"
+    );
+    slow.update_read_deadlines(|hooks| {
+        hooks.default = Some(std::time::Duration::from_mins(10));
+        hooks.force_expiry = false;
+    })
+    .await;
+    let response = router_get(&slow_app, &slow_auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !body(response)
+            .await
+            .contains("Lookup not read (time limit)")
     );
 }

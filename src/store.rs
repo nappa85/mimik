@@ -143,6 +143,48 @@ impl Store {
         }
     }
 
+    /// Test-only: changes this store's review read deadline overrides.
+    #[cfg(test)]
+    pub(crate) async fn update_read_deadlines(
+        &self,
+        change: impl FnOnce(&mut crate::sources::review::ReadDeadlines) + Send + 'static,
+    ) {
+        self.run(move |db| {
+            crate::sources::review::update_read_deadlines(
+                crate::sources::review::store_path(db),
+                change,
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Test-only: removes every review read deadline override of this store (the production
+    /// 250 ms deadline applies again).
+    #[cfg(test)]
+    pub(crate) async fn clear_read_deadlines(&self) {
+        self.run(|db| {
+            crate::sources::review::clear_read_deadlines(crate::sources::review::store_path(db));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Test-only: forces the next review read labelled `label` to expire after `within`.
+    #[cfg(test)]
+    pub(crate) async fn force_read_deadline(&self, label: &'static str, within: Duration) {
+        self.update_read_deadlines(move |hooks| hooks.once = Some((label, within)))
+            .await;
+    }
+
+    /// Test-only: drops a forced expiry that no read consumed.
+    #[cfg(test)]
+    pub(crate) async fn clear_forced_read_deadline(&self) {
+        self.update_read_deadlines(|hooks| hooks.once = None).await;
+    }
+
     pub(crate) async fn run<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T, AppError> + Send + 'static,
