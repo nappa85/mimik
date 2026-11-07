@@ -142,6 +142,14 @@ impl Saved {
             _ => Self::None,
         }
     }
+    fn key(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Accepted => "accepted",
+            Self::Corrected => "corrected",
+            Self::Rejected => "rejected",
+        }
+    }
     fn label(self) -> &'static str {
         match self {
             Self::None => "",
@@ -159,6 +167,17 @@ enum Then {
     Unit,
     Page,
     Done,
+    Unknown,
+}
+impl Then {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Page => "page",
+            Self::Done => "done",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 #[derive(Template)]
 #[template(path = "materials.html")]
@@ -418,7 +437,10 @@ fn saved_notice(c: PageCursor) -> String {
         Then::Page => {
             " Every unit on the previous page is reviewed; this is the next page with units to review."
         }
-        Then::Done => " No unit is left to review in this source; confirm page completeness below.",
+        Then::Done => {
+            " No unit is left to review on this page or after it; confirm page completeness below."
+        }
+        Then::Unknown => " The next unit could not be found in time; use \"Next unreviewed unit\".",
     };
     format!("Saved unit {}: {}.{tail}", c.saved_unit, c.saved.label())
 }
@@ -426,9 +448,21 @@ async fn page(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<i64>,
-    Query(c): Query<PageCursor>,
+    Query(mut c): Query<PageCursor>,
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
+    if c.saved != Saved::None {
+        // A hand-made link must not claim a save that did not happen.
+        let true_link = state
+            .sessions
+            .store
+            .material_saved_matches(auth.clone(), id, c.saved_unit, c.saved.key(), c.then.key())
+            .await
+            .unwrap_or(false);
+        if !true_link {
+            c.saved = Saved::None;
+        }
+    }
     let data = state
         .sessions
         .store
@@ -532,12 +566,7 @@ struct Completion {
 }
 /// The redirect after a stored unit decision; only fixed words and numbers are placed in it.
 fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext) -> String {
-    let label = match Saved::of(state) {
-        Saved::Accepted => "accepted",
-        Saved::Corrected => "corrected",
-        Saved::Rejected => "rejected",
-        Saved::None => "",
-    };
+    let label = Saved::of(state).key();
     match *next {
         ReviewNext::Unit { unit: to, cursor } => {
             let units = if cursor > 0 {
@@ -554,6 +583,9 @@ fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext) -> String 
         ),
         ReviewNext::Done => format!(
             "/admin/materials/pages/{page}?saved={label}&saved_unit={unit}&then=done#complete"
+        ),
+        ReviewNext::Unknown => format!(
+            "/admin/materials/pages/{page}?saved={label}&saved_unit={unit}&then=unknown#unit-{unit}"
         ),
     }
 }
@@ -590,7 +622,7 @@ async fn review(
                 .store
                 .material_next_after_review(auth, page, unit)
                 .await
-                .unwrap_or(ReviewNext::Done);
+                .unwrap_or(ReviewNext::Unknown);
             Ok(Redirect::to(&saved_target(page, unit, &form.state, &next)).into_response())
         }
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {

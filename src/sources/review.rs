@@ -778,7 +778,7 @@ impl Store {
                 }
             }
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-            let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND p.complete=0 ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
+            let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
             Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,primary},budget))
              });
             // Drop the progress handler before authority checks and the reduced

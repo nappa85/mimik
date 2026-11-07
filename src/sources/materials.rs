@@ -13,8 +13,10 @@ pub(crate) enum ReviewNext {
     Unit { unit: i64, cursor: i64 },
     /// Every unit on the page is reviewed; the next page of the source with unreviewed units.
     Page(i64),
-    /// Nothing is left to review in the source.
+    /// Nothing is left to review on this page or after it.
     Done,
+    /// The lookup failed (deadline, busy pool, storage error); the save itself succeeded.
+    Unknown,
 }
 
 // Extracted rows retain bundle insertion order. Merge owners precede their first
@@ -334,7 +336,11 @@ impl Store {
                     )
                     .optional()?
                     .unwrap_or(0);
-                if let Some((id, position)) = on_page(saved)?.or(on_page(0)?) {
+                let found = match on_page(saved)? {
+                    Some(row) => Some(row),
+                    None => on_page(0)?,
+                };
+                if let Some((id, position)) = found {
                     return Ok(ReviewNext::Unit {
                         unit: id,
                         // The default card window already shows positions 1..=50.
@@ -343,7 +349,7 @@ impl Store {
                 }
                 let next_page = tx
                     .query_row(
-                        "SELECT p.id FROM source_pages p JOIN source_pages c ON c.id=?1 AND c.source_id=p.source_id WHERE p.id<>c.id AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page<c.pdf_page,p.pdf_page LIMIT 1",
+                        "SELECT p.id FROM source_pages p JOIN source_pages c ON c.id=?1 AND c.source_id=p.source_id WHERE p.pdf_page>c.pdf_page AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT 1",
                         [page],
                         |r| r.get(0),
                     )
@@ -353,6 +359,34 @@ impl Store {
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(next)
+        })
+        .await
+    }
+    /// Whether a saved-notice link is true: the unit is on this page (or, for `page`, on another
+    /// page of the source), is now in the stated state, and for `done` nothing unreviewed remains
+    /// on this page or after it.
+    pub(crate) async fn material_saved_matches(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+        state: &'static str,
+        then: &'static str,
+    ) -> Result<bool, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM source_units u JOIN source_pages up ON up.id=u.page_id JOIN source_pages cp ON cp.id=?1 WHERE u.id=?2 AND u.state=?3 AND up.source_id=cp.source_id AND (up.id=cp.id OR ?4='page') AND (?4<>'done' OR NOT EXISTS(SELECT 1 FROM source_units x JOIN source_pages xp ON xp.id=x.page_id WHERE xp.source_id=cp.source_id AND xp.pdf_page>=cp.pdf_page AND x.state='unreviewed'))",
+                    params![page, unit, state, then],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(found)
         })
         .await
     }

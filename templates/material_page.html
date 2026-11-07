@@ -3,7 +3,7 @@
 <a href="/admin/materials/sources/{{ page.source_id }}">← Selected pages</a>
 <h1>{{ page.title }} — PDF page {{ page.pdf_page }}</h1>
 <p>{{ page.edition }} · stored printed label {{ page.printed_label }} · stored page revision {{ page.revision }} · {% if page.complete %}review complete{% else %}incomplete; excluded from lookup{% endif %}</p>
-<nav>{% if let Some(unit) = screen.next_unit %}<a href="{{ self.unit_link(unit) }}">Next unreviewed unit</a>{% endif %} · {% if let Some(next) = screen.next_page %}<a href="/admin/materials/pages/{{ next }}">Next page needing work</a>{% endif %}</nav>
+<nav>{% if let Some(unit) = screen.next_unit %}<a href="{{ self.unit_link(unit) }}">Next unreviewed unit</a>{% endif %} · {% if let Some(next) = screen.next_page %}<a href="/admin/materials/pages/{{ next }}">Next page with units to review</a>{% endif %}</nav>
 {% if !notice.is_empty() %}<div class="panel" id="saved-notice" role="status" tabindex="-1"><p>{{ notice }}</p></div>
 {% endif %}<details><summary>Review keyboard help</summary><p>Within the review list, outside form fields: j / k focus the next / previous card; a focuses an acceptance rationale and never submits.</p><label hidden><input type="checkbox" id="review-shortcuts" checked>Enable review keyboard shortcuts in this browser</label></details>
 {% if !message.is_empty() %}
@@ -21,14 +21,14 @@
 <div class="review-image-scroll"><div class="review-image" id="review-image" data-width="{{ screen.width }}" data-height="{{ screen.height }}">
 <img src="/admin/materials/pages/{{ page.id }}/image" alt="Original rendered PDF page {{ page.pdf_page }} for comparison">
 {% if screen.geometry %}<svg id="review-overlay" viewBox="0 0 {{ screen.width }} {{ screen.height }}" aria-label="Unit regions in PDF points" role="group">
-{% for region in screen.overlay %}{% if region.unit > 0 %}<a href="{{ self.region_link(region) }}" aria-label="Review unit {{ region.unit }} ({{ region.state }})"><title>Unit {{ region.unit }}: {{ region.state }}</title><polygon class="state-{{ region.state }}" points="{{ region.points }}" data-overlay-unit="{{ region.unit }}" data-state="{{ region.state }}"/></a>{% else %}<a href="{{ self.region_link(region) }}" aria-label="Missing text suggestion {{ region.suggestion }}"><polygon points="{{ region.points }}" data-overlay-suggestion="{{ region.suggestion }}"/></a>{% endif %}{% endfor %}
+{% for region in screen.overlay %}{% if region.unit > 0 %}<a href="{{ self.region_link(region) }}" aria-label="Review unit {{ region.unit }} ({{ region.state }})"><title>Unit {{ region.unit }}: {{ region.state }}</title><polygon class="state-{{ region.state }}" points="{{ region.points }}" data-overlay-unit="{{ region.unit }}"/></a>{% else %}<a href="{{ self.region_link(region) }}" aria-label="Missing text suggestion {{ region.suggestion }}"><polygon points="{{ region.points }}" data-overlay-suggestion="{{ region.suggestion }}"/></a>{% endif %}{% endfor %}
 <rect id="drawn-region" hidden x="0" y="0" width="0" height="0"/>
 </svg>{% endif %}</div></div>
 </aside>
 <section id="review-list" aria-label="Unit review cards">
 {% for unit in page.units %}
 <article class="panel" id="unit-{{ unit.id }}" data-unit="{{ unit.id }}" tabindex="0">
-<h2>{{ unit.kind }} — {{ unit.state }}</h2>{% if notice_unit == unit.id && !notice.is_empty() %}<p role="status"><strong>{{ notice }}</strong></p>{% endif %}<p>Stored unit revision {{ unit.revision }}</p>
+<h2>{{ unit.kind }} — {{ unit.state }}</h2>{% if notice_unit == unit.id && !notice.is_empty() %}<p><strong>{{ notice }}</strong></p>{% endif %}<p>Stored unit revision {{ unit.revision }}</p>
 {% if screen.reads_reduced() %}<p>Screen read deadline reached. <a href="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/suggestions">Inspect this unit's suggestions</a>. Only the first unit decision form is retained.</p>{% endif %}
 <figure class="source-region">
 <img src="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/image" loading="lazy" alt="Original-page bounding-region preview for {{ unit.kind }}; inspect the full page for context">

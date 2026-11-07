@@ -19,7 +19,7 @@
 <label for="correction-{{ unit.id }}">Separate correction (plain text; only for corrected decision)</label><textarea id="correction-{{ unit.id }}" name="correction" maxlength="20000">
 {{ unit.correction }}</textarea>
 <label for="actor-{{ unit.id }}">Reviewer label</label><input id="actor-{{ unit.id }}" name="actor" value="{{ actor }}" maxlength="100" required>
-<label for="reason-{{ unit.id }}">Rationale / what you checked</label><textarea id="reason-{{ unit.id }}" name="rationale" maxlength="5000" required>
+<label for="reason-{{ unit.id }}">Rationale / what you checked</label><textarea id="reason-{{ unit.id }}" name="rationale" maxlength="5000">
 {{ rationale }}</textarea>
 <button type="submit">Record decision</button>
 </form></article>
@@ -33,6 +33,6 @@
 <button type="submit">Confirm inspected page completeness</button></form></section>
 </section>
 </div>
-<details class="panel"><summary>Recent append-only review history</summary><ul>{% for event in page.events %}<li><time data-local-time datetime="{{ event.created_at.replace(" ", "T") }}Z">{{ event.created_at }} UTC</time> · {{ event.actor }} · {{ event.state }} · {% match event.unit_id %}{% when Some with (id) %}unit {{ id }}{% when None %}page completeness{% endmatch %} · previous revision {{ event.previous_revision }}<p>{{ event.rationale }}</p><pre class="evidence-text">
+<details class="panel"><summary>Recent append-only review history</summary><ul>{% for event in page.events %}<li><time data-local-time datetime="{{ event.created_at.replace(" ", "T") }}Z">{{ event.created_at }} UTC</time> · {{ event.actor }} · {{ event.state }} · {% match event.unit_id %}{% when Some with (id) %}unit {{ id }}{% when None %}page completeness{% endmatch %} · previous revision {{ event.previous_revision }}<p>{% if event.rationale.is_empty() %}<em>No rationale given.</em>{% else %}{{ event.rationale }}{% endif %}</p><pre class="evidence-text">
 {{ event.correction }}</pre></li>{% endfor %}</ul></details>
 {% endblock %}

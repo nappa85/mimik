@@ -394,12 +394,19 @@ units, their history, the search index or page completeness.
 ### Owner review screen
 
 Saving a unit decision redirects (no JavaScript needed) to the next unit still unreviewed on the
-same page, or, when the page has none, to the next page of the source with unreviewed units, or to
-the page-completeness form; the target page shows a confirmation (“Saved unit N: accepted as
-extracted.”), repeated on the landing card. The confirmation words come from a fixed set, never
-from the query. An accepted-as-extracted decision needs no rationale (stored as an empty string,
+same page (after the saved one, else from the start), or, when the page has none, to the next
+later page of the source with unreviewed units (the same rule as the “Next page with units to
+review” link), or to the page-completeness form when nothing is left from here on; the target page
+shows a confirmation (“Saved unit N: accepted as extracted.”). If the next-target lookup fails
+(deadline, busy pool, storage error) the save still stands and the redirect returns to the saved
+unit with a neutral notice (“The next unit could not be found in time”); it never claims the
+review is finished. The notice is shown only when the link is true (the unit is on this page, or
+another page of the source for the next-page jump, and is in the stated state; for the
+finished case nothing unreviewed remains from this page on); words come from a fixed set, never
+from free text. An accepted-as-extracted decision needs no rationale (stored as an empty string,
 shown as “No rationale given.”, with its normal audit event); corrected and rejected decisions,
-owner-added units, page completeness and primary-reading choices still require one. The
+owner-added units, page completeness and primary-reading choices still require one. The legacy
+`/sources` screen shares this rule. The
 selected-pages list explains that the checkbox only selects pages for the primary-reading choice.
 
 `/admin/materials/pages/{id}` is an Askama-rendered page usable without JavaScript. It shows
