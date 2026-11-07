@@ -59,8 +59,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   and wired (merged 2026-11-07, DEP-29). Preflight findings so far (local notes
   `/media/data/mimik/route-a/preflight-notes.md`): IT 2025 untagged, Bare Bones EN tagged (88
   tables), so the tag slice stays and its cost estimate is owed; the IT scorer recovered to
-  `/media/data/mimik/route-a/score_it_reference.py`. Next in 4a0: API-fit fixture, clipping
-  cases, serialized-size measurement, the Bare Bones reference draft, then the freeze. Follow-ups:
+  `/media/data/mimik/route-a/score_it_reference.py`. API fit, clipping, encoding and sizes
+  settled (merged 2026-11-07, plan 4a0 "Settled"). Next in 4a0: the Bare Bones reference draft
+  (owner checks every row), then the freeze of `derive_units_v1`, thresholds, bar hashes and scorer. Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
   a MuPDF security-advisory watch at each release (DEP-29). Intermittent under 16-thread
   oversubscription (2026-11-07, pass alone): `assistant::download::task::tests::cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range`
