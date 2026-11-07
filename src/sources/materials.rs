@@ -7,6 +7,16 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
+/// Where the review screen continues after a saved unit decision.
+pub(crate) enum ReviewNext {
+    /// The next unreviewed unit on the same page, with the card-window cursor that shows it.
+    Unit { unit: i64, cursor: i64 },
+    /// Every unit on the page is reviewed; the next page of the source with unreviewed units.
+    Page(i64),
+    /// Nothing is left to review in the source.
+    Done,
+}
+
 // Extracted rows retain bundle insertion order. Merge owners precede their first
 // target; other owner units sort last. Cursors are ordinals in this stable order.
 pub(super) const ORDERED_UNITS: &str = "WITH ordered AS (SELECT u.*,row_number() OVER (ORDER BY CASE WHEN u.origin='extracted' THEN u.id ELSE coalesce((SELECT min(json_extract(t.value,'$.unit')) FROM source_suggestion_applications a JOIN source_suggestions s ON s.id=a.suggestion_id,json_each(s.targets,'$.targets') t WHERE a.owner_unit_id=u.id AND s.kind='merge'),9223372036854775807) END,CASE u.origin WHEN 'owner' THEN 0 ELSE 1 END,u.id) position FROM source_units u WHERE u.page_id=?1)";
@@ -292,6 +302,57 @@ impl Store {
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(cursor)
+        })
+        .await
+    }
+    /// Where the Owner should continue after saving a unit decision: the next unit still
+    /// unreviewed on this page (after the saved one, else from the start), else the next page of
+    /// the source with unreviewed units, else the page summary.
+    pub(crate) async fn material_next_after_review(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+    ) -> Result<ReviewNext, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let next = super::review::read_with_deadline(&tx, "next", || {
+                let on_page = |after: i64| {
+                    tx.query_row(
+                        &format!("{ORDERED_UNITS} SELECT id,position FROM ordered WHERE state='unreviewed' AND position>?2 ORDER BY position LIMIT 1"),
+                        params![page, after],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                    )
+                    .optional()
+                };
+                let saved: i64 = tx
+                    .query_row(
+                        &format!("{ORDERED_UNITS} SELECT position FROM ordered WHERE id=?2"),
+                        params![page, unit],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0);
+                if let Some((id, position)) = on_page(saved)?.or(on_page(0)?) {
+                    return Ok(ReviewNext::Unit {
+                        unit: id,
+                        // The default card window already shows positions 1..=50.
+                        cursor: if position <= 50 { 0 } else { position - 1 },
+                    });
+                }
+                let next_page = tx
+                    .query_row(
+                        "SELECT p.id FROM source_pages p JOIN source_pages c ON c.id=?1 AND c.source_id=p.source_id WHERE p.id<>c.id AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page<c.pdf_page,p.pdf_page LIMIT 1",
+                        [page],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                Ok(next_page.map_or(ReviewNext::Done, ReviewNext::Page))
+            })?;
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(next)
         })
         .await
     }

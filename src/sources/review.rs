@@ -523,6 +523,8 @@ pub(crate) struct Overlay {
     pub cursor: i64,
     pub points: String,
     pub suggestion: i64,
+    /// One of unreviewed, accepted, corrected, rejected (empty for missing-text regions).
+    pub state: &'static str,
 }
 pub(crate) struct Card {
     pub unit: i64,
@@ -725,10 +727,11 @@ impl Store {
             let count:i64=tx.query_row("SELECT count(*) FROM source_units WHERE page_id=?1",[page],|r|r.get(0))?;
             let mut overlay=Vec::new();
             if geometry && count<=2000 {
-                let mut q=tx.prepare(&format!("{} SELECT id,polygon,position-1 FROM ordered ORDER BY position LIMIT 2000",super::materials::ORDERED_UNITS))?;
-                for item in q.query_map([page],|r|Ok((r.get::<_,i64>(0)?,read_text(r,1)?,r.get(2)?)))? {
-                    let (unit,json,cursor)=item?;
-                    if let Ok(polygon)=serde_json::from_str::<[[f64;2];4]>(&json) { overlay.push(Overlay{unit,cursor,points:points(&polygon),suggestion:0}); }
+                let mut q=tx.prepare(&format!("{} SELECT id,polygon,position-1,state FROM ordered ORDER BY position LIMIT 2000",super::materials::ORDERED_UNITS))?;
+                for item in q.query_map([page],|r|Ok((r.get::<_,i64>(0)?,read_text(r,1)?,r.get(2)?,read_text(r,3)?)))? {
+                    let (unit,json,cursor,state)=item?;
+                    let state=match state.as_str() {"accepted"=>"accepted","corrected"=>"corrected","rejected"=>"rejected",_=>"unreviewed"};
+                    if let Ok(polygon)=serde_json::from_str::<[[f64;2];4]>(&json) { overlay.push(Overlay{unit,cursor,points:points(&polygon),suggestion:0,state}); }
                 }
             }
             let mut budget=Budget::default();
@@ -771,7 +774,7 @@ impl Store {
                 for (index, row) in query.query_map([page], |r| Ok((r.get::<_,i64>(0)?,read_text(r,1)?)))?.enumerate() {
                     let (id,json) = row?;
                     if index == 2000 { regions_omitted = true; break; }
-                    if let SuggestionTarget::Region { polygon, .. }=serde_json::from_str(&json)? { overlay.push(Overlay{unit:0,cursor:0,points:points(&polygon),suggestion:id}); }
+                    if let SuggestionTarget::Region { polygon, .. }=serde_json::from_str(&json)? { overlay.push(Overlay{unit:0,cursor:0,points:points(&polygon),suggestion:id,state:""}); }
                 }
             }
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;

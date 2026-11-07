@@ -393,6 +393,15 @@ units, their history, the search index or page completeness.
 
 ### Owner review screen
 
+Saving a unit decision redirects (no JavaScript needed) to the next unit still unreviewed on the
+same page, or, when the page has none, to the next page of the source with unreviewed units, or to
+the page-completeness form; the target page shows a confirmation (“Saved unit N: accepted as
+extracted.”), repeated on the landing card. The confirmation words come from a fixed set, never
+from the query. An accepted-as-extracted decision needs no rationale (stored as an empty string,
+shown as “No rationale given.”, with its normal audit event); corrected and rejected decisions,
+owner-added units, page completeness and primary-reading choices still require one. The
+selected-pages list explains that the checkbox only selects pages for the primary-reading choice.
+
 `/admin/materials/pages/{id}` is an Askama-rendered page usable without JavaScript. It shows
 the original image, sanitised rich extraction, separate lookup text and attributed review
 history. Accepted lookup text is the search projection; corrected text is the stored correction;
@@ -404,7 +413,10 @@ Suggestion comparisons for unreviewed targets use the extraction's search projec
 are labelled as extraction text, not approved evidence.
 
 The SVG uses the original page dimensions in PDF points. Every unit has a named, focusable link
-to its card, including cards beyond the current cursor. Above 2,000 units the unit overlay is
+to its card, including cards beyond the current cursor. Each unit box is
+coloured by its review state and also differs by outline pattern (unreviewed dashed blue,
+accepted solid green, corrected dotted orange, rejected dash-dot red); a legend with those words
+sits above the image and each box has a text name with its state. Above 2,000 units the unit overlay is
 omitted with a note. The full-size image and independent region crops remain available.
 Missing-text overlays include the first 2,000 regions of the entire page, independently of
 the 20-row notes cursor, with a note when more exist. Off-cursor regions link to their detail

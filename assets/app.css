@@ -101,6 +101,14 @@ input[type="file"] { max-width: 100%; }
 .review-image.zoom-one, .review-image.zoom-two { width: max-content; }
 .review-image.zoom-one > img, .review-image.zoom-two > img { width: auto; max-width: none; }
 #review-overlay polygon { fill: transparent; stroke: #075ba6; stroke-width: 1; vector-effect: non-scaling-stroke; }
+/* Unit state is shown by colour and by stroke pattern, so it never relies on colour alone. */
+#review-overlay polygon.state-unreviewed, .review-legend .state-unreviewed { fill: #075ba622; stroke: #075ba6; stroke-width: 2; stroke-dasharray: 6 4; }
+#review-overlay polygon.state-accepted, .review-legend .state-accepted { fill: #1a7f3733; stroke: #1a7f37; stroke-width: 2; stroke-dasharray: none; }
+#review-overlay polygon.state-corrected, .review-legend .state-corrected { fill: #c2610033; stroke: #8a4500; stroke-width: 2; stroke-dasharray: 2 3; }
+#review-overlay polygon.state-rejected, .review-legend .state-rejected { fill: #b4232933; stroke: #b42329; stroke-width: 3; stroke-dasharray: 10 3 2 3; }
+.review-legend { display: flex; flex-wrap: wrap; gap: .5rem 1rem; list-style: none; padding: 0; }
+.review-legend svg { vertical-align: middle; margin-right: .25rem; }
+#review-list article:target, #saved-notice { outline: 3px solid #1a7f37; outline-offset: 2px; }
 #review-overlay polygon.highlight, #review-overlay a:focus polygon { fill: #f6ba3b55; stroke: #b55b00; stroke-width: 3; }
 #review-overlay.drawing { touch-action: none; cursor: crosshair; }
 #review-overlay.drawing a { pointer-events: none; }

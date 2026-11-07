@@ -4,6 +4,7 @@ use crate::{
     AppError,
     sources::{
         PageReview, PageView, UnitReview,
+        materials::ReviewNext,
         materials::{Material, MaterialPage},
     },
 };
@@ -117,6 +118,47 @@ struct PageCursor {
     units: i64,
     history: i64,
     notes: i64,
+    saved: Saved,
+    saved_unit: i64,
+    to: i64,
+    then: Then,
+}
+/// The decision a redirect confirms; only these fixed words are ever rendered.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Saved {
+    #[default]
+    None,
+    Accepted,
+    Corrected,
+    Rejected,
+}
+impl Saved {
+    fn of(state: &str) -> Self {
+        match state {
+            "accepted" => Self::Accepted,
+            "corrected" => Self::Corrected,
+            "rejected" => Self::Rejected,
+            _ => Self::None,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Accepted => "accepted as extracted",
+            Self::Corrected => "corrected with source evidence",
+            Self::Rejected => "rejected / not evidence",
+        }
+    }
+}
+/// Where the redirect after a saved decision landed.
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Then {
+    #[default]
+    Unit,
+    Page,
+    Done,
 }
 #[derive(Template)]
 #[template(path = "materials.html")]
@@ -284,6 +326,8 @@ struct Editor {
     screen: crate::sources::review::Screen,
     owner_draft: Option<OwnerDraft>,
     primary_draft: Option<PrimaryDraft>,
+    notice: String,
+    notice_unit: i64,
 }
 impl Editor {
     fn unit_link(&self, target: &(i64, i64)) -> String {
@@ -360,8 +404,23 @@ impl Editor {
             screen,
             owner_draft: None,
             primary_draft: None,
+            notice: saved_notice(c),
+            notice_unit: if c.saved == Saved::None { 0 } else { c.to },
         }
     }
+}
+fn saved_notice(c: PageCursor) -> String {
+    if c.saved == Saved::None {
+        return String::new();
+    }
+    let tail = match c.then {
+        Then::Unit => " Now at the next unit still to review.",
+        Then::Page => {
+            " Every unit on the previous page is reviewed; this is the next page with units to review."
+        }
+        Then::Done => " No unit is left to review in this source; confirm page completeness below.",
+    };
+    format!("Saved unit {}: {}.{tail}", c.saved_unit, c.saved.label())
 }
 async fn page(
     State(state): State<AuthState>,
@@ -471,6 +530,33 @@ struct Completion {
     #[serde(deserialize_with = "crate::form_text::lf")]
     rationale: String,
 }
+/// The redirect after a stored unit decision; only fixed words and numbers are placed in it.
+fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext) -> String {
+    let label = match Saved::of(state) {
+        Saved::Accepted => "accepted",
+        Saved::Corrected => "corrected",
+        Saved::Rejected => "rejected",
+        Saved::None => "",
+    };
+    match *next {
+        ReviewNext::Unit { unit: to, cursor } => {
+            let units = if cursor > 0 {
+                format!("units={cursor}&")
+            } else {
+                String::new()
+            };
+            format!(
+                "/admin/materials/pages/{page}?{units}saved={label}&saved_unit={unit}&to={to}&then=unit#unit-{to}"
+            )
+        }
+        ReviewNext::Page(next) => format!(
+            "/admin/materials/pages/{next}?saved={label}&saved_unit={unit}&then=page#saved-notice"
+        ),
+        ReviewNext::Done => format!(
+            "/admin/materials/pages/{page}?saved={label}&saved_unit={unit}&then=done#complete"
+        ),
+    }
+}
 async fn review(
     State(state): State<AuthState>,
     session: Session,
@@ -497,7 +583,16 @@ async fn review(
         )
         .await;
     match result {
-        Ok(()) => Ok(Redirect::to(&format!("/admin/materials/pages/{page}")).into_response()),
+        Ok(()) => {
+            // The decision is stored; a failed lookup only loses the jump, not the save.
+            let next = state
+                .sessions
+                .store
+                .material_next_after_review(auth, page, unit)
+                .await
+                .unwrap_or(ReviewNext::Done);
+            Ok(Redirect::to(&saved_target(page, unit, &form.state, &next)).into_response())
+        }
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
             let unit_cursor = state
                 .sessions
@@ -530,6 +625,7 @@ async fn review(
                     units: unit_cursor,
                     history: 0,
                     notes: 0,
+                    ..PageCursor::default()
                 },
             );
             // Preserve only a verified unit in this page, never a browser-selected identity.

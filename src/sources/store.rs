@@ -1,6 +1,6 @@
 use super::{
     EvidenceSearch, PageReview, PageSummary, PageView, ReviewEvent, SourceSummary, UnitReview,
-    UnitView, review_identity, sanitized,
+    UnitView, review_identity, sanitized, unit_review_identity,
 };
 use crate::{AppError, Store};
 use rusqlite::{OptionalExtension, params};
@@ -256,7 +256,7 @@ impl Store {
 }
 
 pub(super) fn validate_unit(review: &UnitReview) -> Result<(), AppError> {
-    review_identity(&review.actor, &review.rationale)?;
+    unit_review_identity(&review.actor, &review.rationale, &review.state)?;
     if !["accepted", "corrected", "rejected"].contains(&review.state.as_str())
         || review.correction.chars().count() > 20_000
         || review.correction.contains('\0')
@@ -308,7 +308,13 @@ pub(super) fn review_unit_operation(
         "UPDATE source_units SET state=?1,correction=?2,revision=?3 WHERE id=?4",
         params![review.state, review.correction, next_unit, unit],
     )?;
-    tx.execute("INSERT INTO source_review_events (page_id,unit_id,actor,rationale,state,correction,previous_revision,operation_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![page,unit,review.actor,review.rationale,review.state,review.correction,current,operation])?;
+    // An accepted decision may have no rationale; store it as the empty string, not whitespace.
+    let rationale = if review.state == "accepted" && review.rationale.trim().is_empty() {
+        ""
+    } else {
+        review.rationale.as_str()
+    };
+    tx.execute("INSERT INTO source_review_events (page_id,unit_id,actor,rationale,state,correction,previous_revision,operation_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![page,unit,review.actor,rationale,review.state,review.correction,current,operation])?;
     Ok(tx.last_insert_rowid())
 }
 
