@@ -74,3 +74,6 @@ impl Error {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod preflight_tests;

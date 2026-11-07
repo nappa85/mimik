@@ -6,40 +6,58 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 ## 4a0. Small preflight; freeze before route-A measurements
 
-- Confirm vendored `mupdf =0.8.0` / `mupdf-sys` (MuPDF 1.27.2) API fit with a synthetic
-  fixture and settle the wrapper decision. Safe blocks/lines/chars expose quads, origins,
-  size, argb, flags, `TextChar::font()` and line `wmode`; quads are not a wrapper gap.
-  Gaps: line `dir`, per-character `bidi`, nested structure traversal and association-linked
-  table span attributes. `blocks()` is top-level only; ban `structured()` because it maps
-  Struct blocks to `Other` and silently drops codes that are not valid Rust `char`s.
-  Decide either a worker-only wrapper for line `dir` and character `bidi`, retaining both as
-  line/glyph metadata with serialized round trips in the RTL fixture, or direction derived
-  from origin/quad sequence with no bidi in v1; in the latter case RTL/vertical goldens test
-  the frozen direction derivation. Do not promise bidi without the wrapper.
-  `TextBlock::r#type()` unwraps unknown block types: check the raw type before calling it or
-  treat the panic as a contained worker failure, never a successful or partial reading.
-- Exercise two distinct clipping cases in 4a0: text scissored by an in-page clip (and glyphs
-  partly/wholly outside the displayed page), and text used as a clipping path in render modes
-  4–7. Compare `CLIP` off/on against renders and raw glyph counts/flags. In MuPDF 1.27.2,
-  `FZ_STEXT_CLIPPED` marks clip-mode text from `fz_stext_clip_text`/`clip_stroke_text`, not
-  scissored-away glyphs; mode 7 can be `FILLED|CLIPPED`. Freeze the owner's `CLIP` choice below.
-- Check only aggregate catalog `tagged` status for the two local bar PDFs; this does not
-  establish usable associations. Inform the owner's scope decision: recommend deferring tags
-  if both are untagged, otherwise retain a separate tag slice and assess its cost. Step 4
-  names tags, so deferral requires the owner's amendment to the umbrella.
-- Inspect the actual local IT reference/scorer fields, normalization and token checks;
-  settle the EN reference owner/format before scoring. Keep manual content local.
-- Measure aggregate serialized sizes on bounded synthetic/density fixtures, including a
-  64-page selection. Compare fixed-precision columnar arrays with verbose glyph records;
-  recommend columnar arrays with shared font/node tables and integer coordinates in 1/1024
-  displayed pt. Freeze the measured encoding before `mimik-reading-v1`: parallel-array lengths,
-  rounding, overflow refusal, positional error and containment after conversion. Revise precision
-  before freezing if geometry tests fail. Count ceilings do not guarantee the byte cap fits.
-- Freeze extraction flags, `derive_units_v1` semantics/version, probe thresholds, bar input
-  hashes and scorer before any route-A measurement. Existing render statistics in
-  `docs/results.md` have been seen during this revision, before choosing the final thresholds;
-  exposure before the original proposal is not established. The thresholds below are proposals,
-  not a blind preregistration; freeze them in 4a0 before any route-A measurement.
+Settled (2026-11-07; synthetic-PDF tests `src/sources/worker/preflight_tests.rs`, results in
+`docs/results.md`; local bar facts in the owner's notes, aggregate only here):
+
+- **API fit.** The vendored fork (DEP-29) exposes per glyph quad, origin, size, argb, flags,
+  font name and `bidi`/`is_rtl`, per line `wmode` and `dir`. With the 4a flags (no
+  `COLLECT_STRUCTURE`, `SEGMENT` or `TABLE_HUNT`) top-level `blocks()` holds the text. With
+  `COLLECT_STRUCTURE` it holds only Struct blocks and the text is reachable only through
+  `structure().blocks()`; `SEGMENT` alone also creates Struct blocks (`TABLE_HUNT` or
+  `COLLECT_VECTORS` alone do not). `structured()` drops Struct-block text (stays banned). The
+  pinned MuPDF has exactly five block kinds (0–4); `TextBlock::r#type()` would panic on another
+  raw value, which the safe API cannot pre-check, so such a panic is a contained worker failure,
+  never a successful or partial reading.
+  Right-to-left and vertical text are untested (no such base-14 fixture); 4a adds them.
+- **Coordinates.** MuPDF page space is already the displayed page: y-down, `/Rotate`
+  applied, scaled by `UserUnit`, origin at the top-left of CropBox∩MediaBox. 4a applies no
+  second rotation; it checks this space against staged inspection geometry before accepting
+  text.
+- **Clipping (owner: `CLIP` off).** `CLIPPED` marks text that reaches the device as a clip:
+  render mode 7 (`FILLED|CLIPPED`) and also visible text filled or stroked with a pattern or
+  shading in any mode (`FILLED|CLIPPED` or `STROKED|CLIPPED`, argb 0). So `CLIPPED` cannot tell
+  visible shaded text from invisible clip-only text: 4a records it as "possibly invisible",
+  never as invisible. Modes 4–6 are visible and unflagged; mode 3 (invisible) has neither
+  `FILLED` nor `STROKED`, which 4a marks invisible. Glyphs outside the page box and glyphs
+  removed by an in-page clip carry no flag: 4a computes off-page/partly-off-page from quads,
+  and in-page clipping stays the documented limit caught by review against the render. With
+  `CLIP` on, glyphs wholly outside the clip's bounding box or the page disappear silently;
+  partly clipped glyphs and glyphs inside the bounding box of a non-rectangular clip stay.
+- **Tags.** IT 2025 is untagged; Bare Bones EN is tagged (catalogue level, including tables).
+  The later versioned tag slice stays (owner rule); its cost estimate is part of 4a.
+- **Encoding (frozen for `mimik-reading-v1`).** Columnar parallel arrays with a shared font
+  table and `i32` coordinates in 1/1024 displayed pt, rounded to nearest with halves away from
+  zero (maximum round-trip error 1/2048 pt); all parallel arrays of one table have equal
+  lengths; a non-finite value or one whose rounded tick does not fit `i32` (about ±2,097,152
+  pt) refuses the page. Off-page statuses are computed from the rounded quads against the page
+  box rounded to the same grid. The test fixture (one font, uniform flags, no images) gives
+  about 98 bytes per glyph as JSON (verbose records about 280): a dense 9,000-glyph page is 0.89
+  MB. That is a lower bound; 4a measures its full records (ordinals, statuses, line and block
+  records, images) and plans on about 130 bytes per glyph until then.
+- **IT reference and scorer.** The reference is `{"note", "pages": {page or range: [row]}}`,
+  one fact per row, identity page key plus index; the scorer (recovered, kept local with the
+  reference) normalizes by NFC, dash/quote/× mapping, soft-hyphen and "a- b" joining, removal
+  of all whitespace and lowercasing, so it merges adjacent numbers ("10 5" equals "105"): the
+  separate numeric/dice/sign inspection is required. The EN reference keeps this format.
+
+Remaining before any route-A measurement:
+
+- Claude drafts the Bare Bones reference from the original page images only (owner decision);
+  the owner checks every row and the page list. Freeze the PDF hash, page list, reference
+  hash, row identities and N.
+- Freeze `derive_units_v1`, the probe thresholds, the bar input hashes and the scorer (by
+  hash) before the first route-A measurement. The thresholds below are proposals, not a blind
+  preregistration: render statistics in `docs/results.md` were seen while writing them.
 
 ## 4a. Worker reading and diagnostics
 
@@ -61,7 +79,7 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   `CLIPPED`, `SYNTHETIC` and CID/GID status per glyph, including undecodable glyphs.
   A glyph with `UNICODE_IS_CID`, even if its numeric value is a valid Unicode scalar, or with
   `char()` returning `None`, is always undecodable: emit U+FFFD as text and retain the CID only
-  diagnostically. Retain line direction and character bidi according to the 4a0 wrapper decision.
+  diagnostically. Retain line direction and character bidi (fork accessors, 4a0).
   Interpret `CLIPPED` as clip-mode text, possibly invisible independently of `FILLED`/`STROKED`.
   Compute `off_page`/`partly_off_page` from glyph quads against the displayed page box, separately
   from MuPDF flags; retain the original quads and these explicit statuses.
@@ -86,7 +104,9 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   Reading payload ≤8 MiB/page; total wire budget `(8 MiB + 16 KiB) × pages + 4 KiB`, headers
   included. Test maximum legal frames together and one byte over, not just isolated records.
 - Use closed, flat bounded arrays, not recursive deserialization: ≤40,000 total block/line/tag
-  nodes, ≤20,000 lines, ≤1,000,000 glyphs and ≤20,000 image rectangles per page; ≤256 font
+  nodes, ≤20,000 lines, a glyph cap derived from 4a's final record layout (8 MiB divided by
+  the minimal encoded glyph, rounded down, so a maximal page is constructible and testable) and
+  ≤20,000 image rectangles per page; ≤256 font
   entries (name ≤64 UTF-8 bytes); tag role ≤100 bytes; depth ≤32; references are page-local
   indices into one node index space shared by block/line/tag kinds; each glyph has exactly one
   line/block owner. Resource/diagnostic walks visit ≤40,000 distinct objects per run with a
@@ -130,15 +150,26 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 ## 4b. One raw-reading → units contract
 
 - Define prepared contract **v3**, requiring registered edition identity as v2 does, and raw
-  **`mimik-reading-v1`**: PDF hash, selected pages, displayed page facts/image hashes, route,
-  pinned extractor/settings, tag status, validated blocks/lines/glyphs/tags and diagnostics.
-  Persist immutable raw reading bytes separately from the prepared manifest; hashes bind both.
-  Keep raw ≤32 MiB/source (all pages and envelope), prepared ≤8 MiB, ≤64 pages,
-  ≤20,000 units, ≤64 KiB HTML/unit,
-  ≤128 MiB PNG total and existing per-PNG/PDF bounds. Fail with “select fewer pages”, never
-  truncate. At 64 pages raw averages at most 512 KiB/page including overhead; the 8 MiB
-  per-page wire ceiling does not multiply the source allowance. Measure dense and 64-page
-  cases in 4a0. Process incrementally and bound retained raw/derived allocations before SQL.
+  **`mimik-reading-v1`**, stored per page so that no limit applies to a whole source (SRC-15):
+  - **Envelope** (one immutable row per source): contract and reading versions, route, PDF
+    hash, ordered one-based page list, pinned extractor/flags/`derive_units_v1` version, tag
+    status and registered edition. Its hash is SHA-256 over a domain-separated canonical
+    encoding.
+  - **Page** (one immutable row per page): displayed page facts and image hashes, validated
+    blocks/lines/glyphs/(later) tags and diagnostics as raw bytes with their hash, and the
+    page's derived units as prepared bytes with their hash.
+  - **v3 source hash**: SHA-256 over a domain-separated encoding of the envelope hash followed
+    by the ordered (page number, raw hash, units hash) list. It is distinct from the v1/v2
+    manifest hash, which keeps its meaning for existing sources. There is no whole-source
+    prepared manifest in v3; v1/v2 keep theirs.
+  - Verification runs per page (raw → `derive_units_v1` → exact units equality) plus one check
+    of the envelope, the page order and the source hash.
+  Bounds are per page (4a's reading payload and count caps against hostile worker output; at
+  most one unit per block, so ≤40,000 units per page by the node cap) and per unit (≤64 KiB
+  HTML); 4a measures whether the review page and search projection handle a maximal page, and
+  sets a per-page unit-bytes bound from that. The number of pages and total size follow the
+  upload; the only total check is disk space. Whole-upload totals inherited from step 3 are
+  under the owner's cap review (TODO); route A adds none.
 - Implement one pure `derive_units_v1(validated_reading) -> Result<ordered pages/units>` shared
   by creation, v3 verification and tests. Inputs contain no review state, exclusion decision,
   clock, database ID or model output. Outputs have block identity, kind, four-point polygon,
@@ -168,7 +199,7 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   `collect_units`/SRC-10 rule unchanged; never reinterpret existing immutable sources.
   Owner-added units remain outside extracted equality. Review/corrections never mutate raw.
   Dispatch raw-reading consumers by contract, including suggestion-report node citations and
-  reimport verification; retain the existing prepared `pages[].units[]` shape for review bounds.
+  reimport verification; the per-page units keep the existing `units[]` element shape.
   Keep CLI v1/v2 import supported; exposing v3 prepared files is a separate interface decision,
   not permission to route browser uploads through `load_import` or its `lopdf` checks.
 - Validate v3 pages against staged displayed dimensions, crop, rotation and transform, rather
@@ -239,32 +270,63 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   edits make its result stale (do not silently rebase it). Probe results also carry revisions.
 - Read bounded no-follow regular files and verify hashes from the very bytes consumed. Copy
   PNGs unchanged; validate them again. Take total page count/rotation/transform/size from staged
-  inspection, not a server PDF parse. Derive raw/manifest/units outside the Store mutex; reserve
-  space for permanent SQLite BLOBs and rollback-journal growth in addition to staging's ledger
-  and 512 MiB margin. Budget the PDF, raw, manifest and PNG copies before admission.
-- In one IMMEDIATE transaction, recheck Owner/session-bound CSRF, both revisions, current
-  selection/render identities and active job; resolve registered edition. Insert source/raw/
-  manifest/PDF BLOBs, pages with original PNGs, immutable page facts/probe provenance, extracted
-  units initially `unreviewed`, search projections, page hashes and finalization. Add permanent
-  exclusion provenance (pages, geometry, rationale, revisions, confirming actor/time and opaque
-  fingerprint), crossing flags and explicit rejection-event links. Migration guards make these
-  facts immutable without weakening 007/015/017. Obtain exclusion attribution from its staging
-  row: `StagedContract.exclusion` alone lacks actor/time. Recheck it in the transaction.
+  inspection, not a server PDF parse. Derive each page's raw and units outside the Store mutex
+  into a staged, hash-verified per-page file, one page in memory at a time. Before admission,
+  reserve disk from the per-page upper bound (pages × (reading payload + unit bytes) plus PDF
+  and PNG copies) for the staged per-page files and the database copies together (both exist
+  until cleanup), plus one batch's rollback-journal growth, in addition to staging's ledger and
+  512 MiB margin; after derivation, re-check against the actual staged sizes before writing.
+- Write in page batches, never one unbounded transaction (C6).
+  - **First** IMMEDIATE transaction: recheck Owner/session-bound CSRF, both revisions, current
+    selection/render identities, the registered active job and the exclusion staging row with
+    its attribution (`StagedContract.exclusion` alone lacks actor/time); resolve the registered
+    edition; assert that no hidden source exists for the upload (unique constraint, at most one
+    `finalizing` source per upload ID); insert the source as `finalizing`. A retry first
+    removes a leftover hidden source of the same upload through the cleanup path below, before
+    this transaction and only once no job owns it.
+  - **Batch** transactions: each inserts one bounded batch of pages (PDF BLOB once, original
+    PNGs, page facts/probe provenance, raw and units rows, units initially `unreviewed`, search
+    projections, and the batch's exclusion rejections below), after checking that its own
+    source still exists and is `finalizing`.
+  - **Last** transaction: recheck everything the first one checked (Owner/session validity,
+    both revisions, selection/render identities, the job still registered and not cancelled,
+    the upload row and the exclusion staging row unchanged); verify the source hash over the
+    stored rows; call `documents::register_import`; delete the upload row, exclusions and
+    fingerprint key; record the receipt; flip the source to visible. Any mismatch fails the
+    job and leaves the hidden source to cleanup.
+  - **Hidden means hidden everywhere:** every query over sources, units, pages, documents and
+    search projections filters to visible sources (one shared predicate): review screens,
+    search/FTS, assistant retrieval, suggestion reports, edition coverage, exports and backups,
+    source lists and counts, duplicate-PDF-hash checks and receipt lookups. Two uploads of
+    the same PDF may therefore finalize in parallel; the last transaction's `register_import`
+    applies the owner-choice and overlap rules against the sources visible at that moment, so
+    no duplicate check belongs only in the first transaction.
+  - **Cleanup:** startup and hourly cleanup delete a `finalizing` source only after confirming,
+    under the lock the job holds when it registers and writes a batch, that no job owns it;
+    deletion runs in bounded batches too. Migration guards make raw, units, page facts and
+    exclusion provenance immutable without weakening 007/015/017, except that cleanup may delete
+    the rows of a `finalizing` source.
+  - 4a/4c measure batch and cleanup durations so other requests are not held.
+  Add permanent exclusion provenance (pages, geometry, rationale, revisions, confirming
+  actor/time and opaque fingerprint), crossing flags and explicit rejection-event links.
 - Apply the confirmed geometry **after** derivation: wholly contained unit rectangles (inclusive
   edges) receive attributed `rejected` decisions citing the exclusion; positive-area overlap
   without containment stays `unreviewed` and flagged. Mere edge contact is not crossing. Raw
   output stays complete. At creation confirmation the current Owner authorizes these rejections;
   retain the original confirmer separately. Check all expected revision-1 units first, then
   update/event/authenticated sidecar per unit, sharing operation ID/rationale. Reuse review
-  primitives; explicitly handle >1,024 excluded units by bounded internal chunks within this
-  same transaction/operation, preserving the public batch limit. Any failure rolls everything
-  back. List decisions and allow normal revision-checked undo; never auto-complete a page.
-- Reuse `documents::register_import`: hash-keyed document/member, first uncovered page primary,
-  overlaps subject to the existing owner-choice rules. Do not replace a primary reading or
+  primitives; apply the rejections per page batch (one operation across batches), so >1,024
+  excluded units never make one transaction unbounded, preserving the public batch limit; the
+  last transaction's recheck keeps them from going stale. Any failure leaves the source
+  `finalizing` for cleanup. List decisions and allow normal revision-checked undo; never
+  auto-complete a page.
+- Reuse `documents::register_import` (in the last transaction only): hash-keyed
+  document/member, first uncovered page primary, overlaps subject to the existing owner-choice
+  rules. Do not replace a primary reading or
   merge runs. Schema 24 still stores PDF bytes per source; PDF deduplication (C5) is not an
   incidental migration in this slice.
-- Commit source creation and upload-row deletion (including exclusions and fingerprint key)
-  together; retain an upload-ID → source-ID completion receipt without private staging data
+- The flip transaction holds the upload-row deletion (with exclusions and fingerprint key) and
+  the receipt; retain an upload-ID → source-ID completion receipt without private staging data
   for retry/lost-response idempotency. Only after commit remove the staging folder and charge
   surviving bytes until cleanup succeeds; startup/hourly orphan cleanup retries. Failure before
   commit retains retryable staging; crash after commit cannot produce another reading. Copy
@@ -356,9 +418,10 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 ## Slices, checks and landing
 
-- **4a0:** API/wrapper decision, aggregate tag status, IT reference/scorer inspection, aggregate
-  size measurements and owner choices; freeze encoding/flags/versions/thresholds/bar inputs.
-- **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe.
+- **4a0:** remaining: the Bare Bones reference (drafted, owner-checked) and the freeze of
+  `derive_units_v1`, thresholds, bar input hashes and scorer.
+- **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe;
+  the cost estimate of the later tag slice (owner rule, Bare Bones EN is tagged).
   The bounded StructTreeRoot/MCID diagnostic walk and fixtures 6/7 are required here.
   Independent review before completion; fake-reader max/over-limit/cyclic-reference tests,
   live sandbox and ten PDFs.
@@ -366,7 +429,11 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   mutation/bounds tests, raw equality, legacy import/reimport and sanitized projections.
 - **Later tags:** only under the owner's retained scope; new reading/derivation version,
   independent review, ownership/span fixtures and remeasured bars before completion.
-- **4c:** manager/source transaction, permanent facts/exclusion migration and cleanup receipts.
+- **4c:** manager, batched finalization, permanent facts/exclusion migration and cleanup
+  receipts; tests for a failure between batches, a retry with a leftover hidden source, the
+  sweep racing an active job, revision/exclusion/discard changes between the first and last
+  transactions, every reader filtering hidden sources (a search hitting a hidden source's
+  projection, documents, assistant) and cleanup deleting a hidden source's immutable rows.
   Independent review; migration/immutability tests, excluded/crossing/edge cases, >1,024
   decisions, stale revisions, attribution failure rollback, competing creation/discard/sweep,
   selection/metadata/exclusion changes during work, cancellation/restart and disk-full faults.
@@ -388,10 +455,8 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 ## Owner decisions (2026-11-05)
 
-- **Wrapper gaps:** change the renderer pin rather than wrap MuPDF. Before 4a0, find a
-  maintained crate or version that exposes line direction, per-character bidi and the
-  structure tree through safe APIs (licence, maintenance, build cost, REL-2), recorded as a
-  DEP decision; if none exists, come back to the owner before any wrapper.
+- **Wrapper gaps:** no maintained crate exposes them, so the owner chose a local fork of
+  mupdf-rs, vendored until upstream releases it (DEP-29).
 - **Tag partitioning:** decided after the 4a0 preflight from the bar PDFs' tag status (defer
   if both are untagged; otherwise keep the later versioned tag slice and estimate its cost).
 - **Flags/ligatures/spaces:** the 4a flag set as proposed: raw ligature scalars, inferred
@@ -401,6 +466,8 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 - **Bare Bones reference:** Claude drafts it from the original page images only (never from
   route A text, raw readings or a remote model) in the IT reference's format; the owner checks
   every row and the page list before any scoring. The draft and the reference stay local.
+- **Source limits (2026-11-07, SRC-15):** limits only where technically or security-justified;
+  no whole-source totals in route A, storage and processing per page.
 - **Probe policy:** `probe-v1` as proposed, advice only with visible reasons and an Owner override.
 - **Bar failure:** step 4 stays blocked; a new versioned derivation is allowed only with a
   rationale, review and fresh measurements of both bars, never by waiving the bar.
@@ -409,14 +476,16 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 - Tags can be wrong, incomplete or expensive to resolve; block fallback preserves text but
   may scatter a fact across units. The 98% bar is not established by wrapper availability.
-- Glyph-rich raw data can hit 32 MiB before the 64-page cap; refuse with a smaller-selection
-  remedy. Measure memory under the existing worker limits before increasing any bound.
+- Glyph-rich pages make the stored reading large (about 0.9 MB per dense page at the
+  fixture's lower bound): disk space is reserved before admission; 4a measures its real
+  per-glyph size and the worker's memory per page.
 - Image coverage misses art drawn as vector paths; missing maps over-warn standard fonts.
    The frozen IT probe check can fail and require a separately reviewed algorithm revision.
 - With proposed `CLIP` off, in-page scissor clipping is undetectable: retained text may not
   appear in the render and has no MuPDF clipping flag. Page-boundary and clip-mode flags cannot
   close this gap; review against original renders remains necessary. `CLIP` on instead loses
   scissored glyphs silently and cannot provide complete dropped-text diagnostics.
-- SQLite BLOB copies/journaling block the single Store connection (C6); measure transaction
-  duration and disk headroom on maximum synthetic sources. Do not promise filesystem/SQL
-  atomicity: the receipt, post-commit deletion and restart reconciliation bridge it.
+- SQLite BLOB copies/journaling block the single Store connection (C6); measure each page
+  batch's duration and the disk headroom on a 500-page synthetic source of dense pages. Do not
+  promise filesystem/SQL atomicity: the receipt, post-commit deletion and restart
+  reconciliation bridge it.
