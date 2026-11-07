@@ -111,6 +111,10 @@ struct Spec<'a> {
 
 /// Build a Helvetica PDF with one page per spec.
 fn build(pages: &[Spec<'_>], tagged: bool) -> Vec<u8> {
+    assert!(
+        !tagged || pages.len() == 1,
+        "the ParentTree is valid for one page only"
+    );
     let mut doc = Document::with_version("1.7");
     let pages_id = doc.new_object_id();
     let font =
@@ -235,7 +239,7 @@ fn api_fit_exposes_geometry_style_font_and_direction() {
     assert!(d.lines.iter().all(|l| !l.wmode_vertical));
     assert!((d.lines[0].dir[0] - 1.0).abs() < 1e-3 && d.lines[0].dir[1].abs() < 1e-3);
     let rotated = d.lines.last().unwrap();
-    assert!(rotated.dir[0].abs() < 1e-3 && rotated.dir[1].abs() > 0.99);
+    assert!(rotated.dir[0].abs() < 1e-3 && (rotated.dir[1] + 1.0).abs() < 1e-3);
     // The space is a real glyph with PRESERVE_WHITESPACE.
     assert!(d.glyphs.iter().any(|g| g.ch == Some(' ')));
 }
@@ -281,7 +285,9 @@ fn api_fit_structure_traversal_needs_collect_structure() {
     assert_eq!(text_of(&tagged), "TitleBody text");
     assert!(tagged.structs.iter().any(|(s, _, _)| s == "H1"));
     assert!(tagged.structs.iter().any(|(s, _, _)| s == "P"));
-    assert!(tagged.lines.iter().all(|l| !l.block_path.is_empty()));
+    assert_eq!(tagged.lines.len(), 2);
+    assert_eq!(tagged.lines[0].block_path, ["Document", "H1"]);
+    assert_eq!(tagged.lines[1].block_path, ["Document", "P"]);
     // The flat top-level iteration alone sees no text lines.
     let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
     let page = doc.load_pdf_page(0).unwrap();
@@ -306,35 +312,6 @@ fn api_fit_structure_traversal_needs_collect_structure() {
     assert_eq!(structured_chars, 0);
 }
 
-#[test]
-fn api_fit_unknown_block_type_makes_type_panic() {
-    // All five known MuPDF block kinds convert; any other raw value is an error, and
-    // `TextBlock::r#type()` unwraps that conversion, so it panics for an unknown raw type.
-    for known in 0..=4 {
-        assert!(TextBlockType::try_from(known).is_ok(), "{known}");
-    }
-    for unknown in [5, 99, -1] {
-        assert!(TextBlockType::try_from(unknown).is_err(), "{unknown}");
-    }
-    let outcome = std::panic::catch_unwind(|| TextBlockType::try_from(99).unwrap());
-    assert!(outcome.is_err(), "unwrap of an unknown block type panics");
-    // Vector and Grid blocks are real, known kinds: they must not panic.
-    let bytes = one(
-        "0 0 m 100 100 l S BT /F1 12 Tf 50 700 Td (x) Tj ET",
-        A4,
-        None,
-    );
-    let d = dump_bytes(
-        &bytes,
-        0,
-        BASE | TextPageFlags::COLLECT_VECTORS | TextPageFlags::SEGMENT | TextPageFlags::TABLE_HUNT,
-    );
-    eprintln!(
-        "4a0 blocktype: kinds with vectors/segment/table-hunt {:?}",
-        d.top_kinds
-    );
-}
-
 // ---------------------------------------------------------------------------------------------
 // Question 2: clipping.
 // ---------------------------------------------------------------------------------------------
@@ -355,9 +332,8 @@ fn summarize(label: &str, d: &Dump) -> String {
 }
 
 /// Case (a1): scissored by an in-page clip. Clip rectangle x 0..30, y 0..400 (PDF space) over
-/// 20 pt Helvetica: "AB" at x=10 (A straddles the edge, B is outside), "CD" at x=100 (wholly
-/// outside), and "EF" at x=10 inside (E, F: E inside, F partly), then the clip is released and
-/// "UNCLIPPED" is drawn.
+/// 20 pt Helvetica: "AB" at x=10 (A is inside the clip, B straddles x=30), "CD" at x=100 (wholly
+/// outside), "EF" at x=2 (both inside), then the clip is released and "UNCLIPPED" is drawn.
 const SCISSOR: &str = "q 0 0 30 400 re W n BT /F1 20 Tf 10 300 Td (AB) Tj ET \
     BT /F1 20 Tf 100 250 Td (CD) Tj ET BT /F1 20 Tf 2 200 Td (EF) Tj ET Q \
     BT /F1 20 Tf 10 100 Td (UNCLIPPED) Tj ET";
@@ -455,6 +431,12 @@ fn text_render_modes_4_to_7_with_and_without_clip_flag() {
         // "CD" (drawn later under that clip) is not flagged.
         assert_eq!(clipped(&off), if mode == 7 { 2 } else { 0 }, "mode {mode}");
         assert_eq!(clipped(&on), clipped(&off), "mode {mode}");
+        if mode == 3 {
+            assert!(off.glyphs[..2].iter().all(|g| {
+                !g.flags
+                    .intersects(TextCharFlags::FILLED | TextCharFlags::STROKED)
+            }));
+        }
         if mode == 7 {
             assert_eq!(
                 off.glyphs[0].flags,
@@ -605,7 +587,8 @@ fn gzip_len(text: &str) -> usize {
 
 #[test]
 fn fixed_point_encoding_bounds_and_overflow_refusal() {
-    // 1/1024 pt rounding error is at most 1/2048 pt for any representable coordinate.
+    // Documentation only: round-to-nearest at 1/1024 pt bounds the error by 1/2048 pt by
+    // construction (the overflow-refusal assertions below are the substantive ones).
     let mut worst: f64 = 0.0;
     for n in 0..200_000u32 {
         let v = f32::from(u16::try_from(n % 20_000).unwrap()) / 7.0 - 700.0
@@ -713,4 +696,201 @@ fn serialized_size_columnar_vs_verbose_on_64_pages() {
 
 fn per_glyph(bytes: usize, glyphs: usize) -> f64 {
     f64::from(u32::try_from(bytes).unwrap()) / f64::from(u32::try_from(glyphs).unwrap())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Additional 4a0 facts (review round).
+// ---------------------------------------------------------------------------------------------
+
+/// Pins the crate's raw block-type mapping: exactly the five kinds of the C library (0..=4) convert; any
+/// other raw value is an error. `TextBlock::r#type()` unwraps this conversion (see its source),
+/// so the worker must check the raw type itself; a real page cannot produce an unknown value,
+/// so this test documents the mapping and does not exercise `r#type()`.
+#[test]
+fn block_type_conversion_covers_exactly_the_five_mupdf_kinds() {
+    for known in 0..=4 {
+        assert!(TextBlockType::try_from(known).is_ok(), "{known}");
+    }
+    for unknown in [5, 99, -1] {
+        assert!(TextBlockType::try_from(unknown).is_err(), "{unknown}");
+    }
+}
+
+fn top_kinds(bytes: &[u8], flags: TextPageFlags) -> Vec<TextBlockType> {
+    dump_bytes(bytes, 0, BASE | flags).top_kinds
+}
+
+#[test]
+fn segment_and_table_hunt_flags_separately_produce_struct_blocks() {
+    let bytes = one(
+        "0 0 m 100 100 l S BT /F1 12 Tf 50 700 Td (x) Tj ET",
+        A4,
+        None,
+    );
+    for (label, flag) in [
+        ("none", TextPageFlags::empty()),
+        ("SEGMENT", TextPageFlags::SEGMENT),
+        ("TABLE_HUNT", TextPageFlags::TABLE_HUNT),
+        ("COLLECT_VECTORS", TextPageFlags::COLLECT_VECTORS),
+    ] {
+        eprintln!("4a0 blocktype: {label} -> {:?}", top_kinds(&bytes, flag));
+    }
+    assert_eq!(
+        top_kinds(&bytes, TextPageFlags::empty()),
+        [TextBlockType::Text]
+    );
+}
+
+/// Edit page 1 and its resources dictionary of a generated PDF.
+fn edit_first_page(
+    bytes: &[u8],
+    edit: impl FnOnce(&mut Document, lopdf::ObjectId, lopdf::ObjectId),
+) -> Vec<u8> {
+    let mut doc = Document::load_mem(bytes).unwrap();
+    let page = doc.get_pages()[&1];
+    let resources = doc
+        .get_dictionary(page)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    edit(&mut doc, page, resources);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}
+
+/// A red-to-blue axial shading pattern named `P0` in the page resources.
+fn with_shading_pattern(bytes: &[u8]) -> Vec<u8> {
+    edit_first_page(bytes, |doc, _, resources| {
+        let function = dictionary! {"FunctionType"=>2,"Domain"=>vec![0.into(),1.into()],
+        "C0"=>vec![1.into(),0.into(),0.into()],"C1"=>vec![0.into(),0.into(),1.into()],"N"=>1};
+        let shading = dictionary! {"ShadingType"=>2,"ColorSpace"=>"DeviceRGB",
+        "Coords"=>vec![0.into(),0.into(),200.into(),0.into()],"Function"=>function};
+        let pattern = doc.add_object(dictionary! {"PatternType"=>2,"Shading"=>shading});
+        doc.get_dictionary_mut(resources)
+            .unwrap()
+            .set("Pattern", dictionary! {"P0"=>pattern});
+    })
+}
+
+/// Visible text painted with a shading pattern: mode 0 (fill) "AB", mode 1 (stroke) "CD",
+/// and plain black fill "EF" afterwards.
+const PATTERN_TEXT: &str = "q /Pattern cs /P0 scn BT /F1 24 Tf 10 200 Td (AB) Tj ET Q \
+    q /Pattern CS /P0 SCN 1 w BT /F1 24 Tf 1 Tr 10 150 Td (CD) Tj ET Q \
+    0 g BT /F1 24 Tf 0 Tr 10 100 Td (EF) Tj ET";
+
+#[test]
+fn shading_pattern_text_flags_with_and_without_clip() {
+    let bytes = with_shading_pattern(&one(PATTERN_TEXT, [0, 0, 200, 300], None));
+    let off = dump_bytes(&bytes, 0, BASE);
+    let on = dump_bytes(&bytes, 0, BASE | TextPageFlags::CLIP);
+    eprintln!("4a0 pattern {}", summarize("CLIP off", &off));
+    eprintln!("4a0 pattern {}", summarize("CLIP on ", &on));
+    for g in &off.glyphs {
+        eprintln!(
+            "4a0 pattern off {:?} flags {:?} argb {:#010x}",
+            g.ch, g.flags, g.argb
+        );
+    }
+    for g in &on.glyphs {
+        eprintln!(
+            "4a0 pattern on  {:?} flags {:?} argb {:#010x}",
+            g.ch, g.flags, g.argb
+        );
+    }
+    assert_eq!(text_of(&off), "ABCDEF");
+    // Pattern-painted text goes through clip-text: FILLED/STROKED plus CLIPPED, argb 0; CLIP
+    // does not change the result (the glyphs lie inside the page).
+    let key = |d: &Dump| {
+        d.glyphs
+            .iter()
+            .map(|g| (g.flags.bits(), g.argb))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(key(&on), key(&off));
+    let by = |c: char| off.glyphs.iter().find(|g| g.ch == Some(c)).unwrap();
+    assert_eq!(
+        by('A').flags,
+        TextCharFlags::FILLED | TextCharFlags::CLIPPED
+    );
+    assert_eq!(
+        by('C').flags,
+        TextCharFlags::STROKED | TextCharFlags::CLIPPED
+    );
+    assert_eq!((by('A').argb, by('C').argb), (0, 0));
+    assert_eq!(
+        (by('E').flags, by('E').argb),
+        (TextCharFlags::FILLED, 0xff00_0000)
+    );
+}
+
+#[test]
+fn page_box_coordinates_rotation_and_user_unit() {
+    // CropBox [20 20 100 280] on a 200x300 MediaBox: coordinates are relative to the crop origin.
+    let bytes = one(OFF_PAGE, [0, 0, 200, 300], Some([20, 20, 100, 280]));
+    let d = dump_bytes(&bytes, 0, BASE);
+    let i = d.glyphs.iter().find(|g| g.ch == Some('I')).unwrap();
+    assert!((i.quad[0] - (10.0 - 20.0)).abs() < 0.01, "{:?}", i.quad);
+    // Rotate 90: the page bounds swap and glyph geometry is already rotated.
+    let plain = one("BT /F1 20 Tf 50 100 Td (A) Tj ET", [0, 0, 200, 300], None);
+    let rotated = edit_first_page(&plain, |doc, page, _| {
+        doc.get_dictionary_mut(page).unwrap().set("Rotate", 90);
+    });
+    for (label, pdf) in [("Rotate 0", &plain), ("Rotate 90", &rotated)] {
+        let doc = mupdf::pdf::PdfDocument::from_bytes(pdf).unwrap();
+        let page = doc.load_pdf_page(0).unwrap();
+        let b = page.bounds().unwrap();
+        let g = dump_page(&page, BASE).glyphs[0].clone();
+        eprintln!(
+            "4a0 rotate [{label}] bounds {}x{} glyph origin {:?} quad {:?}",
+            b.x1 - b.x0,
+            b.y1 - b.y0,
+            g.origin,
+            g.quad
+        );
+    }
+    // Rotate 90: bounds 300x200; PDF (x, y) = (50, 100) maps to page space (y, x) = (100, 50),
+    // and the quad corners are rotated with the glyph (ul keeps the glyph's own corner).
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&rotated).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let b = page.bounds().unwrap();
+    assert_eq!((b.x1 - b.x0, b.y1 - b.y0), (300.0, 200.0));
+    let g = dump_page(&page, BASE).glyphs[0].clone();
+    assert_eq!(g.origin, [100.0, 50.0]);
+    assert!((g.quad[0] - 121.5).abs() < 0.1 && (g.quad[1] - 50.0).abs() < 0.01);
+    assert!((g.quad[4] - 94.0).abs() < 0.1 && (g.quad[5] - 50.0).abs() < 0.01);
+    let user_unit = edit_first_page(&plain, |doc, page, _| {
+        doc.get_dictionary_mut(page).unwrap().set("UserUnit", 2.0);
+    });
+    let doc = mupdf::pdf::PdfDocument::from_bytes(&user_unit).unwrap();
+    let page = doc.load_pdf_page(0).unwrap();
+    let b = page.bounds().unwrap();
+    let g = dump_page(&page, BASE).glyphs[0].clone();
+    eprintln!(
+        "4a0 userunit 2 bounds {}x{} glyph origin {:?}",
+        b.x1 - b.x0,
+        b.y1 - b.y0,
+        g.origin
+    );
+    // UserUnit 2 scales page space by 2 (bounds 400x600, origin (50, 200) -> (100, 400)).
+    assert_eq!((b.x1 - b.x0, b.y1 - b.y0), (400.0, 600.0));
+    assert_eq!(g.origin, [100.0, 400.0]);
+}
+
+#[test]
+fn clip_flag_with_non_rectangular_clip_path() {
+    // Triangle clip (0,0)-(100,0)-(0,100). "IN" at (5,5) lies inside it; "OUT" at (70,70) is
+    // inside the triangle's bounding box but outside the triangle.
+    let content = "q 0 0 m 100 0 l 0 100 l h W n \
+        BT /F1 12 Tf 5 5 Td (IN) Tj 1 0 0 1 70 70 Tm (OUT) Tj ET Q";
+    let bytes = one(content, [0, 0, 200, 200], None);
+    let off = dump_bytes(&bytes, 0, BASE);
+    let on = dump_bytes(&bytes, 0, BASE | TextPageFlags::CLIP);
+    eprintln!("4a0 triangle {}", summarize("CLIP off", &off));
+    eprintln!("4a0 triangle {}", summarize("CLIP on ", &on));
+    assert_eq!(text_of(&off), "INOUT");
+    // CLIP prunes by the clip bounding box only: "OUT" (outside the triangle, inside its box) stays.
+    assert_eq!(text_of(&on), "INOUT");
 }
