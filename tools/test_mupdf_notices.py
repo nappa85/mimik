@@ -37,6 +37,8 @@ class MuPdfNoticesTests(unittest.TestCase):
             with (
                 contextlib.chdir(root),
                 patch("sys.argv", ["package_release", "--version", "test", "--revision", "test"]),
+                # The synthetic package is not a real archive; the fork check is tested elsewhere.
+                patch.object(package_release.verify_source_package, "verify_archive"),
                 patch.object(
                     package_release, "stage_llama", side_effect=RuntimeError("staging reached")
                 ),

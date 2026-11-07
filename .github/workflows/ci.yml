@@ -63,10 +63,13 @@ jobs:
               python -m unittest discover -s tools -p "test_*.py"
               actionlint .github/workflows/ci.yml
               cargo audit --deny warnings
+              python tools/vendored_fork.py audit-lock target/Cargo.audit.lock
+              cargo audit --deny warnings --file target/Cargo.audit.lock
               cargo about generate --locked --fail about.hbs -o target/THIRD-PARTY-NOTICES.md
               python3 tools/mupdf_notices.py target/THIRD-PARTY-NOTICES.md
               cargo build --release --locked
               cargo package --locked --allow-dirty
+              python tools/vendored_fork.py package target/package/mimik-0.1.0.crate
               python tools/verify_source_package.py target/package/mimik-0.1.0.crate
               cargo vendor --locked target/vendor > target/vendor-config.toml
               python tools/llama_runtime.py verify --dir target/llama-fetch/llama --models target/llama-fetch/models

@@ -165,9 +165,9 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    binary; `cargo test` alone builds only a hashed copy); `cargo test --locked --all-targets
    --all-features`; build the `formula_eval`
    example; generate the synthetic source fixture; `python -m unittest discover -s tools`;
-   `actionlint`; `cargo audit --deny warnings`; `cargo about generate --locked --fail`
-   (third-party notices); `cargo build --release --locked`; `cargo package` and
-   `verify_source_package.py` (member allowlist); `cargo vendor`; `llama_runtime.py verify` of
+   `actionlint`; `cargo audit --deny warnings` (also on the lock with the mupdf registry entry restored); `cargo about generate --locked --fail`
+   (third-party notices); `cargo build --release --locked`; `cargo package`,
+   `vendored_fork.py package` (adds the mupdf fork) and `verify_source_package.py` (member allowlist); `cargo vendor`; `llama_runtime.py verify` of
    the fetched files (hashes, then the manifest's modes); `package_release.py` (stages exactly
    the manifest's files as `llama/`, their notice, `BUILD.txt` and `SOURCE.txt` (which points to llama.cpp's upstream commit; its
    source is not shipped, ASSIST-47)); the lib test binary (`--no-run --message-format=json`)

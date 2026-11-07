@@ -182,9 +182,10 @@ or storage guard for sheet history and notes).
   build in `llama/cpu/` and Vulkan build in `llama/vulkan/` (their hashes and modes are in the
   manifest built into `mimik`).
 - `mimik-0.1.0-source.crate`: corresponding source: Rust code, templates, migrations, assets
-  in preferred form, tests, helper tools, build configuration and documentation.
-- `mimik-0.1.0-dependency-sources.tar.gz`: vendored Rust dependency sources with checksums,
-  licences and the source-replacement configuration.
+  in preferred form, tests, helper tools, build configuration, documentation and the vendored
+  mupdf fork (`vendor/mupdf`, with the `[patch.crates-io]` entry and path-form lock; DEP-29).
+- `mimik-0.1.0-dependency-sources.tar.gz`: vendored Rust dependency sources (`vendored-crates/`)
+  with checksums, licences and the source-replacement configuration.
 - `SHA256SUMS`: checksums of the three archives.
 
 llama.cpp is a separately executed, pinned build dependency: its source is not shipped.

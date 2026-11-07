@@ -20,7 +20,7 @@ class CleanupTests(unittest.TestCase):
             binary = root / "mimik"
             binary.write_bytes(b"synthetic")
             source = root / "source"
-            (source / "vendor").mkdir(parents=True)
+            (source / "vendored-crates").mkdir(parents=True)
             fixture = root / "fixture"
             fixture.mkdir()
             args = argparse.Namespace(

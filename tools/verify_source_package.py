@@ -5,6 +5,7 @@ import tarfile
 import tomllib
 from pathlib import Path, PurePosixPath
 
+import vendored_fork
 from pathspec import PathSpec
 
 REQUIRED = {
@@ -12,6 +13,12 @@ REQUIRED = {
     "licenses/ijg-libjpeg-9f-upstream.sha256",
     "Cargo.toml",
     "Cargo.lock",
+    "vendor/mupdf.sha256",
+    "vendor/mupdf/Cargo.toml",
+    "vendor/mupdf/LICENSE",
+    "vendor/mupdf/MIMIK-VENDOR.md",
+    "vendor/mupdf/src/lib.rs",
+    "vendor/mupdf/src/text_page.rs",
     "LICENSE",
     "logo.png",
     "rust-toolchain.toml",
@@ -103,15 +110,53 @@ def verify_members(names):
         raise ValueError("Corresponding source is missing required build/test inputs")
 
 
+def verify_fork(manifest_text, lock_text, text_page, listing=None, files=None):
+    """DEP-29: the package must build the vendored fork, not crates.io mupdf. `cargo package`
+    drops the patch entry and rewrites the lock, so `tools/vendored_fork.py` restores both."""
+    patch = tomllib.loads(manifest_text).get("patch", {}).get("crates-io", {})
+    if patch != {"mupdf": {"path": "vendor/mupdf"}}:
+        raise ValueError("Source package manifest does not patch mupdf to vendor/mupdf")
+    packages = [p for p in tomllib.loads(lock_text)["package"] if p["name"] == "mupdf"]
+    if len(packages) != 1 or "source" in packages[0] or "checksum" in packages[0]:
+        raise ValueError("Source package lock does not resolve mupdf to the vendored path")
+    if "pub fn is_rtl" not in text_page:
+        raise ValueError("Vendored mupdf is not the Mimik fork")
+    if listing is not None:
+        vendored_fork.check_inventory(listing, files)
+
+
+def verify_archive(path):
+    with tarfile.open(path, "r:gz") as archive:
+        members = archive.getmembers()
+        if any(not member.isfile() and not member.isdir() for member in members):
+            raise ValueError("Unexpected special archive member")
+        names = [member.name for member in members]
+        verify_members(names)
+        root = names[0].split("/", 1)[0]
+
+        def read(name):
+            return archive.extractfile(f"{root}/{name}").read().decode("utf-8")
+
+        prefix = f"{root}/{vendored_fork.FORK}/"
+        files = {
+            member.name.removeprefix(prefix): archive.extractfile(member).read()
+            for member in members
+            if member.isfile() and member.name.startswith(prefix)
+        }
+        verify_fork(
+            read("Cargo.toml"),
+            read("Cargo.lock"),
+            read("vendor/mupdf/src/text_page.rs"),
+            read(vendored_fork.INVENTORY),
+            files,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path)
     args = parser.parse_args()
-    with tarfile.open(args.archive, "r:gz") as archive:
-        members = archive.getmembers()
-        if any(not member.isfile() and not member.isdir() for member in members):
-            raise ValueError("Unexpected special archive member")
-        verify_members([member.name for member in members])
+    verify_archive(args.archive)
     print("Corresponding-source member allowlist verified.")
 
 

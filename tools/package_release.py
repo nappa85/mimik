@@ -10,6 +10,7 @@ from pathlib import Path
 
 import llama_runtime
 import mupdf_notices
+import verify_source_package
 
 
 def toolchain(path=Path("rust-toolchain.toml")):
@@ -17,6 +18,9 @@ def toolchain(path=Path("rust-toolchain.toml")):
     return tomllib.loads(path.read_text(encoding="utf-8"))["toolchain"]["channel"]
 
 
+# Not `vendor`: the source package holds the mupdf fork at `vendor/mupdf` (DEP-29), which cargo
+# would read as a malformed directory-source entry if the crates were unpacked beside it.
+DEPENDENCY_DIR = "vendored-crates"
 EXCEPTION_MARKER = "As a special exception to the GNU Lesser General Public License"
 BUILD_PREREQUISITES = (
     "MuPDF build prerequisites: a C compiler and libclang (clang-14 on Ubuntu 22.04).\n"
@@ -121,6 +125,19 @@ def check_inventory(readme, names):
         raise ValueError(f"the release scope must say: {expected}")
 
 
+def write_dependency_sources(path, vendor, vendor_config):
+    """The vendored crates under `DEPENDENCY_DIR`, with a source-replacement config naming it."""
+    with tarfile.open(path, "w:gz") as tar:
+        tar.add(vendor, arcname=DEPENDENCY_DIR)
+        config_bytes = vendor_config.replace(
+            'directory = "target/vendor"', f'directory = "{DEPENDENCY_DIR}"'
+        ).encode()
+        entry = tarfile.TarInfo(".cargo/config.toml")
+        entry.size = len(config_bytes)
+        entry.mode = 0o644
+        tar.addfile(entry, io.BytesIO(config_bytes))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
@@ -138,6 +155,8 @@ def main():
     notices = Path("target/THIRD-PARTY-NOTICES.md")
     if not all(path.is_file() for path in (source, binary, notices)):
         raise ValueError("Build, cargo package, and license notices must exist before packaging.")
+    # Fail closed on a package that still lacks the mupdf fork (run tools/vendored_fork.py).
+    verify_source_package.verify_archive(source)
     vendor = Path("target/vendor")
     vendor_config = Path("target/vendor-config.toml").read_text(encoding="utf-8")
     if (
@@ -181,15 +200,7 @@ def main():
     source_name = f"mimik-{args.version}-source.crate"
     shutil.copy2(source, args.output / source_name)
     dependency_name = f"mimik-{args.version}-dependency-sources.tar.gz"
-    with tarfile.open(args.output / dependency_name, "w:gz") as tar:
-        tar.add(vendor, arcname="vendor")
-        config_bytes = vendor_config.replace(
-            'directory = "target/vendor"', 'directory = "vendor"'
-        ).encode()
-        entry = tarfile.TarInfo(".cargo/config.toml")
-        entry.size = len(config_bytes)
-        entry.mode = 0o644
-        tar.addfile(entry, io.BytesIO(config_bytes))
+    write_dependency_sources(args.output / dependency_name, vendor, vendor_config)
     (stage / "SOURCE.txt").write_text(
         f"Corresponding source: accompanying {source_name} and {dependency_name}\nRevision: {args.revision}\nUnpack the .crate, then unpack dependency sources into that package root.\nBuild: cargo build --release --offline --locked (Rust {toolchain()}).\n"
         + BUILD_PREREQUISITES
