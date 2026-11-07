@@ -41,8 +41,11 @@ const READ_BUDGET: Duration = Duration::from_millis(250);
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct ReadDeadlines {
-    /// Replaces the default deadline of every read of the store (a simulated slow machine).
+    /// Replaces the default deadline of every read of the store.
     pub default: Option<Duration>,
+    /// Checks `default` at every step so that even a tiny read is interrupted when it is
+    /// short (a simulated slow machine); otherwise it is checked at the normal interval.
+    pub force_expiry: bool,
     /// Replaces the deadline of the next read with this label.
     pub once: Option<(&'static str, Duration)>,
 }
@@ -50,6 +53,14 @@ pub(crate) struct ReadDeadlines {
 #[cfg(test)]
 static READ_DEADLINES: std::sync::Mutex<Option<std::collections::HashMap<String, ReadDeadlines>>> =
     std::sync::Mutex::new(None);
+
+/// The database file of a test store; in-memory and temporary databases have none to key on.
+#[cfg(test)]
+pub(crate) fn store_path(db: &Connection) -> &str {
+    db.path()
+        .filter(|path| !path.is_empty())
+        .expect("a file-backed store")
+}
 
 /// Changes the overrides of the store whose database file is `path` (starting from none).
 #[cfg(test)]
@@ -71,7 +82,7 @@ fn read_deadline<'a>(db: &'a Connection, label: &str) -> super::search::Budget<'
     #[cfg(not(test))]
     let _ = label;
     #[cfg(test)]
-    if let Some(path) = db.path() {
+    if let Some(path) = db.path().filter(|path| !path.is_empty()) {
         let mut hooks = READ_DEADLINES.lock().unwrap();
         if let Some(hook) = hooks.as_mut().and_then(|hooks| hooks.get_mut(path)) {
             if hook.once.is_some_and(|(name, _)| name == label) {
@@ -79,12 +90,10 @@ fn read_deadline<'a>(db: &'a Connection, label: &str) -> super::search::Budget<'
                 return super::search::Budget::checking_every(db, duration, 1);
             }
             if let Some(duration) = hook.default {
-                // A generous deadline keeps the normal check interval; a forced expiry checks
-                // at every step so even a tiny read is interrupted.
-                return if duration >= Duration::from_secs(1) {
-                    super::search::Budget::start(db, duration)
-                } else {
+                return if hook.force_expiry {
                     super::search::Budget::checking_every(db, duration, 1)
+                } else {
+                    super::search::Budget::start(db, duration)
                 };
             }
         }

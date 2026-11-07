@@ -57,14 +57,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   checks every row; the proposed probe-v1 as advice; a failed bar keeps step 4 blocked, with a
   reviewed new version allowed. Next: record these in the plan, then 4a0. Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
-  a MuPDF security-advisory watch at each release (DEP-29); Review-screen test
-  hook `READ_DEADLINE` (`src/sources/review.rs`) is process-global and matched by label: key it
-  to the test's store. `campaigns::tests::material_tests::material_review_response_bounds_and_labels`
-  failed once in a full parallel run (2026-10-31, 8 test threads, "budget truncation must be
-  labelled") and passed 3 of 3 alone: likely the 250 ms review read deadline under load. Same pattern for
-  `campaigns::tests::list_tests::a_refused_cell_draft_re_render_is_within_the_bound_plus_its_echo`
-  (failed once with two gates in parallel, 3 of 3 alone at about 29 s): find the timing
-  dependence in both. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  a MuPDF security-advisory watch at each release (DEP-29). Intermittent under 16-thread
+  oversubscription (2026-11-07, pass alone): `assistant::download::task::tests::cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range`
+  (`Err(Finishing)`, task_tests.rs:347) and
+  `assistant::runtime::launch::tests::a_port_that_cannot_be_bound_is_tried_three_times_then_fails`
+  (launch_tests.rs:463): find their timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** the CI helper is `/home/marco/Progetti/mimik/target/agent-tools/ci.sh` (`CPUS=2 sh

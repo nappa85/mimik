@@ -576,6 +576,9 @@ async fn router_request(
     let mut req = axum::http::Request::builder()
         .uri(path)
         .header("host", "127.0.0.1:3000")
+        // Load must not decide route tests (real argon2 and large renders run inside the 5 s
+        // boundary deadline); the deadline itself is tested elsewhere.
+        .header(crate::auth::TEST_DEADLINE_HEADER, "120")
         .header("cookie", auth.fixture_cookie());
     let body = if let Some(form) = form {
         req = req

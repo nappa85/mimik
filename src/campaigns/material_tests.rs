@@ -1170,6 +1170,9 @@ async fn material_review_response_bounds_and_labels() {
 async fn material_review_worst_case_merge_response() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    // Checks the production path (reduced screen after the 250 ms read deadline) inside the
+    // request window, so it keeps the production deadline.
+    store.clear_read_deadlines().await;
     seed(&store).await;
     store.run(|db| {
         for id in 52..=1024 {
@@ -3677,8 +3680,11 @@ async fn review_read_deadline_overrides_are_scoped_to_their_store() {
         seed(store).await;
         finalize_material(store).await;
     }
-    slow.update_read_deadlines(|hooks| hooks.default = Some(std::time::Duration::ZERO))
-        .await;
+    slow.update_read_deadlines(|hooks| {
+        hooks.default = Some(std::time::Duration::ZERO);
+        hooks.force_expiry = true;
+    })
+    .await;
     // A pending one-shot override of the same label on the other store is not consumed here.
     store
         .force_read_deadline("screen", std::time::Duration::ZERO)
@@ -3705,6 +3711,7 @@ async fn review_read_deadline_overrides_are_scoped_to_their_store() {
     );
     slow.update_read_deadlines(|hooks| {
         hooks.default = Some(std::time::Duration::from_mins(10));
+        hooks.force_expiry = false;
     })
     .await;
     let response = router_get(&slow_app, &slow_auth[0], "/admin/materials/pages/1").await;

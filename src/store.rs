@@ -151,7 +151,7 @@ impl Store {
     ) {
         self.run(move |db| {
             crate::sources::review::update_read_deadlines(
-                db.path().expect("file-backed store"),
+                crate::sources::review::store_path(db),
                 change,
             );
             Ok(())
@@ -165,7 +165,7 @@ impl Store {
     #[cfg(test)]
     pub(crate) async fn clear_read_deadlines(&self) {
         self.run(|db| {
-            crate::sources::review::clear_read_deadlines(db.path().expect("file-backed store"));
+            crate::sources::review::clear_read_deadlines(crate::sources::review::store_path(db));
             Ok(())
         })
         .await

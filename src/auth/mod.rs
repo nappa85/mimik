@@ -226,7 +226,7 @@ fn router_with_sessions(
 
 /// Header a test sets to lengthen the boundary deadline of one request (whole seconds), so a
 /// route test of a legitimately slow response does not depend on how loaded the machine is.
-/// Tests of the deadline itself send no such header.
+/// It applies to any request, so tests of the deadline itself send no such header.
 #[cfg(test)]
 pub(crate) const TEST_DEADLINE_HEADER: &str = "x-test-request-deadline-secs";
 

@@ -87,6 +87,8 @@ async fn send(
         .uri(path)
         .method(method)
         .header("host", "127.0.0.1:3000")
+        // Load must not decide these route tests; none of them tests the 5 s deadline.
+        .header(crate::auth::TEST_DEADLINE_HEADER, "120")
         .header("cookie", setup.auth[1].fixture_cookie());
     if method == "POST" {
         request = request
