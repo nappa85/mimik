@@ -136,13 +136,21 @@ nothing re-verifies the file. Pages are published inside the render callback
      by `proposal_fingerprints` (JSON array of at most 8 distinct 64-hex values, none for manual
      boxes); the eight-box page limit bounds the proposal count. The proposal screen
      (`upload_page.html:18-20`, `Editor` list in `auth/uploads.rs:473`) gets a confirm control per
-     proposal and a combined preview; `set` carries the confirmed proposal indices and per-page
+     proposal and a combined preview; `set` carries the confirmed fingerprints (not indices; the absent-page confirmation applies per confirmed proposal) and per-page
      edits, not 20,000 pages of coordinates: `set_exclusion` already re-runs the proposal
      (`:184,194`) and rebuilds boxes server-side; manual boxes are limited by the action body.
-   - *Masking/crossing:* step 4 treats a text line as excluded when it crosses any box of its
-     page (staging only validates and carries boxes; no staging code masks). The contract carries
-     `boxes` per page as lists; the revision/fingerprint rules of `set_exclusion` apply to the
-     whole set. Today's proposal rule (`propose_keyed`, `:437`: recur on at least
+   - *Masking/crossing (route A's rule, `source-route-a-plan.md:312-314`, kept):* a unit wholly
+     contained (edges inclusive) in the **union** of its page's boxes is rejected (so a header
+     drawn as adjacent left and right boxes is covered); positive-area overlap without
+     containment stays unreviewed and flagged; mere edge contact is not crossing. Staging only
+     validates and carries boxes. Route A's permanent exclusion provenance becomes a list of
+     fingerprints plus per-page box lists. The contract carries `boxes` per page as lists; the
+     revision/fingerprint rules of `set_exclusion` apply to the whole set.
+   - *Rounding and the page edge:* after rounding outward each box is clamped to
+     `[0, page width] x [0, page height]` (`padded()` clamps to the page edge,
+     `upload_exclusions.rs:368-375`; `validate` refuses `b[2] > width_points`, `:296-300`; e.g.
+     595.2756 would round to 595.28). 028 rounds outward and clamps the old rows in its copy.
+     Confirmed proposals whose rounded boxes coincide are de-duplicated, not refused. Today's proposal rule (`propose_keyed`, `:437`: recur on at least
      max(3, ceil(3n/5)) pages) makes proposals over 64 pages routine from 107 selected pages.
 8. **Proposals stream pages, with bounded memory and time.** `upload_exclusions.rs:141-170` reads
    every `text-N.json` into server memory (the 512 MiB text total was its bound). Replace by:
@@ -157,7 +165,8 @@ nothing re-verifies the file. Pages are published inside the render callback
      threshold, `:470-490,:510-524`). A group that alone cannot reach the threshold is not
      removed: only its `boxes` are freed, and it stays as a tombstone (seed and index) in
      `by_text` so later scans and budgets behave as before; tombstones count against the group
-     cap. Tests: identical output with the current function on duplicate-line, budget-exhaustion
+     cap. A match on a tombstone is consumed (removed from `available`) but stores no box.
+     Tests: identical output with the current function on duplicate-line, budget-exhaustion
      and ordinary corpora; the hostile recurring-line case (a few thousand pages x many recurring
      lines) refuses with `COMPARISON_LIMIT` at the budget, memory flat.
    - *CPU (N2):* proposals hold the upload gate (`:91-100`; `set_exclusion` repeats them) with no
@@ -187,7 +196,9 @@ nothing re-verifies the file. Pages are published inside the render callback
      to run it (or a CLI `compact`) afterwards to reclaim the space.
    - *Hash failure.* Default: abort with a fixed message naming source ids (no paths). Ways out,
      documented: restore from backup, or a CLI command that moves the bad blob to
-     `sources/quarantine/` and drops only that row's PDF.
+     `sources/quarantine/`. Before 029 `pdf` is NOT NULL, so the command writes an empty blob
+     plus a quarantine marker for that row; the pre-step treats a marked row as a missing file
+     (`pdf_corrupt` on use) instead of aborting again.
    - *Backup/restore.* The database file alone no longer holds PDFs: `release-scope.md:119` and
      the reference doc say the backup is the database file plus `sources/`; a missing file is
      reported at startup (count only, no paths) and as `pdf_corrupt` on use; existing sheets and
@@ -195,7 +206,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    - *Orphans and ordering (N4).* `import-source` is another process (`main.rs:460`) and the
      rundir lock covers only the assistant, so the sweep needs its own protocol: a cross-process
      `flock` on `sources/`, shared by `put` from before the file is created until the database row
-     commits, exclusive for the sweep; additionally the sweep skips files younger than one hour.
+     commits, exclusive for the sweep, taken non-blocking (the sweep skips that run if busy); additionally the sweep skips files younger than one hour.
      Ordering: temp write, fsync, rename, directory fsync, then the DB commit. Route A's
      finalization follows the same rule (put before the finalizing row).
 10. **Kept limits, each with its reason** (written into `sources-and-retrieval.md`): form field
@@ -274,7 +285,9 @@ nothing re-verifies the file. Pages are published inside the render callback
 8. **Docs.** Rewrite the reference sections in the table (each kept limit with its reason),
    `release-scope.md`, `limitations.md` (add: damaged-file inspection bound, exclusion history
    growth, CLI memory bounds; reword C5, L-SRC-3, L-SRC-8 as CLI-only), `decisions.md` DEP-29,
-   `source-upload-plan.md`, TODO; delete this plan.
+   `source-upload-plan.md`, `source-route-a-plan.md` (containment rule over the union of boxes,
+   fingerprint list and per-page box lists as provenance), TODO; delete this plan. Slice 5 also
+   tests an edge-touching box (595.2756 wide page), union containment and edge contact.
 
 Review: this plan and each slice get a fresh Opus reviewer (AGENTS.md); slices 1, 3, 4 and 7
 (sandbox input, TOCTOU, accounting, store security) need the adversarial pass. Builds and tests
