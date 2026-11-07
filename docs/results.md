@@ -513,14 +513,15 @@ PRESERVE_WHITESPACE | PRESERVE_IMAGES | USE_CID_FOR_UNKNOWN_UNICODE`. Determinis
   trip: maximum error 1/2048 pt on every coordinate of the dense page; range ±2,097,152 pt,
   non-finite and out-of-range values refused. The fixture has one font, uniform flags and no
   images, so 98 B/glyph is a lower bound for 4a's full records.
-- **Bar PDFs (catalogue only, `pdfinfo` and `qpdf --json` on the local files):** the IT 2025 core book (96 pages) is untagged; MÖRK BORG
-  Bare Bones EN (76 pages) is tagged, with 3,547 structure elements including 88 tables.
-  Usable associations are not established by this check.
+- **Bar PDFs (catalogue only, `pdfinfo` and `qpdf --json` on the local files):** the IT 2025
+  core book (96 pages) is untagged; MÖRK BORG Bare Bones EN (76 pages) is tagged, with 3,547
+  structure elements including 88 tables. Usable associations are not established by this check.
 
 **Conclusion:** the fork covers what 4a needs; `CLIP` stays off and Mimik derives off-page and
-invisible status itself (`CLIPPED` means "possibly invisible", since shaded visible text has it too); columnar encoding at 1/1024 pt is frozen for `mimik-reading-v1`; the
-tag slice stays because one bar PDF is tagged. Not measured: right-to-left or vertical text,
-Type3 or CID fonts, real manuals.
+invisible status itself (`CLIPPED` means "possibly invisible", since shaded visible text has it
+too); columnar encoding at 1/1024 pt is frozen for `mimik-reading-v1`; the tag slice stays
+because one bar PDF is tagged. Not measured: right-to-left or vertical text, Type3 or CID fonts,
+real manuals.
 
 ## llama.cpp v0.9.0 (b12110) against b11610 on the interpretation screens (owner request, 2026-11-06)
 

@@ -104,8 +104,9 @@ Remaining before any route-A measurement:
   Reading payload ≤8 MiB/page; total wire budget `(8 MiB + 16 KiB) × pages + 4 KiB`, headers
   included. Test maximum legal frames together and one byte over, not just isolated records.
 - Use closed, flat bounded arrays, not recursive deserialization: ≤40,000 total block/line/tag
-  nodes, ≤20,000 lines, ≤250,000 glyphs (the most the 8 MiB payload can hold at about 34
-  bytes per minimal glyph, so the maximum is testable) and ≤20,000 image rectangles per page; ≤256 font
+  nodes, ≤20,000 lines, a glyph cap derived from 4a's final record layout (8 MiB divided by
+  the minimal encoded glyph, rounded down, so a maximal page is constructible and testable) and
+  ≤20,000 image rectangles per page; ≤256 font
   entries (name ≤64 UTF-8 bytes); tag role ≤100 bytes; depth ≤32; references are page-local
   indices into one node index space shared by block/line/tag kinds; each glyph has exactly one
   line/block owner. Resource/diagnostic walks visit ≤40,000 distinct objects per run with a
@@ -149,17 +150,26 @@ Remaining before any route-A measurement:
 ## 4b. One raw-reading → units contract
 
 - Define prepared contract **v3**, requiring registered edition identity as v2 does, and raw
-  **`mimik-reading-v1`**: PDF hash, selected pages, displayed page facts/image hashes, route,
-  pinned extractor/settings, tag status, validated blocks/lines/glyphs/tags and diagnostics.
-  Persist immutable raw reading bytes separately from the prepared manifest; hashes bind both.
-  Store the raw reading and the prepared units per page (one immutable row per page with its
-  own hash; the source hash binds the ordered page hashes), so no limit applies to a whole
-  source (owner, 2026-11-07: limits only where technically or security-justified). Bounds are
-  per page (4a's reading payload and count caps against hostile worker output) and per unit
-  (≤64 KiB HTML); the number of pages and total size follow the upload, and the only total
-  check is the disk-space reservation before admission. Whole-upload totals inherited from
-  step 3 (selected pages, PDF/PNG sizes, units, prepared size) are under the owner's cap review
-  (TODO); route A adds none. Process and insert page by page so memory stays bounded per page.
+  **`mimik-reading-v1`**, stored per page so that no limit applies to a whole source (SRC-15):
+  - **Envelope** (one immutable row per source): contract and reading versions, route, PDF
+    hash, ordered one-based page list, pinned extractor/flags/`derive_units_v1` version, tag
+    status and registered edition. Its hash is SHA-256 over a domain-separated canonical
+    encoding.
+  - **Page** (one immutable row per page): displayed page facts and image hashes, validated
+    blocks/lines/glyphs/(later) tags and diagnostics as raw bytes with their hash, and the
+    page's derived units as prepared bytes with their hash.
+  - **v3 source hash**: SHA-256 over a domain-separated encoding of the envelope hash followed
+    by the ordered (page number, raw hash, units hash) list. It is distinct from the v1/v2
+    manifest hash, which keeps its meaning for existing sources. There is no whole-source
+    prepared manifest in v3; v1/v2 keep theirs.
+  - Verification runs per page (raw → `derive_units_v1` → exact units equality) plus one check
+    of the envelope, the page order and the source hash.
+  Bounds are per page (4a's reading payload and count caps against hostile worker output; at
+  most one unit per block, so ≤40,000 units per page by the node cap) and per unit (≤64 KiB
+  HTML); 4a measures whether the review page and search projection handle a maximal page, and
+  sets a per-page unit-bytes bound from that. The number of pages and total size follow the
+  upload; the only total check is disk space. Whole-upload totals inherited from step 3 are
+  under the owner's cap review (TODO); route A adds none.
 - Implement one pure `derive_units_v1(validated_reading) -> Result<ordered pages/units>` shared
   by creation, v3 verification and tests. Inputs contain no review state, exclusion decision,
   clock, database ID or model output. Outputs have block identity, kind, four-point polygon,
@@ -189,7 +199,7 @@ Remaining before any route-A measurement:
   `collect_units`/SRC-10 rule unchanged; never reinterpret existing immutable sources.
   Owner-added units remain outside extracted equality. Review/corrections never mutate raw.
   Dispatch raw-reading consumers by contract, including suggestion-report node citations and
-  reimport verification; retain the existing prepared `pages[].units[]` shape for review bounds.
+  reimport verification; the per-page units keep the existing `units[]` element shape.
   Keep CLI v1/v2 import supported; exposing v3 prepared files is a separate interface decision,
   not permission to route browser uploads through `load_import` or its `lopdf` checks.
 - Validate v3 pages against staged displayed dimensions, crop, rotation and transform, rather
@@ -260,13 +270,21 @@ Remaining before any route-A measurement:
   edits make its result stale (do not silently rebase it). Probe results also carry revisions.
 - Read bounded no-follow regular files and verify hashes from the very bytes consumed. Copy
   PNGs unchanged; validate them again. Take total page count/rotation/transform/size from staged
-  inspection, not a server PDF parse. Derive raw/manifest/units outside the Store mutex; reserve
-  space for permanent SQLite BLOBs and rollback-journal growth in addition to staging's ledger
-  and 512 MiB margin. Budget the PDF, raw, manifest and PNG copies before admission.
-- In one IMMEDIATE transaction, recheck Owner/session-bound CSRF, both revisions, current
-  selection/render identities and active job; resolve registered edition. Insert source/raw/
-  manifest/PDF BLOBs, pages with original PNGs, immutable page facts/probe provenance, extracted
-  units initially `unreviewed`, search projections, page hashes and finalization. Add permanent
+  inspection, not a server PDF parse. Derive each page's raw and units outside the Store mutex
+  into a staged, hash-verified per-page file, one page in memory at a time. Before admission,
+  reserve disk from the per-page upper bound (pages × (reading payload + unit bytes) plus PDF
+  and PNG copies), in addition to staging's ledger and 512 MiB margin; after derivation,
+  re-check against the actual staged sizes before writing.
+- Write in page batches, never one unbounded transaction (C6): a first IMMEDIATE transaction
+  rechecks Owner/session-bound CSRF, both revisions, current selection/render identities and
+  the active job, resolves the registered edition and inserts the source in a `finalizing`
+  state that no reader, search or review screen shows. Each following transaction inserts one
+  batch of pages (PDF BLOB once, original PNGs, page facts/probe provenance, raw and units
+  rows, units initially `unreviewed`, search projections), each a bounded write. A last
+  transaction verifies the source hash over the stored rows, applies the exclusion decisions
+  below and flips the source to visible together with the receipt. Startup and hourly cleanup
+  delete any source still `finalizing` without an active job; a failed batch fails the job and
+  leaves it to that cleanup. 4a/4c measure the batch duration so other requests are not held. Add permanent
   exclusion provenance (pages, geometry, rationale, revisions, confirming actor/time and opaque
   fingerprint), crossing flags and explicit rejection-event links. Migration guards make these
   facts immutable without weakening 007/015/017. Obtain exclusion attribution from its staging
@@ -277,9 +295,9 @@ Remaining before any route-A measurement:
   output stays complete. At creation confirmation the current Owner authorizes these rejections;
   retain the original confirmer separately. Check all expected revision-1 units first, then
   update/event/authenticated sidecar per unit, sharing operation ID/rationale. Reuse review
-  primitives; explicitly handle >1,024 excluded units by bounded internal chunks within this
-  same transaction/operation, preserving the public batch limit. Any failure rolls everything
-  back. List decisions and allow normal revision-checked undo; never auto-complete a page.
+  primitives; explicitly handle >1,024 excluded units by bounded internal chunks in the last
+  transaction (one operation), preserving the public batch limit. Any failure leaves the
+  source `finalizing` for cleanup. List decisions and allow normal revision-checked undo; never auto-complete a page.
 - Reuse `documents::register_import`: hash-keyed document/member, first uncovered page primary,
   overlaps subject to the existing owner-choice rules. Do not replace a primary reading or
   merge runs. Schema 24 still stores PDF bytes per source; PDF deduplication (C5) is not an
@@ -421,6 +439,8 @@ Remaining before any route-A measurement:
 - **Bare Bones reference:** Claude drafts it from the original page images only (never from
   route A text, raw readings or a remote model) in the IT reference's format; the owner checks
   every row and the page list before any scoring. The draft and the reference stay local.
+- **Source limits (2026-11-07, SRC-15):** limits only where technically or security-justified;
+  no whole-source totals in route A, storage and processing per page.
 - **Probe policy:** `probe-v1` as proposed, advice only with visible reasons and an Owner override.
 - **Bar failure:** step 4 stays blocked; a new versioned derivation is allowed only with a
   rationale, review and fresh measurements of both bars, never by waiving the bar.
@@ -438,6 +458,6 @@ Remaining before any route-A measurement:
   appear in the render and has no MuPDF clipping flag. Page-boundary and clip-mode flags cannot
   close this gap; review against original renders remains necessary. `CLIP` on instead loses
   scissored glyphs silently and cannot provide complete dropped-text diagnostics.
-- SQLite BLOB copies/journaling block the single Store connection (C6); measure transaction
-  duration and disk headroom on maximum synthetic sources. Do not promise filesystem/SQL
+- SQLite BLOB copies/journaling block the single Store connection (C6); measure each page
+  batch's duration and the disk headroom on a 500-page synthetic source of dense pages. Do not promise filesystem/SQL
   atomicity: the receipt, post-commit deletion and restart reconciliation bridge it.

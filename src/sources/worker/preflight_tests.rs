@@ -702,10 +702,11 @@ fn per_glyph(bytes: usize, glyphs: usize) -> f64 {
 // Additional 4a0 facts (review round).
 // ---------------------------------------------------------------------------------------------
 
-/// Pins the crate's raw block-type mapping: exactly the five kinds of the C library (0..=4) convert; any
-/// other raw value is an error. `TextBlock::r#type()` unwraps this conversion (see its source),
-/// so the worker must check the raw type itself; a real page cannot produce an unknown value,
-/// so this test documents the mapping and does not exercise `r#type()`.
+/// Pins the crate's raw block-type mapping: exactly the five kinds of the C library (0..=4)
+/// convert; any other raw value is an error. `TextBlock::r#type()` unwraps this conversion and
+/// the safe API offers no raw-type pre-check, so a panic from it must be treated as a contained
+/// worker failure. A real page cannot produce an unknown value, so this test only documents the
+/// mapping and does not exercise `r#type()`.
 #[test]
 fn block_type_conversion_covers_exactly_the_five_mupdf_kinds() {
     for known in 0..=4 {
@@ -739,6 +740,10 @@ fn segment_and_table_hunt_flags_separately_produce_struct_blocks() {
         top_kinds(&bytes, TextPageFlags::empty()),
         [TextBlockType::Text]
     );
+    assert!(top_kinds(&bytes, TextPageFlags::SEGMENT).contains(&TextBlockType::Struct));
+    for flag in [TextPageFlags::TABLE_HUNT, TextPageFlags::COLLECT_VECTORS] {
+        assert!(!top_kinds(&bytes, flag).contains(&TextBlockType::Struct));
+    }
 }
 
 /// Edit page 1 and its resources dictionary of a generated PDF.
