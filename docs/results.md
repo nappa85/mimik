@@ -483,13 +483,16 @@ the vendored mupdf fork (DEP-29, MuPDF 1.27.2), the 4a flags `PRESERVE_LIGATURES
 PRESERVE_WHITESPACE | PRESERVE_IMAGES | USE_CID_FOR_UNKNOWN_UNICODE`. Deterministic; one run.
 
 - **Per glyph and line:** quad, origin, size, argb, flags, font name, `bidi`/`is_rtl`; line
-  `wmode` and `dir` ((1, 0) horizontal, (0, −1) for a `Tm`-rotated line). Coordinates are
-  y-down from the CropBox origin. Only left-to-right Latin was available (bidi 0).
+  `wmode` and `dir` ((1, 0) horizontal, (0, −1) for a `Tm`-rotated line). Coordinates are the
+  displayed page: y-down, `/Rotate` applied (a 200×300 page with `/Rotate 90` has 300×200
+  bounds), `UserUnit` applied, origin at the CropBox∩MediaBox top-left. Only left-to-right
+  Latin was available (bidi 0).
 - **Structure:** without `COLLECT_STRUCTURE`, text sits in top-level Text blocks; with it,
   top-level `blocks()` holds only Struct blocks (H1, P under Document in the fixture), the same
   glyphs are reached through `structure().blocks()`, and `structured()` returns none of them.
-  `SEGMENT` or `TABLE_HUNT` also produce Struct blocks. An unknown raw block type makes
-  `TextBlock::r#type()` panic (conversion of values outside 0–4 fails).
+  `SEGMENT` alone also produces Struct blocks; `TABLE_HUNT` or `COLLECT_VECTORS` alone do not.
+  Block-type conversion accepts exactly MuPDF's five kinds (0–4); `TextBlock::r#type()` unwraps
+  it.
 - **Clipping**, `CLIP` off → on:
 
   | Case | CLIP off | CLIP on |
@@ -498,21 +501,24 @@ PRESERVE_WHITESPACE | PRESERVE_IMAGES | USE_CID_FOR_UNKNOWN_UNICODE`. Determinis
   | outside the MediaBox (8 glyphs, 4 wholly outside) | 8, none flagged | 4 |
   | same with a CropBox | 8, none flagged | 1 |
   | render mode 3 (invisible) | all kept; the invisible glyphs have no `FILLED`/`STROKED` | same |
-  | modes 4–6 (visible text used as a clip) | all kept, none `CLIPPED` | later text outside the glyph outlines dropped |
-  | mode 7 (clip only) | all kept; clip glyphs `FILLED|CLIPPED` | later text dropped |
+  | modes 4–6 (visible text used as a clip) | all kept, none `CLIPPED` | later text outside the clip's bounding box dropped |
+  | mode 7 (clip only) | all kept; clip glyphs `FILLED|CLIPPED` | later text outside the bounding box dropped |
+  | mode 0/1 text painted with a shading pattern | all kept; `FILLED|CLIPPED` / `STROKED|CLIPPED`, argb 0 | same |
+  | triangle clip path, glyph inside its bounding box but outside the path | kept | kept |
 
 - **Size:** a dense page of 9,000 glyphs (8 pt, 90 lines) serializes to 2,519,234 bytes as
   verbose per-glyph JSON (280 B/glyph; 187,123 gzipped) and 885,141 bytes as columnar arrays
   with a font table and `i32` coordinates in 1/1024 pt (98 B/glyph; 133,600 gzipped). 64
   distinct such pages: 161.4 MB verbose, 56.6 MB columnar (8.6 MB gzipped). Fixed-point round
   trip: maximum error 1/2048 pt on every coordinate of the dense page; range ±2,097,152 pt,
-  non-finite and out-of-range values refused.
-- **Bar PDFs (catalogue only):** the IT 2025 core book (96 pages) is untagged; MÖRK BORG
+  non-finite and out-of-range values refused. The fixture has one font, uniform flags and no
+  images, so 98 B/glyph is a lower bound for 4a's full records.
+- **Bar PDFs (catalogue only, `pdfinfo` and `qpdf --json` on the local files):** the IT 2025 core book (96 pages) is untagged; MÖRK BORG
   Bare Bones EN (76 pages) is tagged, with 3,547 structure elements including 88 tables.
   Usable associations are not established by this check.
 
 **Conclusion:** the fork covers what 4a needs; `CLIP` stays off and Mimik derives off-page and
-invisible status itself; columnar encoding at 1/1024 pt is frozen for `mimik-reading-v1`; the
+invisible status itself (`CLIPPED` means "possibly invisible", since shaded visible text has it too); columnar encoding at 1/1024 pt is frozen for `mimik-reading-v1`; the
 tag slice stays because one bar PDF is tagged. Not measured: right-to-left or vertical text,
 Type3 or CID fonts, real manuals.
 

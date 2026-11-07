@@ -13,28 +13,37 @@ Settled (2026-11-07; synthetic-PDF tests `src/sources/worker/preflight_tests.rs`
   font name and `bidi`/`is_rtl`, per line `wmode` and `dir`. With the 4a flags (no
   `COLLECT_STRUCTURE`, `SEGMENT` or `TABLE_HUNT`) top-level `blocks()` holds the text. With
   `COLLECT_STRUCTURE` it holds only Struct blocks and the text is reachable only through
-  `structure().blocks()`; `SEGMENT`/`TABLE_HUNT` also create Struct blocks. `structured()`
-  drops Struct-block text (stays banned). `TextBlockType` has 5 kinds (0–4) and
-  `TextBlock::r#type()` panics on any other raw value: 4a checks the raw type first.
+  `structure().blocks()`; `SEGMENT` alone also creates Struct blocks (`TABLE_HUNT` or
+  `COLLECT_VECTORS` alone do not). `structured()` drops Struct-block text (stays banned). The
+  pinned MuPDF has exactly five block kinds (0–4); `TextBlock::r#type()` would panic on another
+  raw value, which the safe API cannot pre-check, so such a panic is a contained worker failure,
+  never a successful or partial reading.
   Right-to-left and vertical text are untested (no such base-14 fixture); 4a adds them.
-- **Coordinates.** MuPDF page space is y-down with its origin at the CropBox origin; 4a's
-  single transform to the staged displayed space is checked against staged inspection
-  geometry (rotation included) before text is accepted.
-- **Clipping (owner: `CLIP` off).** MuPDF sets `CLIPPED` only for render mode 7 (clip only,
-  together with `FILLED`); modes 4–6 are visible and unflagged; mode 3 (invisible) has neither
-  `FILLED` nor `STROKED`. Glyphs outside the page box and glyphs removed by an in-page clip
-  (a clip rectangle, or text drawn later inside a glyph-outline clip) carry no flag: 4a computes
-  off-page/partly-off-page from quads, marks no-fill-no-stroke glyphs invisible, and in-page
-  clipping stays the documented limit caught by review against the render. With `CLIP` on,
-  wholly clipped or off-page glyphs disappear silently (partly clipped ones stay).
+- **Coordinates.** MuPDF page space is already the displayed page: y-down, `/Rotate`
+  applied, scaled by `UserUnit`, origin at the top-left of CropBox∩MediaBox. 4a applies no
+  second rotation; it checks this space against staged inspection geometry before accepting
+  text.
+- **Clipping (owner: `CLIP` off).** `CLIPPED` marks text that reaches the device as a clip:
+  render mode 7 (`FILLED|CLIPPED`) and also visible text filled or stroked with a pattern or
+  shading in any mode (`FILLED|CLIPPED` or `STROKED|CLIPPED`, argb 0). So `CLIPPED` cannot tell
+  visible shaded text from invisible clip-only text: 4a records it as "possibly invisible",
+  never as invisible. Modes 4–6 are visible and unflagged; mode 3 (invisible) has neither
+  `FILLED` nor `STROKED`, which 4a marks invisible. Glyphs outside the page box and glyphs
+  removed by an in-page clip carry no flag: 4a computes off-page/partly-off-page from quads,
+  and in-page clipping stays the documented limit caught by review against the render. With
+  `CLIP` on, glyphs wholly outside the clip's bounding box or the page disappear silently;
+  partly clipped glyphs and glyphs inside the bounding box of a non-rectangular clip stay.
 - **Tags.** IT 2025 is untagged; Bare Bones EN is tagged (catalogue level, including tables).
-  The later versioned tag slice stays (owner rule); its cost estimate is owed with 4a.
+  The later versioned tag slice stays (owner rule); its cost estimate is part of 4a.
 - **Encoding (frozen for `mimik-reading-v1`).** Columnar parallel arrays with a shared font
-  table and `i32` coordinates in 1/1024 displayed pt, rounded to nearest (maximum round-trip
-  error 1/2048 pt); a non-finite value or one outside −2,097,152 to 2,097,151.999 pt refuses the
-  page. About 98 bytes per glyph as JSON (verbose per-glyph records about 280): a dense
-  9,000-glyph page is 0.89 MB, 11% of the 8 MiB page cap, so the byte cap binds at about
-  85,000 glyphs per page, well before the 1,000,000-glyph count cap.
+  table and `i32` coordinates in 1/1024 displayed pt, rounded to nearest with halves away from
+  zero (maximum round-trip error 1/2048 pt); all parallel arrays of one table have equal
+  lengths; a non-finite value or one whose rounded tick does not fit `i32` (about ±2,097,152
+  pt) refuses the page. Off-page statuses are computed from the rounded quads against the page
+  box rounded to the same grid. The test fixture (one font, uniform flags, no images) gives
+  about 98 bytes per glyph as JSON (verbose records about 280): a dense 9,000-glyph page is 0.89
+  MB. That is a lower bound; 4a measures its full records (ordinals, statuses, line and block
+  records, images) and plans on about 130 bytes per glyph until then.
 - **IT reference and scorer.** The reference is `{"note", "pages": {page or range: [row]}}`,
   one fact per row, identity page key plus index; the scorer (recovered, kept local with the
   reference) normalizes by NFC, dash/quote/× mapping, soft-hyphen and "a- b" joining, removal
@@ -95,7 +104,8 @@ Remaining before any route-A measurement:
   Reading payload ≤8 MiB/page; total wire budget `(8 MiB + 16 KiB) × pages + 4 KiB`, headers
   included. Test maximum legal frames together and one byte over, not just isolated records.
 - Use closed, flat bounded arrays, not recursive deserialization: ≤40,000 total block/line/tag
-  nodes, ≤20,000 lines, ≤1,000,000 glyphs and ≤20,000 image rectangles per page; ≤256 font
+  nodes, ≤20,000 lines, ≤250,000 glyphs (the most the 8 MiB payload can hold at about 34
+  bytes per minimal glyph, so the maximum is testable) and ≤20,000 image rectangles per page; ≤256 font
   entries (name ≤64 UTF-8 bytes); tag role ≤100 bytes; depth ≤32; references are page-local
   indices into one node index space shared by block/line/tag kinds; each glyph has exactly one
   line/block owner. Resource/diagnostic walks visit ≤40,000 distinct objects per run with a
@@ -142,12 +152,14 @@ Remaining before any route-A measurement:
   **`mimik-reading-v1`**: PDF hash, selected pages, displayed page facts/image hashes, route,
   pinned extractor/settings, tag status, validated blocks/lines/glyphs/tags and diagnostics.
   Persist immutable raw reading bytes separately from the prepared manifest; hashes bind both.
-  Keep raw ≤32 MiB/source (all pages and envelope), prepared ≤8 MiB, ≤64 pages,
-  ≤20,000 units, ≤64 KiB HTML/unit,
-  ≤128 MiB PNG total and existing per-PNG/PDF bounds. Fail with “select fewer pages”, never
-  truncate. At 64 pages raw averages at most 512 KiB/page including overhead; the 8 MiB
-  per-page wire ceiling does not multiply the source allowance. Measure dense and 64-page
-  cases in 4a0. Process incrementally and bound retained raw/derived allocations before SQL.
+  Store the raw reading and the prepared units per page (one immutable row per page with its
+  own hash; the source hash binds the ordered page hashes), so no limit applies to a whole
+  source (owner, 2026-11-07: limits only where technically or security-justified). Bounds are
+  per page (4a's reading payload and count caps against hostile worker output) and per unit
+  (≤64 KiB HTML); the number of pages and total size follow the upload, and the only total
+  check is the disk-space reservation before admission. Whole-upload totals inherited from
+  step 3 (selected pages, PDF/PNG sizes, units, prepared size) are under the owner's cap review
+  (TODO); route A adds none. Process and insert page by page so memory stays bounded per page.
 - Implement one pure `derive_units_v1(validated_reading) -> Result<ordered pages/units>` shared
   by creation, v3 verification and tests. Inputs contain no review state, exclusion decision,
   clock, database ID or model output. Outputs have block identity, kind, four-point polygon,
@@ -367,7 +379,8 @@ Remaining before any route-A measurement:
 
 - **4a0:** remaining: the Bare Bones reference (drafted, owner-checked) and the freeze of
   `derive_units_v1`, thresholds, bar input hashes and scorer.
-- **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe.
+- **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe;
+  the cost estimate of the later tag slice (owner rule, Bare Bones EN is tagged).
   The bounded StructTreeRoot/MCID diagnostic walk and fixtures 6/7 are required here.
   Independent review before completion; fake-reader max/over-limit/cyclic-reference tests,
   live sandbox and ten PDFs.
@@ -416,8 +429,9 @@ Remaining before any route-A measurement:
 
 - Tags can be wrong, incomplete or expensive to resolve; block fallback preserves text but
   may scatter a fact across units. The 98% bar is not established by wrapper availability.
-- Glyph-rich raw data can hit 32 MiB before the 64-page cap; refuse with a smaller-selection
-  remedy. Measure memory under the existing worker limits before increasing any bound.
+- Glyph-rich pages make the stored reading large (about 0.9 MB per dense page at the
+  fixture's lower bound): disk space is reserved before admission; 4a measures its real
+  per-glyph size and the worker's memory per page.
 - Image coverage misses art drawn as vector paths; missing maps over-warn standard fonts.
    The frozen IT probe check can fail and require a separately reviewed algorithm revision.
 - With proposed `CLIP` off, in-page scissor clipping is undetectable: retained text may not
