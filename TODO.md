@@ -55,7 +55,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   belong to 4a0; tags decided after the 4a0 preflight; the proposed extraction
   flags; `CLIP` off; Claude drafts the Bare Bones reference from page images only, the owner
   checks every row; the proposed probe-v1 as advice; a failed bar keeps step 4 blocked, with a
-  reviewed new version allowed. Next: record these in the plan, then 4a0. Follow-ups:
+  reviewed new version allowed (recorded in the plan). 4a0 in progress: the fork is vendored
+  and wired (merged 2026-11-07, DEP-29). Preflight findings so far (local notes
+  `/media/data/mimik/route-a/preflight-notes.md`): IT 2025 untagged, Bare Bones EN tagged (88
+  tables), so the tag slice stays and its cost estimate is owed; the IT scorer recovered to
+  `/media/data/mimik/route-a/score_it_reference.py`. Next in 4a0: API-fit fixture, clipping
+  cases, serialized-size measurement, the Bare Bones reference draft, then the freeze. Follow-ups:
   fuzzing of the record parser and the worker's MuPDF entry points (cargo-fuzz in a container);
   a MuPDF security-advisory watch at each release (DEP-29). Intermittent under 16-thread
   oversubscription (2026-11-07, pass alone): `assistant::download::task::tests::cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range`
