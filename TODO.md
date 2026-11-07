@@ -79,6 +79,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+- **Source size limits review (SRC-15, owner 2026-11-07):** step 3's upload and import limits
+  in master (`docs/sources-and-retrieval.md`: 128 MiB PDF, 64 selected pages, 128 MiB of PNGs,
+  20,000 units, 32 MiB `source.json`, 8 MiB prepared bundle, per-upload text 512 MiB) are
+  whole-upload totals: classify each as security/technical (keep, with its reason, per unit of
+  work) or arbitrary (remove, storing and processing per page or batch). Plan, review, then
+  implement before route A's 4c builds on them.
+
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
   2026-11-05: GET + `/seen` (auto with JS, one click without); existing sheets are player sheets;
