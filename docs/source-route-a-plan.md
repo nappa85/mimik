@@ -6,40 +6,49 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 ## 4a0. Small preflight; freeze before route-A measurements
 
-- Confirm vendored `mupdf =0.8.0` / `mupdf-sys` (MuPDF 1.27.2) API fit with a synthetic
-  fixture and settle the wrapper decision. Safe blocks/lines/chars expose quads, origins,
-  size, argb, flags, `TextChar::font()` and line `wmode`; quads are not a wrapper gap.
-  Gaps: line `dir`, per-character `bidi`, nested structure traversal and association-linked
-  table span attributes. `blocks()` is top-level only; ban `structured()` because it maps
-  Struct blocks to `Other` and silently drops codes that are not valid Rust `char`s.
-  Decide either a worker-only wrapper for line `dir` and character `bidi`, retaining both as
-  line/glyph metadata with serialized round trips in the RTL fixture, or direction derived
-  from origin/quad sequence with no bidi in v1; in the latter case RTL/vertical goldens test
-  the frozen direction derivation. Do not promise bidi without the wrapper.
-  `TextBlock::r#type()` unwraps unknown block types: check the raw type before calling it or
-  treat the panic as a contained worker failure, never a successful or partial reading.
-- Exercise two distinct clipping cases in 4a0: text scissored by an in-page clip (and glyphs
-  partly/wholly outside the displayed page), and text used as a clipping path in render modes
-  4–7. Compare `CLIP` off/on against renders and raw glyph counts/flags. In MuPDF 1.27.2,
-  `FZ_STEXT_CLIPPED` marks clip-mode text from `fz_stext_clip_text`/`clip_stroke_text`, not
-  scissored-away glyphs; mode 7 can be `FILLED|CLIPPED`. Freeze the owner's `CLIP` choice below.
-- Check only aggregate catalog `tagged` status for the two local bar PDFs; this does not
-  establish usable associations. Inform the owner's scope decision: recommend deferring tags
-  if both are untagged, otherwise retain a separate tag slice and assess its cost. Step 4
-  names tags, so deferral requires the owner's amendment to the umbrella.
-- Inspect the actual local IT reference/scorer fields, normalization and token checks;
-  settle the EN reference owner/format before scoring. Keep manual content local.
-- Measure aggregate serialized sizes on bounded synthetic/density fixtures, including a
-  64-page selection. Compare fixed-precision columnar arrays with verbose glyph records;
-  recommend columnar arrays with shared font/node tables and integer coordinates in 1/1024
-  displayed pt. Freeze the measured encoding before `mimik-reading-v1`: parallel-array lengths,
-  rounding, overflow refusal, positional error and containment after conversion. Revise precision
-  before freezing if geometry tests fail. Count ceilings do not guarantee the byte cap fits.
-- Freeze extraction flags, `derive_units_v1` semantics/version, probe thresholds, bar input
-  hashes and scorer before any route-A measurement. Existing render statistics in
-  `docs/results.md` have been seen during this revision, before choosing the final thresholds;
-  exposure before the original proposal is not established. The thresholds below are proposals,
-  not a blind preregistration; freeze them in 4a0 before any route-A measurement.
+Settled (2026-11-07; synthetic-PDF tests `src/sources/worker/preflight_tests.rs`, results in
+`docs/results.md`; local bar facts in the owner's notes, aggregate only here):
+
+- **API fit.** The vendored fork (DEP-29) exposes per glyph quad, origin, size, argb, flags,
+  font name and `bidi`/`is_rtl`, per line `wmode` and `dir`. With the 4a flags (no
+  `COLLECT_STRUCTURE`, `SEGMENT` or `TABLE_HUNT`) top-level `blocks()` holds the text. With
+  `COLLECT_STRUCTURE` it holds only Struct blocks and the text is reachable only through
+  `structure().blocks()`; `SEGMENT`/`TABLE_HUNT` also create Struct blocks. `structured()`
+  drops Struct-block text (stays banned). `TextBlockType` has 5 kinds (0–4) and
+  `TextBlock::r#type()` panics on any other raw value: 4a checks the raw type first.
+  Right-to-left and vertical text are untested (no such base-14 fixture); 4a adds them.
+- **Coordinates.** MuPDF page space is y-down with its origin at the CropBox origin; 4a's
+  single transform to the staged displayed space is checked against staged inspection
+  geometry (rotation included) before text is accepted.
+- **Clipping (owner: `CLIP` off).** MuPDF sets `CLIPPED` only for render mode 7 (clip only,
+  together with `FILLED`); modes 4–6 are visible and unflagged; mode 3 (invisible) has neither
+  `FILLED` nor `STROKED`. Glyphs outside the page box and glyphs removed by an in-page clip
+  (a clip rectangle, or text drawn later inside a glyph-outline clip) carry no flag: 4a computes
+  off-page/partly-off-page from quads, marks no-fill-no-stroke glyphs invisible, and in-page
+  clipping stays the documented limit caught by review against the render. With `CLIP` on,
+  wholly clipped or off-page glyphs disappear silently (partly clipped ones stay).
+- **Tags.** IT 2025 is untagged; Bare Bones EN is tagged (catalogue level, including tables).
+  The later versioned tag slice stays (owner rule); its cost estimate is owed with 4a.
+- **Encoding (frozen for `mimik-reading-v1`).** Columnar parallel arrays with a shared font
+  table and `i32` coordinates in 1/1024 displayed pt, rounded to nearest (maximum round-trip
+  error 1/2048 pt); a non-finite value or one outside −2,097,152 to 2,097,151.999 pt refuses the
+  page. About 98 bytes per glyph as JSON (verbose per-glyph records about 280): a dense
+  9,000-glyph page is 0.89 MB, 11% of the 8 MiB page cap, so the byte cap binds at about
+  85,000 glyphs per page, well before the 1,000,000-glyph count cap.
+- **IT reference and scorer.** The reference is `{"note", "pages": {page or range: [row]}}`,
+  one fact per row, identity page key plus index; the scorer (recovered, kept local with the
+  reference) normalizes by NFC, dash/quote/× mapping, soft-hyphen and "a- b" joining, removal
+  of all whitespace and lowercasing, so it merges adjacent numbers ("10 5" equals "105"): the
+  separate numeric/dice/sign inspection is required. The EN reference keeps this format.
+
+Remaining before any route-A measurement:
+
+- Claude drafts the Bare Bones reference from the original page images only (owner decision);
+  the owner checks every row and the page list. Freeze the PDF hash, page list, reference
+  hash, row identities and N.
+- Freeze `derive_units_v1`, the probe thresholds, the bar input hashes and the scorer (by
+  hash) before the first route-A measurement. The thresholds below are proposals, not a blind
+  preregistration: render statistics in `docs/results.md` were seen while writing them.
 
 ## 4a. Worker reading and diagnostics
 
@@ -61,7 +70,7 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
   `CLIPPED`, `SYNTHETIC` and CID/GID status per glyph, including undecodable glyphs.
   A glyph with `UNICODE_IS_CID`, even if its numeric value is a valid Unicode scalar, or with
   `char()` returning `None`, is always undecodable: emit U+FFFD as text and retain the CID only
-  diagnostically. Retain line direction and character bidi according to the 4a0 wrapper decision.
+  diagnostically. Retain line direction and character bidi (fork accessors, 4a0).
   Interpret `CLIPPED` as clip-mode text, possibly invisible independently of `FILLED`/`STROKED`.
   Compute `off_page`/`partly_off_page` from glyph quads against the displayed page box, separately
   from MuPDF flags; retain the original quads and these explicit statuses.
@@ -356,8 +365,8 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 ## Slices, checks and landing
 
-- **4a0:** API/wrapper decision, aggregate tag status, IT reference/scorer inspection, aggregate
-  size measurements and owner choices; freeze encoding/flags/versions/thresholds/bar inputs.
+- **4a0:** remaining: the Bare Bones reference (drafted, owner-checked) and the freeze of
+  `derive_units_v1`, thresholds, bar input hashes and scorer.
 - **4a:** block/line/glyph records with `tag_status: not_collected` and diagnostic probe.
   The bounded StructTreeRoot/MCID diagnostic walk and fixtures 6/7 are required here.
   Independent review before completion; fake-reader max/over-limit/cyclic-reference tests,
@@ -388,10 +397,8 @@ Umbrella: `docs/source-import-plan.md`, step 4. Remaining work only.
 
 ## Owner decisions (2026-11-05)
 
-- **Wrapper gaps:** change the renderer pin rather than wrap MuPDF. Before 4a0, find a
-  maintained crate or version that exposes line direction, per-character bidi and the
-  structure tree through safe APIs (licence, maintenance, build cost, REL-2), recorded as a
-  DEP decision; if none exists, come back to the owner before any wrapper.
+- **Wrapper gaps:** no maintained crate exposes them, so the owner chose a local fork of
+  mupdf-rs, vendored until upstream releases it (DEP-29).
 - **Tag partitioning:** decided after the 4a0 preflight from the bar PDFs' tag status (defer
   if both are untagged; otherwise keep the later versioned tag slice and estimate its cost).
 - **Flags/ligatures/spaces:** the 4a flag set as proposed: raw ligature scalars, inferred
