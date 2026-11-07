@@ -41,7 +41,7 @@ nothing re-verifies the file. Pages are published inside the render callback
 | 2,000 pages | `operations.rs:52-58`, `records.rs:411`, `geometry.rs:72`, migration 026 `:22,30,55,60,129`; inspection frame 9 MiB `records.rs:13`, migration `:14` |
 | Whole-source PDF BLOB | `003_sources.sql:10` `sources.pdf BLOB NOT NULL`; written only by `import.rs:584`, read only by the `import.rs:375` equality check; no other reader |
 | Tests | `upload_tests.rs:655,1835,1974`, `upload_route_tests.rs:715`, `worker/tests.rs` (about 10 `Input::Bytes`/`from_bytes` sites), `preflight_tests.rs`, `live_tests` 128 MiB cases |
-| Docs | `sources-and-retrieval.md` (worker/RSS sections near `:28-70`, upload `:89-93`, `:110`, staging `:154-186`, contract `:217`, import `:286-287`); `release-scope.md:33` and its backup note (`:119`); `limitations.md` C5, L-SRC-3, L-SRC-8; `source-upload-plan.md` historical totals; the TODO entry |
+| Docs | `sources-and-retrieval.md` (worker/RSS sections near `:28-70`, upload `:89-93`, `:110`, staging `:154-186`, contract `:217`, import `:286-287`); `release-scope.md:33` and its backup note (`:119`); `limitations.md` C5, L-SRC-3, L-SRC-8; `source-upload-plan.md` historical totals; `source-route-a-plan.md` ("PDF BLOB once"); the TODO entry |
 
 ## Design decisions
 
@@ -76,7 +76,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    - **On any mismatch (`document_changed`)** the upload fails permanently: all its page rows and
      files are removed (not only the current batch's, so no page from a changed file is kept),
      `source_uploads.document_changed` is set, inspect/render/retry are refused, only discard
-     remains, and `contract()` refuses a changed or failed upload. Pins are checked after each
+     remains, and `contract()` refuses a changed upload and requires the last render job to be `succeeded`. Pins are checked after each
      worker exits and before the next batch is reserved; because pages are published inside the
      callback, the delete-all rule is the backstop for the batch in flight.
    - *Existing staged uploads after upgrade* (0600, no persisted pins) work unchanged: pins are
@@ -110,51 +110,94 @@ nothing re-verifies the file. Pages are published inside the render callback
    `geometry.rs:72`, migration CHECKs (`pdf_page` 1-20,000; `selected_pages` <= 20,000 entries,
    about 140 KB; `pages_done`/`total` <= 20,000). The inspection budget scales per page: the first
    frame (`Document`) carries the page count, so the parent extends its wall deadline per page
-   once it reads it; the CPU ceiling follows file size and `MAX_PAGES`. Constants come from the
+   once it reads it; the CPU limit must be fixed before the page count is known (`runner.rs:454` rejects > 200 s): it stays a ceiling of 200 s, sized from file size up to that, and the per-page wall deadline remains the enforcing bound; the guard is not changed. Constants come from the
    cold-disk measurements of slice 6.
 6. **Selection and UI without a count.** Any ascending, distinct subset of the inspected pages.
    The page screen lists 100 pages per screen with a range input ("1-500, 520") and "select all";
    `set` takes ranges. The action body limit (131,072 B) must cover ranges, not 20,000
    checkboxes. The contract (`mimik-staged-v1`) drops `limits` and the PNG sum; step 4 reads it
    per page (about 12 MB at 20,000 pages); no consumer exists yet.
-7. **Exclusions: bound per page, not per page count.** One exclusion keeps one box per page (four
-   numbers within 0-4000). `pages <= 64`, 385-byte and 32 KiB totals are replaced by: one box per
-   page, at most 96 bytes of JSON per page; any number of pages within the selection
-   (`upload_exclusions.rs:276`, migration view `:127`). Each revision stores the whole row, so
-   history grows with pages x revisions (about 2 MB per revision at 20,000 pages): noted in
-   `limitations.md`. Today's proposal rule (`propose_keyed`, `upload_exclusions.rs:437`: a line
-   must recur on at least max(3, ceil(3n/5)) pages) makes proposals over 64 pages routine for
-   selections of 107 pages or more, so the old cap would have broken them.
-8. **Proposals stream pages.** `upload_exclusions.rs:141-170` reads every `text-N.json` into server
-   memory (the 512 MiB text total was its bound). Replace by: read, hash-verify, parse and validate
-   one page at a time and keep only candidate groups (normalized lines of 4-200 characters with
-   their boxes). Memory is bounded by a cap on live groups (50,000) and candidate text bytes
-   (64 MiB; worst case 50,000 x 200 chars x 4 B = 40 MB plus boxes); reason: the proposal runs on
-   the server under the upload gate, without cancellation. A group is dropped once it cannot reach
-   the required page count (`seen + remaining pages < required`), which keeps real books far under
-   the cap. Hitting a cap refuses with the existing `COMPARISON_LIMIT` ("too many distinct
-   lines"). Output must be identical to the current function on corpora under the cap (test).
+7. **Exclusions: several boxes per page, bounded per page.** Owner decision: up to 8 boxes per
+   page (header, footer, page number, side tabs), any number of pages within the selection.
+   Today `boxes` is `BTreeMap<u32, BoxPoints>` (one box, `upload_exclusions.rs:37-42`) and view
+   `source_upload_invalid_exclusion` requires `json_array_length(boxes.$."p") = 4` (migration 026
+   `:127-133`). New shape: `boxes: BTreeMap<u32, Vec<BoxPoints>>`, 1-8 boxes per listed page,
+   distinct, each valid and inside the page as in `validate` (`:284-304`, applied per box); the
+   view checks array-of-arrays, 1-8 entries, four numbers per entry in 0-4000, min < max.
+   - *Bytes per page:* stored coordinates are rounded outward to 0.01 pt (min floor, max ceil, so
+     coverage is never lost), making each number at most 7 characters ("4000.00" shortest form
+     is "4000"); a box is at most 4 x 8 + 2 = 34 B, eight boxes plus key and separators at most
+     320 B. The view enforces 384 B per page (`length(value)`), derived from this worst case
+     rather than from shortest-form f64 text (up to 24 characters) which would overflow a naive
+     96-byte bound. At 20,000 pages a revision is at most 6.4 MB; the history grows by that per
+     revision (noted in `limitations.md`).
+   - *Several proposals:* each proposal carries one box per page; the Owner can confirm more than
+     one in one exclusion. The `exclusion` row keeps one rationale and replaces `proposal_fingerprint`
+     by `proposal_fingerprints` (JSON array of at most 8 distinct 64-hex values, none for manual
+     boxes); the eight-box page limit bounds the proposal count. The proposal screen
+     (`upload_page.html:18-20`, `Editor` list in `auth/uploads.rs:473`) gets a confirm control per
+     proposal and a combined preview; `set` carries the confirmed proposal indices and per-page
+     edits, not 20,000 pages of coordinates: `set_exclusion` already re-runs the proposal
+     (`:184,194`) and rebuilds boxes server-side; manual boxes are limited by the action body.
+   - *Masking/crossing:* step 4 treats a text line as excluded when it crosses any box of its
+     page (staging only validates and carries boxes; no staging code masks). The contract carries
+     `boxes` per page as lists; the revision/fingerprint rules of `set_exclusion` apply to the
+     whole set. Today's proposal rule (`propose_keyed`, `:437`: recur on at least
+     max(3, ceil(3n/5)) pages) makes proposals over 64 pages routine from 107 selected pages.
+8. **Proposals stream pages, with bounded memory and time.** `upload_exclusions.rs:141-170` reads
+   every `text-N.json` into server memory (the 512 MiB text total was its bound). Replace by:
+   read, hash-verify, parse and validate one page at a time; keep only candidate groups.
+   - *Memory budget* (live accounting, 64 MiB): per group seed and text bytes plus **every live
+     box entry** at about 64 B (`Group.boxes` grows one entry per matched page, `:496-509`, and
+     recurring groups are never pruned: 20,000 pages x 50,000 recurring lines would be 10^9
+     entries). Reaching the budget refuses with the existing `COMPARISON_LIMIT` ("too many
+     distinct lines"); at most 50,000 groups (tombstones included).
+   - *Same output as today (N1):* today's per-text rules stay exactly (first match in index order,
+     per-text 2,000,000-comparison budget, whole texts dropped when no group can reach the
+     threshold, `:470-490,:510-524`). A group that alone cannot reach the threshold is not
+     removed: only its `boxes` are freed, and it stays as a tombstone (seed and index) in
+     `by_text` so later scans and budgets behave as before; tombstones count against the group
+     cap. Tests: identical output with the current function on duplicate-line, budget-exhaustion
+     and ordinary corpora; the hostile recurring-line case (a few thousand pages x many recurring
+     lines) refuses with `COMPARISON_LIMIT` at the budget, memory flat.
+   - *CPU (N2):* proposals hold the upload gate (`:91-100`; `set_exclusion` repeats them) with no
+     CPU bound (about 10^11 comparisons are possible). Add a global comparison budget of
+     50,000,000 per proposal run (about one second; reason: gate hold time) checked with the
+     per-text budget; exhaustion refuses with `COMPARISON_LIMIT`. Constant confirmed in slice 6.
 9. **Finished-source PDFs are content-addressed files.** A `sources/` directory beside the
    database: `<sha256>.pdf`, directory 0700, files 0400, written to a temp name with
    `O_CREAT|O_EXCL`, fsynced, `renameat`ed, directory fsynced; opened via a dirfd with
    `O_NOFOLLOW`; the name is the 64-hex `pdf_hash` from the database, never user input.
    `sources.pdf` is dropped; the row keeps `pdf_hash`; identical PDFs share one file (resolves C5).
    This removes SQLite's BLOB limit (about 1 GB) and the in-memory copy. Interface for route A /
-   step 4 (replacing "insert the PDF BLOB once"): `put(file, sha256)` (hard link from the staging
-   file when on the same filesystem, else verified copy; idempotent) and `open(hash) -> File`
+   step 4 (replacing "insert the PDF BLOB once"): `put(file, sha256)` (a **verified copy**, never a
+   hard link: a link would make the staged file's link count 2 and a later job would report
+   `document_changed`; idempotent) and `open(hash) -> File`
    (no-follow, regular, streaming hash check before use; mismatch is a fixed `pdf_corrupt`
    error). The CLI import (`import.rs:375,584`) stores through the same call after its hash check
    and compares by hash.
-   - *Migration.* A Rust pre-step at store open, before SQL migration 029 drops `sources.pdf`:
-     write each blob to the store, verify SHA-256 equals `pdf_hash` (a mismatch aborts with a fixed
-     message; nothing is dropped), then the SQL drops the column. Idempotent if interrupted; the
-     file set is complete before the column goes.
+   - *Migration.* The migration loop (`store.rs:111-117`, one IMMEDIATE transaction) runs a Rust
+     pre-step only when version >= 3 and < 29, just before 029: read blobs one at a time
+     (`sqlite3_blob_open`, streaming), write each to the store, verify SHA-256 equals `pdf_hash`,
+     then SQL drops the column. Idempotent if interrupted (files are complete before the column
+     goes). **Disk (N5):** the pre-step doubles every PDF and `DROP COLUMN` rewrites every
+     `sources` row inside the transaction (journal about the blob total), so before it starts
+     the step checks free space >= 2 x total blob bytes + 512 MiB and refuses with a fixed message
+     naming the needed size. `VACUUM` is not run by migration; the reference doc tells the Owner
+     to run it (or a CLI `compact`) afterwards to reclaim the space.
+   - *Hash failure.* Default: abort with a fixed message naming source ids (no paths). Ways out,
+     documented: restore from backup, or a CLI command that moves the bad blob to
+     `sources/quarantine/` and drops only that row's PDF.
    - *Backup/restore.* The database file alone no longer holds PDFs: `release-scope.md:119` and
      the reference doc say the backup is the database file plus `sources/`; a missing file is
      reported at startup (count only, no paths) and as `pdf_corrupt` on use; existing sheets and
      evidence do not read the PDF and keep working.
-   - *Orphans.* Temp files and files whose hash no `sources` row names are removed by the startup
-     and hourly sweep, never while an import holds the store (same lock as import).
+   - *Orphans and ordering (N4).* `import-source` is another process (`main.rs:460`) and the
+     rundir lock covers only the assistant, so the sweep needs its own protocol: a cross-process
+     `flock` on `sources/`, shared by `put` from before the file is created until the database row
+     commits, exclusive for the sweep; additionally the sweep skips files younger than one hour.
+     Ordering: temp write, fsync, rename, directory fsync, then the DB commit. Route A's
+     finalization follows the same rule (put before the finalizing row).
 10. **Kept limits, each with its reason** (written into `sources-and-retrieval.md`): form field
     sizes and the 4 KiB pre-CSRF read (unauthenticated memory); per-PNG 4,096 x 8,192 px, 12 Mpx,
     12 MiB, 64 MiB decode (decompression bombs); per-page text 8 MiB, depth 32, 40,000 nodes,
@@ -195,7 +238,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    under their final names (keeping `fingerprint_key` from 027); copy the parent, then pages,
    exclusions with full history, jobs (a leftover `source_png_limit` reason maps to `too_large`);
    drop the old children, then the old parent; recreate the views, every trigger and the index;
-   `PRAGMA foreign_key_check` must be empty. The migration test seeds rows in all four tables
+   `PRAGMA foreign_key_check` must be empty, and both `source_upload_invalid_*` views must return no rows after the triggers are recreated (asserted in the migration). The `boxes` shape change (single box to list, `proposal_fingerprints`) is part of the copy. The migration test seeds rows in all four tables
    (selection, pages, two exclusion revisions, a job in each state), asserts equality after, and
    that 20,000-page rows are accepted and the old caps are gone.
 3. **Pins, verification, immutability** (decision 2): O_NOFOLLOW opens, pins into launch, per-job
@@ -213,7 +256,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    past 15 minutes of fake time succeeds while 30 s idle fails.
 5. **Totals, selection, exclusions, proposals** (decisions 5-8 except the budget): remove
    selection/PNG/text/total checks and `source_png_limit` code; ranges UI; contract without
-   `limits`; per-page exclusion bounds; streaming proposal with caps. Tests: 500 and 20,000
+   `limits`; several boxes per page, the confirm-several-proposals screen, the 384 B per-page bound; streaming proposal with the memory and comparison budgets. Tests also: 8 boxes per page accepted, 9 and a worst-case-digits box (rounding outward) checked against the view. Tests: 500 and 20,000
    selected pages (fake worker); old per-upload cases now succeed while per-PNG/per-page cases
    still fail; an exclusion over 200 pages; proposal identity with the current function and
    `COMPARISON_LIMIT` on hostile many-distinct-lines input; server memory flat across 500 text
@@ -224,10 +267,10 @@ nothing re-verifies the file. Pages are published inside the render callback
    per-page inspection budget constants from the measurements; time `progress` polls and the page
    screen at 20,000 pages.
 7. **Content-addressed PDF store** (decision 9): store, interface, Rust pre-step, migration 029,
-   CLI import through it, sweep, backup note. Tests: legacy blobs migrated and verified (hash
+   CLI import through it, sweep with the `flock` and age rule, backup note; test fixtures inserting `pdf` (`documents.rs:509`, `search.rs:455`, `campaigns/tests.rs`) updated. Tests: legacy blobs migrated and verified (hash
    mismatch aborts untouched), an interrupted migration resumes, two sources with one PDF share a
    file, a tampered or missing file is `pdf_corrupt`, a symlink in the store directory is refused,
-   orphans are swept, an import racing the sweep keeps its file.
+   orphans are swept, an import (separate process) racing the sweep keeps its file; the hash-mismatch abort and the quarantine command; insufficient free space refuses before the pre-step; the staged file's link count stays 1 after `put`.
 8. **Docs.** Rewrite the reference sections in the table (each kept limit with its reason),
    `release-scope.md`, `limitations.md` (add: damaged-file inspection bound, exclusion history
    growth, CLI memory bounds; reword C5, L-SRC-3, L-SRC-8 as CLI-only), `decisions.md` DEP-29,
@@ -251,6 +294,5 @@ of agent work run in containers; weekday builds at 2 cores.
 
 ## Open questions for the owner
 
-1. Migration 029 aborts startup if a legacy `sources.pdf` blob fails its hash (it should not:
-   import verifies the hash). Default: abort with a fixed message and restore from backup; or keep
-   that row's blob and skip dropping the column?
+None open. Decided: pages cap by frame, several boxes per page, hash-failure default (abort, with
+restore or quarantine command), idle-only deadline.
