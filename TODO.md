@@ -77,7 +77,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
   PNGs, 512 MiB text, 20,000 units) and the fixed 2 GiB staging total (use free space minus the
   512 MiB margin); keep per-page/per-request bounds and one upload at a time; CLI import keeps
-  its JSON bounds. Next: plan, review, implement, before route A's 4c builds on staging.
+  its JSON bounds. Plan reviewed and merged (`docs/source-limits-plan.md`, also several exclusion
+  boxes per page and a content-addressed PDF store). Next: implement slice by slice, before route
+  A's 4c builds on staging.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
