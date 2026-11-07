@@ -73,6 +73,19 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+- **Review-screen usability (owner, 2026-11-07, first real review of the IT pages):**
+  1. Bug: `mimik import-source` ends with "Open /sources." (`src/main.rs:463`); the screen is
+     `/admin/materials`.
+  2. Accepting a unit as extracted should not require a rationale (owner wrote "Ok"); require it
+     only where a decision needs one.
+  3. After a successful save the page reloads at the top with an empty form, so it looks unsaved:
+     confirm the save visibly and move to the next unit still to review (no scrolling back).
+  4. A list of all units still to review (per page and per source), to jump between them.
+  5. The decision form is too long: the exclusive choices belong in tabs or a segmented control.
+  6. The page image with the unit boxes should stay visible while scrolling (sticky), and each
+     box should show its state by colour (unreviewed, accepted, corrected, rejected).
+  7. The checkbox in the review pages list has no clear meaning: label it or remove it.
+
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
   PNGs, 512 MiB text, 20,000 units) and the fixed 2 GiB staging total (use free space minus the
