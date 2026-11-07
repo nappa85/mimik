@@ -280,9 +280,10 @@ Remaining before any route-A measurement:
   - **First** IMMEDIATE transaction: recheck Owner/session-bound CSRF, both revisions, current
     selection/render identities, the registered active job and the exclusion staging row with
     its attribution (`StagedContract.exclusion` alone lacks actor/time); resolve the registered
-    edition; insert the source as `finalizing`. At most one `finalizing` source per upload ID
-    (unique constraint): under the control lock, a retry first deletes a leftover hidden source
-    of the same upload before inserting its own.
+    edition; assert that no hidden source exists for the upload (unique constraint, at most one
+    `finalizing` source per upload ID); insert the source as `finalizing`. A retry first
+    removes a leftover hidden source of the same upload through the cleanup path below, before
+    this transaction and only once no job owns it.
   - **Batch** transactions: each inserts one bounded batch of pages (PDF BLOB once, original
     PNGs, page facts/probe provenance, raw and units rows, units initially `unreviewed`, search
     projections, and the batch's exclusion rejections below), after checking that its own
@@ -296,7 +297,10 @@ Remaining before any route-A measurement:
   - **Hidden means hidden everywhere:** every query over sources, units, pages, documents and
     search projections filters to visible sources (one shared predicate): review screens,
     search/FTS, assistant retrieval, suggestion reports, edition coverage, exports and backups,
-    source lists and counts, duplicate-PDF-hash checks and receipt lookups.
+    source lists and counts, duplicate-PDF-hash checks and receipt lookups. Two uploads of
+    the same PDF may therefore finalize in parallel; the last transaction's `register_import`
+    applies the owner-choice and overlap rules against the sources visible at that moment, so
+    no duplicate check belongs only in the first transaction.
   - **Cleanup:** startup and hourly cleanup delete a `finalizing` source only after confirming,
     under the lock the job holds when it registers and writes a batch, that no job owns it;
     deletion runs in bounded batches too. Migration guards make raw, units, page facts and
