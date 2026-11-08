@@ -37,6 +37,7 @@ pub(crate) fn parse_grid(input: &str) -> Result<Vec<Vec<String>>, AppError> {
     }
     let mut rows = Vec::new();
     for line in input.lines() {
+        let line = strip_edges(line);
         let mut cells = vec![String::new()];
         let mut chars = line.chars().peekable();
         while let Some(c) = chars.next() {
@@ -49,7 +50,7 @@ pub(crate) fn parse_grid(input: &str) -> Result<Vec<Vec<String>>, AppError> {
             }
         }
         let cells: Vec<String> = cells.into_iter().map(|c| c.trim().to_owned()).collect();
-        if cells.iter().all(String::is_empty) {
+        if cells.iter().all(String::is_empty) || is_separator(&cells) {
             continue;
         }
         if cells.len() > MAX_COLUMNS || rows.len() >= MAX_ROWS {
@@ -65,14 +66,37 @@ pub(crate) fn parse_grid(input: &str) -> Result<Vec<Vec<String>>, AppError> {
     Ok(rows)
 }
 
+/// A line written as `| a | b |` (a pasted Markdown table) has its edge bars removed.
+fn strip_edges(line: &str) -> &str {
+    let t = line.trim();
+    if t.len() >= 2 && t.starts_with('|') && t.ends_with('|') {
+        let inner = &t[1..t.len() - 1];
+        let slashes = inner.len() - inner.trim_end_matches('\\').len();
+        if slashes.is_multiple_of(2) {
+            return inner;
+        }
+    }
+    line
+}
+
+/// A Markdown header separator (`---`, `:---:`), not data.
+fn is_separator(cells: &[String]) -> bool {
+    cells.iter().all(|c| {
+        let c = c.trim_matches(':');
+        c.len() >= 3 && c.bytes().all(|b| b == b'-')
+    })
+}
+
 /// The editable text of a grid (the inverse of [`parse_grid`]).
 pub(crate) fn format_grid(rows: &[Vec<String>]) -> String {
     rows.iter()
         .map(|row| {
-            row.iter()
+            let cells = row
+                .iter()
                 .map(|cell| cell.replace('\\', "\\\\").replace('|', "\\|"))
                 .collect::<Vec<_>>()
-                .join(" | ")
+                .join(" | ");
+            format!("| {cells} |")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -101,7 +125,12 @@ pub(crate) fn columns_to_grid(columns: &[String]) -> Result<Vec<Vec<String>>, Ap
                 .collect()
         })
         .collect();
-    if rows.len() > MAX_ROWS || columns.len() > MAX_COLUMNS {
+    if rows.len() > MAX_ROWS {
+        return Err(AppError::Invalid(
+            "A selected unit has more than 200 lines; it is too long to become a table here.",
+        ));
+    }
+    if columns.len() > MAX_COLUMNS {
         return Err(AppError::Invalid(INVALID));
     }
     Ok(rows)
@@ -174,6 +203,21 @@ mod tests {
         let grid = parse_grid("a | b | c\n\n  \nd").unwrap();
         assert_eq!(grid, vec![vec!["a", "b", "c"], vec!["d", "", ""]]);
         assert_eq!(parse_grid("a\\x | \\q").unwrap(), vec![vec!["a\\x", "\\q"]]);
+    }
+
+    #[test]
+    fn pasted_markdown_loses_edge_bars_and_separator_row() {
+        let grid =
+            parse_grid("| Name | Dmg |\n| --- | :---: |\n| Sword | d6 |\n| a \\| |").unwrap();
+        assert_eq!(
+            grid,
+            vec![vec!["Name", "Dmg"], vec!["Sword", "d6"], vec!["a |", ""]]
+        );
+        let rows = vec![
+            vec![String::new(), "x".to_owned()],
+            vec!["y".to_owned(), String::new()],
+        ];
+        assert_eq!(parse_grid(&format_grid(&rows)).unwrap(), rows);
     }
 
     #[test]

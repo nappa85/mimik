@@ -8,7 +8,8 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     // Callers may already have selected an older migration fixture version.
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     db.execute_batch(
-        "DROP VIEW IF EXISTS source_upload_invalid_exclusion;
+        "DROP TABLE IF EXISTS source_owner_tables;
+         DROP VIEW IF EXISTS source_upload_invalid_exclusion;
          DROP VIEW IF EXISTS source_upload_invalid_inspection;
          DROP TABLE IF EXISTS source_upload_exclusions;
          DROP TABLE IF EXISTS source_upload_pages;
@@ -551,7 +552,7 @@ pub(super) fn add_owner_table(
     let owner = OwnerRow {
         kind: "Table",
         polygon: &polygon,
-        raw_text: project(&html)?,
+        raw_text: super::tables::plain(&table.cells),
         html: &html,
         expected_revision: table.revision,
     };
@@ -568,6 +569,10 @@ pub(super) fn add_owner_table(
         sidecar(tx, event)?;
         events.push(event);
     }
+    tx.execute(
+        "INSERT INTO source_owner_tables(unit_id,operation_id,first_event_id) VALUES(?1,?2,?3)",
+        params![unit, operation, events[0]],
+    )?;
     Ok((unit, events))
 }
 

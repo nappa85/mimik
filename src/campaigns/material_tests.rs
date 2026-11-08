@@ -4337,6 +4337,11 @@ async fn material_table_creation_unions_boxes_escapes_cells_and_rejects_original
             assert_eq!(raw, raw_before);
             let page: (i64, i64) = db.query_row("SELECT complete,revision FROM source_pages WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
             assert_eq!(page.0, 0);
+            let (raw_text, links): (String, i64) = db.query_row("SELECT u.raw_text,(SELECT count(*) FROM source_owner_tables t WHERE t.unit_id=u.id) FROM source_units u WHERE u.id=?1", [unit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            assert_eq!(raw_text, "Name | <script>bad()</script>\nSword | d6 & \"d8\"");
+            assert_eq!(links, 1);
+            assert!(db.execute("UPDATE source_owner_tables SET operation_id='x'", []).is_err());
+            assert!(db.execute("DELETE FROM source_owner_tables", []).is_err());
             Ok(())
         })
         .await
@@ -4519,7 +4524,7 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TRIGGER source_unit_origin_insert; {}",
+                "DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;
@@ -4569,7 +4574,7 @@ async fn material_table_form_prefills_columns_and_saves_through_the_router() {
     let html = body(response).await;
     assert_eq!(
         field_value(&html, "textarea[name=cells]"),
-        "Name | Damage \\| a\\\\b\nSword | d6\nBow | "
+        "| Name | Damage \\| a\\\\b |\n| Sword | d6 |\n| Bow |  |"
     );
     let hidden = scraper::Selector::parse("input[type=hidden][name=unit]").unwrap();
     let units: Vec<_> = scraper::Html::parse_document(&html)
@@ -4673,9 +4678,7 @@ async fn material_refused_unit_save_shows_error_beside_unit_summary_and_focus_ta
     assert!(error.text().collect::<String>().contains("not saved"));
     assert!(
         parsed
-            .select(&select(
-                ".error-summary[role=alert] a[href='#unit-1-error']"
-            ))
+            .select(&select(".error-summary a[href='#unit-1-error']"))
             .next()
             .is_some()
     );
@@ -4813,4 +4816,177 @@ async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
             .next()
             .is_some()
     );
+}
+
+const PAGE_TWO: &str = "INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47'); INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(900,2,'p2','Text','[[1,1],[5,1],[5,5],[1,5]]','<p>x</p>','x');";
+
+#[tokio::test]
+async fn material_table_history_notice_reselect_and_accepted_lookup_end_to_end() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let (unit, _) = store
+        .material_create_table(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            table_of(
+                &[(1, 1), (2, 1)],
+                grid(&[&["Name", "Damage"], &["Sword", "d6"]]),
+            ),
+        )
+        .await
+        .unwrap();
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(
+        page.contains(&format!("Table unit {unit} created from units 1, 2.")),
+        "{page}"
+    );
+    // The confirmation appears only for a true link.
+    let link = format!("/admin/materials/pages/1?units=50&table={unit}");
+    assert!(
+        body(router_get(&app, &auth[0], &link).await)
+            .await
+            .contains(&format!("Created table unit {unit}"))
+    );
+    assert!(
+        !body(router_get(&app, &auth[0], "/admin/materials/pages/1?table=1").await)
+            .await
+            .contains("Created table unit")
+    );
+    // Re-selecting the table prefills plain rows, never box drawing.
+    let again = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new?unit={unit}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        field_value(&again, "textarea[name=cells]"),
+        "| Name \\| Damage |\n| Sword \\| d6 |"
+    );
+    // Accepting makes the table evidence: lookup text and the search index carry its cells.
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            unit,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=50").await).await;
+    let lookup = field_value(&page, &format!("pre[data-lookup-unit='{unit}']"));
+    assert!(
+        lookup.contains("Sword") && lookup.contains("d6"),
+        "{lookup}"
+    );
+    let hits: i64 = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT count(*) FROM source_search_fts WHERE source_search_fts MATCH 'Sword'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(hits >= 1);
+}
+
+#[tokio::test]
+async fn material_table_refuses_other_page_units_and_reports_bounds() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| Ok(db.execute_batch(PAGE_TWO)?))
+        .await
+        .unwrap();
+    // Finalize as `finalize_material` does, with the second page's hash after the first's.
+    store
+        .run(|db| {
+            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":200,"height_points":300},{"pdf_page":2,"width_points":200,"height_points":300}]});
+            db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64), serde_json::to_vec(&prepared)?])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)", ["c".repeat(64)])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(2,1,?1)", ["d".repeat(64)])?;
+            db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)", params!["a".repeat(64), "b".repeat(64)])?;
+            crate::sources::documents::register_import(db, 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // A unit of another page of the same source is refused on GET and POST.
+    let response = router_get(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/tables/new?unit=1&unit=900",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/tables",
+        review_form(&[
+            ("revision", "1"),
+            ("unit", "900:1"),
+            ("cells", "a"),
+            ("rationale", "r"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let before = counts(&store).await;
+    // More than 16 units on GET.
+    let many: String = (1..=17)
+        .map(|u| format!("unit={u}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let response = router_get(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/pages/1/tables/new?{many}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body(response).await.contains("Choose 1-16"));
+    // Stored-size bounds: 64 KiB of HTML and 20,000 characters of text.
+    let tall_text: Vec<Vec<String>> = vec![vec!["x".repeat(1000)]; 21];
+    assert!(matches!(
+        store
+            .material_create_table(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                table_of(&[(1, 1)], tall_text)
+            )
+            .await,
+        Err(AppError::Invalid(_))
+    ));
+    let big_html: Vec<Vec<String>> = vec![vec!["&".repeat(1000); 14]; 4]; // 56 cells * 5000 bytes
+    assert!(crate::sources::tables::html(&big_html).len() > 65_536);
+    assert!(matches!(
+        store
+            .material_create_table(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                table_of(&[(1, 1)], big_html)
+            )
+            .await,
+        Err(AppError::Invalid(_))
+    ));
+    assert_eq!(counts(&store).await, before);
 }

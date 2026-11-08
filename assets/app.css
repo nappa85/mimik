@@ -140,3 +140,8 @@ del { background: #ffdddd; color: #501515; }
 textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b42329; }
 .field-error:focus { outline: 3px solid #b42329; outline-offset: 2px; }
 .select-unit { margin: .2rem 0; }
+.decision input[type="radio"], .select-unit input { display: inline-block; width: auto; }
+.decision > label[for^="decision-"] { width: auto; margin: 0 .5rem .4rem 0; padding: .3rem .7rem; border: 1px solid #90998e; border-radius: 6px; }
+.decision input[type="radio"]:checked + label { background: #e6efe2; border-color: #1a7f37; font-weight: 700; }
+.decision input[type="radio"]:focus-visible + label { outline: 3px solid #075ba6; }
+.select-unit label { display: inline-block; width: auto; margin: 0 0 0 .4rem; }

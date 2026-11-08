@@ -124,6 +124,8 @@ struct PageCursor {
     saved_unit: i64,
     to: i64,
     then: Then,
+    /// An owner table the Owner just created (checked before it is announced).
+    table: i64,
 }
 /// The decision a redirect confirms; only these fixed words are ever rendered.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -456,6 +458,17 @@ async fn page(
     Query(mut c): Query<PageCursor>,
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
+    let mut created = 0;
+    if c.table > 0
+        && state
+            .sessions
+            .store
+            .material_is_owner_table(auth.clone(), id, c.table)
+            .await
+            .unwrap_or(false)
+    {
+        created = c.table;
+    }
     if c.saved != Saved::None {
         // A hand-made link must not claim a save that did not happen.
         let true_link = state
@@ -486,7 +499,14 @@ async fn page(
         )
         .await
         .map_err(|e| error(&e))?;
-    html(&Editor::new(data, screen, csrf, c))
+    let mut editor = Editor::new(data, screen, csrf, c);
+    if created > 0 {
+        editor.notice = format!(
+            "Created table unit {created}; the selected units are rejected. Check the new table against the original page before accepting it."
+        );
+        editor.notice_unit = created;
+    }
+    html(&editor)
 }
 fn png(bytes: Vec<u8>) -> axum::response::Response {
     (
@@ -1312,7 +1332,7 @@ async fn create_table(
                 .await
                 .unwrap_or(0);
             Ok(Redirect::to(&format!(
-                "/admin/materials/pages/{page}?units={cursor}#unit-{unit}"
+                "/admin/materials/pages/{page}?units={cursor}&table={unit}#unit-{unit}"
             ))
             .into_response())
         }

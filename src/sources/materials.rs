@@ -156,15 +156,25 @@ impl Store {
                 text("raw_text", 65_536)
             );
             let mut rows = Vec::with_capacity(units.len());
-            for unit in &units {
-                let (position, unit_revision, text): (i64, i64, String) = tx
-                    .query_row(&sql, params![page, unit], |r| {
-                        Ok((r.get(0)?, r.get(1)?, read_text(r, 2)?))
-                    })
-                    .optional()?
-                    .ok_or(AppError::SourceNotFound)?;
-                rows.push((position, *unit, unit_revision, text));
-            }
+            let mut total = 0_usize;
+            super::review::read_with_deadline(&tx, "table", || {
+                for unit in &units {
+                    let (position, unit_revision, text): (i64, i64, String) = tx
+                        .query_row(&sql, params![page, unit], |r| {
+                            Ok((r.get(0)?, r.get(1)?, read_text(r, 2)?))
+                        })
+                        .optional()?
+                        .ok_or(AppError::SourceNotFound)?;
+                    total += text.len();
+                    if total > super::tables::MAX_HTML_BYTES {
+                        return Err(AppError::Invalid(
+                            "The selected units hold more than 64 KiB of text; select fewer or shorter units.",
+                        ));
+                    }
+                    rows.push((position, *unit, unit_revision, text));
+                }
+                Ok(())
+            })?;
             rows.sort_unstable();
             auth.recheck_owner(&tx)?;
             tx.commit()?;
@@ -357,8 +367,8 @@ impl Store {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
             let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
                 q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
-            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
-                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?})))?.collect::<Result<Vec<_>,_>>()?};
+            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=source_review_events.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=source_review_events.operation_id AND source_review_events.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)) FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
+                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?)})))?.collect::<Result<Vec<_>,_>>()?};
             let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);
             page.units=units.rows.into_iter().map(|r|r.1).collect();page.events=events.rows.into_iter().map(|r|r.1).collect();
             Ok(MaterialPage{page,units_next:units.next,history_next:events.next})
@@ -464,6 +474,30 @@ impl Store {
                 .query_row(
                     "SELECT 1 FROM source_units u JOIN source_pages up ON up.id=u.page_id JOIN source_pages cp ON cp.id=?1 WHERE u.id=?2 AND u.state=?3 AND up.source_id=cp.source_id AND (up.id=cp.id OR ?4='page') AND (?4<>'done' OR NOT EXISTS(SELECT 1 FROM source_units x JOIN source_pages xp ON xp.id=x.page_id WHERE xp.source_id=cp.source_id AND xp.pdf_page>=cp.pdf_page AND x.state='unreviewed'))",
                     params![page, unit, state, then],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(found)
+        })
+        .await
+    }
+    /// Whether `unit` is an owner table on `page` (a "created" notice link must be true).
+    pub(crate) async fn material_is_owner_table(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+    ) -> Result<bool, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM source_owner_tables t JOIN source_units u ON u.id=t.unit_id WHERE u.id=?1 AND u.page_id=?2",
+                    params![unit, page],
                     |_| Ok(()),
                 )
                 .optional()?

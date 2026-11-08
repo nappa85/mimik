@@ -124,7 +124,7 @@ fn exclusion_migration_removes_legacy_guessable_fingerprints() {
                 [hash(b"test")],
             )?;
             db.execute_batch(
-                "ALTER TABLE source_uploads DROP COLUMN fingerprint_key; PRAGMA user_version=26;",
+                "ALTER TABLE source_uploads DROP COLUMN fingerprint_key; DROP TABLE source_owner_tables; PRAGMA user_version=26;",
             )?;
             Ok(())
         })
