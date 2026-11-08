@@ -79,6 +79,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   6. The page image with the unit boxes should stay visible while scrolling (sticky).
   - The "Next page with units to review" link skips pages that need only a completeness
     confirmation (no units, or all reviewed): add a separate "Next incomplete page" link.
+  - A refused save (e.g. a correction without rationale) must be impossible to miss: the error
+    shown next to the unit in red, focus moved there, and the page summary saying a save failed.
+  - Show only the fields a decision needs: accepted (no text field), corrected (corrected text;
+    rationale optional unless SRC-4 needs it: decide), rejected (rationale only). Same panel as
+    the tabbed form above.
+  - Tables split by the extractor into one unit per column (IT pages, Marker OCR): a "merge
+    selected units into one table unit" action (rejects the parts in one batch with the
+    reason, adds one owner unit whose box is their union and whose text is the rows), instead
+    of typing four corners by hand in "Add missing text".
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
