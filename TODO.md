@@ -84,10 +84,17 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   - Show only the fields a decision needs: accepted (no text field), corrected (corrected text;
     rationale optional unless SRC-4 needs it: decide), rejected (rationale only). Same panel as
     the tabbed form above.
-  - Tables split by the extractor into one unit per column (IT pages, Marker OCR): a "merge
-    selected units into one table unit" action (rejects the parts in one batch with the
-    reason, adds one owner unit whose box is their union and whose text is the rows), instead
-    of typing four corners by hand in "Add missing text".
+  - Unit restructuring actions (owner, 2026-11-08), each rejecting the original units in one
+    batch with the reason and adding owner units (originals and raw stay intact):
+    1. **Merge units:** several selected units become one text unit (box = their union, text
+       joined in reading order).
+    2. **Split unit:** one unit covering several columns or blocks becomes several units, the
+       owner drawing or adjusting each part's box and text.
+    3. **Create table:** selected units (one per column, as Marker often splits them) or one
+       unit holding several columns become one table unit with rows and cells, so a row's
+       facts (name, damage, cost) stay together.
+    All three replace typing four corners by hand in "Add missing text"; they need a unit kind
+    for tables (owner units are `Text` only today) and a design pass before implementation.
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
