@@ -87,6 +87,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
        owner drawing or adjusting each part's box and text.
     Merge and split replace typing four corners by hand in "Add missing text"; they need a design
     pass before implementation (owner units may be `Text` or `Table` since migration 028).
+  - Decide: search text of tables (Marker's and owner tables) still has one cell per line with no
+    row marker, so search results lose row boundaries; a row-aware flattening needs a
+    `SEARCH_NORMALISER` bump and a reindex (L-SRC-TABLE).
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
