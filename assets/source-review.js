@@ -1,6 +1,8 @@
 // Progressive enhancement only: all decisions remain authenticated server forms.
 (() => {
   const list = document.querySelector('#review-list');
+  // A refused save: the server renders the error next to the field; bring it into view and focus it.
+  document.querySelector('[data-save-error]')?.focus();
   const toggle = document.querySelector('#review-shortcuts');
   if (toggle) {
     toggle.closest('label').hidden = false;

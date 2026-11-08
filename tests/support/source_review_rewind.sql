@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS source_owner_tables;
 -- Test-only: keep the legacy rows, then the caller recreates migration 024's suggestion
 -- table and triggers and copies these rows back. New v25-only data is not rewindable.
 CREATE TEMP TABLE legacy_suggestions AS

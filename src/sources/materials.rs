@@ -123,6 +123,100 @@ impl Store {
         .await
     }
 
+    /// The grid prefilled from the selected units: one column per unit in reading order, one row per
+    /// nonempty line (corrected text where the unit was corrected, the extraction otherwise).
+    pub(crate) async fn material_table_prefill(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        units: Vec<i64>,
+    ) -> Result<TablePrefill, AppError> {
+        if units.is_empty()
+            || units.len() > super::tables::MAX_COLUMNS
+            || units
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != units.len()
+        {
+            return Err(AppError::Invalid(
+                "Choose 1-16 different units for a table.",
+            ));
+        }
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let revision: i64 = tx
+                .query_row("SELECT revision FROM source_pages WHERE id=?1", [page], |r| r.get(0))
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            let sql = format!(
+                "{ORDERED_UNITS} SELECT position,revision,CASE WHEN state='corrected' THEN {} ELSE {} END FROM ordered WHERE id=?2",
+                text("correction", 65_536),
+                text("raw_text", 65_536)
+            );
+            let mut rows = Vec::with_capacity(units.len());
+            let mut total = 0_usize;
+            super::review::read_with_deadline(&tx, "table", || {
+                for unit in &units {
+                    let (position, unit_revision, text): (i64, i64, String) = tx
+                        .query_row(&sql, params![page, unit], |r| {
+                            Ok((r.get(0)?, r.get(1)?, read_text(r, 2)?))
+                        })
+                        .optional()?
+                        .ok_or(AppError::SourceNotFound)?;
+                    total += text.len();
+                    if total > super::tables::MAX_HTML_BYTES {
+                        return Err(AppError::Invalid(
+                            "The selected units hold more than 64 KiB of text; select fewer or shorter units.",
+                        ));
+                    }
+                    rows.push((position, *unit, unit_revision, text));
+                }
+                Ok(())
+            })?;
+            rows.sort_unstable();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            let columns: Vec<String> = rows.iter().map(|r| r.3.clone()).collect();
+            let grid = super::tables::columns_to_grid(&columns)?;
+            Ok(TablePrefill {
+                page_revision: revision,
+                units: rows.iter().map(|r| (r.1, r.2)).collect(),
+                grid: super::tables::format_grid(&grid),
+            })
+        })
+        .await
+    }
+
+    /// Create an owner table from selected units: one immediate transaction rechecks the Owner,
+    /// CSRF, page revision and every unit revision, adds the table unit and rejects the originals.
+    pub(crate) async fn material_create_table(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        page: i64,
+        mut table: super::OwnerTable,
+    ) -> Result<(i64, Vec<i64>), AppError> {
+        table.actor = format!("account:{}", auth.account_id());
+        super::documents::validate_table(&table)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let created = super::documents::add_owner_table(&tx, page, &table, |tx, event| {
+                    audit(tx, &auth, event)
+                })?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                tx.commit()?;
+                Ok(created)
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn material_set_primary_source(
         &self,
         auth: RequestAuth,
@@ -273,8 +367,8 @@ impl Store {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
             let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
                 q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
-            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
-                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?})))?.collect::<Result<Vec<_>,_>>()?};
+            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=source_review_events.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=source_review_events.operation_id AND source_review_events.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)) FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
+                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?)})))?.collect::<Result<Vec<_>,_>>()?};
             let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);
             page.units=units.rows.into_iter().map(|r|r.1).collect();page.events=events.rows.into_iter().map(|r|r.1).collect();
             Ok(MaterialPage{page,units_next:units.next,history_next:events.next})
@@ -390,6 +484,30 @@ impl Store {
         })
         .await
     }
+    /// Whether `unit` is an owner table on `page` (a "created" notice link must be true).
+    pub(crate) async fn material_is_owner_table(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+    ) -> Result<bool, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM source_owner_tables t JOIN source_units u ON u.id=t.unit_id WHERE u.id=?1 AND u.page_id=?2",
+                    params![unit, page],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(found)
+        })
+        .await
+    }
     pub(crate) async fn material_image(
         &self,
         auth: RequestAuth,
@@ -456,4 +574,12 @@ impl Store {
 pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(), AppError> {
     db.execute("INSERT INTO source_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
     Ok(())
+}
+
+/// What the create-table form needs: the tokens to submit back and the editable grid text.
+pub(crate) struct TablePrefill {
+    pub page_revision: i64,
+    /// Selected units in reading order with the revision the Owner saw.
+    pub units: Vec<(i64, i64)>,
+    pub grid: String,
 }

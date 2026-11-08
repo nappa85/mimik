@@ -8,7 +8,8 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     // Callers may already have selected an older migration fixture version.
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     db.execute_batch(
-        "DROP VIEW IF EXISTS source_upload_invalid_exclusion;
+        "DROP TABLE IF EXISTS source_owner_tables;
+         DROP VIEW IF EXISTS source_upload_invalid_exclusion;
          DROP VIEW IF EXISTS source_upload_invalid_inspection;
          DROP TABLE IF EXISTS source_upload_exclusions;
          DROP TABLE IF EXISTS source_upload_pages;
@@ -389,6 +390,44 @@ pub(super) fn add_owner_operation(
     unit: &OwnerUnit,
     operation: Option<&str>,
 ) -> Result<i64, AppError> {
+    let html = owner_html(&unit.text);
+    let raw_text = if operation.is_some() {
+        // A merge's initial owner transcription is the exact plain text approved in
+        // the operation (025 checks equality), not the wrapped display projection.
+        unit.text.clone()
+    } else {
+        project(&html)?
+    };
+    let id = insert_owner(
+        tx,
+        page,
+        &OwnerRow {
+            kind: "Text",
+            polygon: &unit.polygon,
+            html: &html,
+            raw_text,
+            expected_revision: unit.revision,
+        },
+    )?;
+    super::store::review_unit_operation(tx, page, id, &owner_review(unit), operation)
+}
+
+fn project(html: &str) -> Result<String, AppError> {
+    let clean = super::sanitized(html)?;
+    html2text::from_read(clean.as_bytes(), 120)
+        .map_err(|_| AppError::Invalid("Owner text could not be projected."))
+}
+
+struct OwnerRow<'a> {
+    kind: &'static str,
+    polygon: &'a [[f64; 2]; 4],
+    html: &'a str,
+    raw_text: String,
+    expected_revision: i64,
+}
+
+/// Insert one unreviewed owner unit with its search text; the caller records any decision.
+fn insert_owner(tx: &Transaction<'_>, page: i64, row: &OwnerRow<'_>) -> Result<i64, AppError> {
     let revision = tx
         .query_row(
             "SELECT revision FROM source_pages WHERE id=?1",
@@ -397,22 +436,13 @@ pub(super) fn add_owner_operation(
         )
         .optional()?
         .ok_or(AppError::SourceNotFound)?;
-    if revision != unit.revision {
+    if revision != row.expected_revision {
         return Err(AppError::Conflict);
     }
     super::store::next_revision(revision)?;
-    validate_polygon(tx, page, &unit.polygon)?;
-    let html = owner_html(&unit.text);
-    let clean = super::sanitized(&html)?;
-    let raw_text = if operation.is_some() {
-        // A merge's initial owner transcription is the exact plain text approved in
-        // the operation (025 checks equality), not the wrapped display projection.
-        unit.text.clone()
-    } else {
-        html2text::from_read(clean.as_bytes(), 120)
-            .map_err(|_| AppError::Invalid("Owner text could not be projected."))?
-    };
-    let search = super::search::search_text(&html)?;
+    validate_polygon(tx, page, row.polygon)?;
+    let (html, raw_text) = (row.html, &row.raw_text);
+    let search = super::search::search_text(html)?;
     // SQL may have inserted a reserved ordinal ahead of the allocator; never reuse it.
     let ordinal: i64 = tx.query_row(
         "SELECT coalesce(max(CAST(substr(block_id,7) AS INTEGER)),0) FROM source_units WHERE page_id=?1 AND origin='owner'",
@@ -422,13 +452,128 @@ pub(super) fn add_owner_operation(
     let ordinal = ordinal
         .checked_add(1)
         .ok_or(AppError::Invalid("Owner unit identities are exhausted."))?;
-    tx.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin) VALUES(?1,?2,'Text',?3,?4,?5,'owner')",params![page,format!("owner:{ordinal}"),serde_json::to_string(&unit.polygon)?,html,raw_text])?;
+    tx.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin) VALUES(?1,?2,?3,?4,?5,?6,'owner')",params![page,format!("owner:{ordinal}"),row.kind,serde_json::to_string(row.polygon)?,html,raw_text])?;
     let id = tx.last_insert_rowid();
     tx.execute(
         "INSERT INTO source_search_text(unit_id,normaliser,search_text) VALUES(?1,?2,?3)",
         params![id, super::search::SEARCH_NORMALISER, search],
     )?;
-    super::store::review_unit_operation(tx, page, id, &owner_review(unit), operation)
+    Ok(id)
+}
+
+/// One selected unit of a new table, with the revision the Owner saw.
+#[derive(Clone)]
+pub struct TableSource {
+    pub unit: i64,
+    pub revision: i64,
+}
+
+/// A table the Owner builds from selected units: the cells, the page revision seen, the
+/// selected units (rejected in the same transaction) and one rationale for the whole change.
+#[derive(Clone)]
+pub struct OwnerTable {
+    pub revision: i64,
+    pub sources: Vec<TableSource>,
+    pub cells: Vec<Vec<String>>,
+    pub actor: String,
+    pub rationale: String,
+}
+
+pub(super) fn validate_table(table: &OwnerTable) -> Result<(), AppError> {
+    super::tables::check(&table.cells)?;
+    if table.sources.is_empty() || table.sources.len() > super::tables::MAX_COLUMNS {
+        return Err(AppError::Invalid("Choose 1-16 units for a table."));
+    }
+    validate_batch(&table_decisions(0, table), &table.rationale)?;
+    review_identity(&table.actor, &table.rationale)
+}
+
+fn table_decisions(page: i64, table: &OwnerTable) -> Vec<UnitDecision> {
+    table
+        .sources
+        .iter()
+        .map(|source| UnitDecision {
+            page,
+            unit: source.unit,
+            review: UnitReview {
+                revision: source.revision,
+                state: "rejected".into(),
+                correction: String::new(),
+                actor: table.actor.clone(),
+                rationale: table.rationale.clone(),
+            },
+        })
+        .collect()
+}
+
+/// Reject the selected units in one operation and add one owner `Table` unit whose box is
+/// the union of theirs (clamped to the page). The new unit stays `unreviewed`: the Owner
+/// checks the generated table against the page like any other unit. All checks and writes share
+/// the caller's transaction, so any failure leaves nothing behind. Returns the new unit id and
+/// the rejection event ids.
+pub(super) fn add_owner_table(
+    tx: &Transaction<'_>,
+    page: i64,
+    table: &OwnerTable,
+    mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
+) -> Result<(i64, Vec<i64>), AppError> {
+    validate_table(table)?;
+    let (width, height) = polygon_bounds(tx, page)?;
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for source in &table.sources {
+        let (revision, polygon): (i64, String) = tx
+            .query_row(
+                "SELECT revision,polygon FROM source_units WHERE id=?1 AND page_id=?2",
+                params![source.unit, page],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or(AppError::SourceNotFound)?;
+        if revision != source.revision {
+            return Err(AppError::Conflict);
+        }
+        let points: Vec<[f64; 2]> = serde_json::from_str(&polygon)
+            .ok()
+            .filter(|p: &Vec<[f64; 2]>| !p.is_empty() && p.len() <= 1024)
+            .ok_or(AppError::Invalid("A selected unit has no usable region."))?;
+        for [x, y] in points {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(AppError::Invalid("A selected unit has no usable region."));
+            }
+            x0 = x0.min(x.clamp(0.0, width));
+            x1 = x1.max(x.clamp(0.0, width));
+            y0 = y0.min(y.clamp(0.0, height));
+            y1 = y1.max(y.clamp(0.0, height));
+        }
+    }
+    let polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    let html = super::tables::html(&table.cells);
+    let operation = new_operation_id();
+    let owner = OwnerRow {
+        kind: "Table",
+        polygon: &polygon,
+        raw_text: super::tables::plain(&table.cells),
+        html: &html,
+        expected_revision: table.revision,
+    };
+    let unit = insert_owner(tx, page, &owner)?;
+    let mut events = Vec::with_capacity(table.sources.len());
+    for decision in table_decisions(page, table) {
+        let event = super::store::review_unit_operation(
+            tx,
+            page,
+            decision.unit,
+            &decision.review,
+            Some(&operation),
+        )?;
+        sidecar(tx, event)?;
+        events.push(event);
+    }
+    tx.execute(
+        "INSERT INTO source_owner_tables(unit_id,operation_id,first_event_id) VALUES(?1,?2,?3)",
+        params![unit, operation, events[0]],
+    )?;
+    Ok((unit, events))
 }
 
 /// A fresh 128-bit identifier naming one batch; callers cannot choose or reuse it.
