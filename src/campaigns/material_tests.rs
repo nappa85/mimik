@@ -256,11 +256,14 @@ async fn material_final_invalid_state_copies_fit_budget() {
         "invalid-state budgeted sections: {bytes}; full page: {}",
         html.len()
     );
-    let option = parsed
-        .select(&scraper::Selector::parse("select[name=state] option[selected]").unwrap())
-        .next()
-        .unwrap();
-    assert_eq!(option.value().attr("value"), Some(invalid.as_str()));
+    // The submitted invalid decision is shown in full; no radio claims to be chosen.
+    assert!(html.contains("Submitted invalid decision: &#34;&#34;&#34;"));
+    assert!(
+        parsed
+            .select(&scraper::Selector::parse("#unit-1 input[name=state][checked]").unwrap())
+            .next()
+            .is_none()
+    );
     assert!(bytes <= 2 * 1024 * 1024, "budgeted sections: {bytes}");
 }
 
@@ -2359,20 +2362,19 @@ async fn material_document_conflict_validation_and_nul_retain_escaped_drafts() {
                 || html.contains("&lt;unsaved correction&gt;")
         );
         assert!(html.contains("checked original"));
-        assert_eq!(
-            scraper::Html::parse_document(&html)
-                .select(
-                    &scraper::Selector::parse(
-                        "[data-form=unit] select[name=state] option[selected]"
-                    )
-                    .unwrap()
-                )
-                .next()
-                .expect("submitted decision state")
-                .value()
-                .attr("value"),
-            Some(state)
-        );
+        let parsed = scraper::Html::parse_document(&html);
+        let checked = parsed
+            .select(
+                &scraper::Selector::parse("[data-form=unit] input[name=state][checked]").unwrap(),
+            )
+            .map(|radio| radio.value().attr("value").unwrap())
+            .collect::<Vec<_>>();
+        if state == "invalid" {
+            assert_eq!(checked, Vec::<&str>::new());
+            assert!(html.contains("Submitted invalid decision: invalid."));
+        } else {
+            assert_eq!(checked, [state]);
+        }
     }
     let mut form = decision(1);
     form[3].1 = "\0retained NUL correction".into();
@@ -4189,4 +4191,626 @@ async fn material_mixed_batch_needs_a_rationale() {
         )
         .await;
     assert!(matches!(result, Err(crate::AppError::Invalid(_))));
+}
+
+// ---- Owner tables, refused-save errors and per-decision fields (review-screen usability) ----
+
+const BOX1: &str = "[[10,10],[50,10],[50,100],[10,100]]";
+const BOX2: &str = "[[60,20],[120,20],[120,90],[60,90]]";
+
+async fn table_fixture() -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    table_fixture_with("").await
+}
+
+/// Units 1 and 2 get real boxes; `extra` is SQL run before the source is finalized (raw rows are
+/// immutable afterwards).
+async fn table_fixture_with(extra: &'static str) -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    let (dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(move |db| {
+            db.execute_batch(extra)?;
+            for (id, polygon) in [(1, BOX1), (2, BOX2)] {
+                db.execute(
+                    "UPDATE source_units SET polygon=?1 WHERE id=?2",
+                    params![polygon, id],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    finalize_material(&store).await;
+    (dir, store, auth)
+}
+
+fn grid(rows: &[&[&str]]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| row.iter().map(|c| (*c).to_owned()).collect())
+        .collect()
+}
+
+fn table_of(units: &[(i64, i64)], cells: Vec<Vec<String>>) -> crate::sources::OwnerTable {
+    crate::sources::OwnerTable {
+        revision: 1,
+        sources: units
+            .iter()
+            .map(|(unit, revision)| crate::sources::TableSource {
+                unit: *unit,
+                revision: *revision,
+            })
+            .collect(),
+        cells,
+        actor: "forged".into(),
+        rationale: "Columns split by the extractor".into(),
+    }
+}
+
+async fn counts(store: &Store) -> (i64, i64, i64) {
+    store
+        .run(|db| {
+            Ok((
+                db.query_row("SELECT count(*) FROM source_units", [], |r| r.get(0))?,
+                db.query_row("SELECT count(*) FROM source_review_events", [], |r| {
+                    r.get(0)
+                })?,
+                db.query_row("SELECT revision FROM source_pages WHERE id=1", [], |r| {
+                    r.get(0)
+                })?,
+            ))
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn material_table_creation_unions_boxes_escapes_cells_and_rejects_originals_atomically() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let raw_before: Vec<String> = store
+        .run(|db| {
+            Ok(db
+                .prepare("SELECT raw_html FROM source_units WHERE id IN (1,2) ORDER BY id")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?)
+        })
+        .await
+        .unwrap();
+    let (unit, events) = store
+        .material_create_table(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            table_of(
+                &[(1, 1), (2, 1)],
+                grid(&[
+                    &["Name", "<script>bad()</script>"],
+                    &["Sword", "d6 & \"d8\""],
+                ]),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    store
+        .run(move |db| {
+            let (kind, origin, block, state, revision, polygon, html): (String, String, String, String, i64, String, String) = db.query_row(
+                "SELECT kind,origin,block_id,state,revision,polygon,raw_html FROM source_units WHERE id=?1",
+                [unit],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )?;
+            assert_eq!((kind.as_str(), origin.as_str(), block.as_str()), ("Table", "owner", "owner:1"));
+            assert_eq!((state.as_str(), revision), ("unreviewed", 1));
+            let polygon: Vec<[f64; 2]> = serde_json::from_str(&polygon).unwrap();
+            assert_eq!(polygon, [[10.0, 10.0], [120.0, 10.0], [120.0, 100.0], [10.0, 100.0]]);
+            assert_eq!(
+                html,
+                "<table><tbody><tr><td>Name</td><td>&lt;script&gt;bad()&lt;/script&gt;</td></tr><tr><td>Sword</td><td>d6 &amp; &quot;d8&quot;</td></tr></tbody></table>"
+            );
+            assert!(!crate::sources::sanitized(&html).unwrap().contains("<script"));
+            // Search text exists and carries the cell text, not markup.
+            let search: String = db.query_row("SELECT search_text FROM source_search_text WHERE unit_id=?1", [unit], |r| r.get(0))?;
+            assert!(search.contains("Sword") && !search.contains("<table"));
+            // Originals: rejected in one batch with the rationale; raw extraction untouched.
+            let rejected: i64 = db.query_row(
+                "SELECT count(*) FROM source_units WHERE id IN (1,2) AND state='rejected' AND revision=2",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(rejected, 2);
+            let batch: i64 = db.query_row(
+                "SELECT count(DISTINCT operation_id) FROM source_review_events WHERE operation_id LIKE 'batch-%' AND state='rejected' AND rationale='Columns split by the extractor' AND actor='account:1'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(batch, 1);
+            let audited: i64 = db.query_row(
+                "SELECT count(*) FROM source_web_events w JOIN source_review_events e ON e.id=w.event_id WHERE e.operation_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(audited, 2);
+            let raw: Vec<String> = db
+                .prepare("SELECT raw_html FROM source_units WHERE id IN (1,2) ORDER BY id")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            assert_eq!(raw, raw_before);
+            let page: (i64, i64) = db.query_row("SELECT complete,revision FROM source_pages WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            assert_eq!(page.0, 0);
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_table_stale_unit_page_or_fault_rolls_back_everything() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let before = counts(&store).await;
+    let cells = || grid(&[&["a", "b"]]);
+    let mut stale_page = table_of(&[(1, 1), (2, 1)], cells());
+    stale_page.revision = 0;
+    for (table, expected) in [
+        (table_of(&[(1, 1), (2, 9)], cells()), "Conflict"),
+        (stale_page, "Conflict"),
+    ] {
+        let error = store
+            .material_create_table(auth[0].clone(), auth[0].csrf_fixture(), 1, table)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Conflict), "{expected}: {error:?}");
+        assert_eq!(counts(&store).await, before);
+    }
+    // The second audit row fails: nothing of the first rejection, nor the table unit, stays.
+    store
+        .run(|db| {
+            db.execute_batch("CREATE TRIGGER table_audit_fault BEFORE INSERT ON source_web_events WHEN (SELECT count(*) FROM source_web_events)>=1 BEGIN SELECT RAISE(ABORT,'fixture fault'); END;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .material_create_table(
+                auth[0].clone(),
+                auth[0].csrf_fixture(),
+                1,
+                table_of(&[(1, 1), (2, 1)], cells())
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(counts(&store).await, before);
+}
+
+#[tokio::test]
+async fn material_table_bounds_page_boundary_and_identity_are_enforced() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET polygon='[[150,200],[400,200],[400,500],[150,500]]' WHERE id=4; UPDATE source_units SET polygon='[[5,5],[5,5],[5,5],[5,5]]' WHERE id=5;",
+    )
+    .await;
+    let before = counts(&store).await;
+    let create = |table| {
+        let store = store.clone();
+        let auth = auth[0].clone();
+        async move {
+            store
+                .material_create_table(auth.clone(), auth.csrf_fixture(), 1, table)
+                .await
+        }
+    };
+    let wide: Vec<Vec<String>> = vec![vec!["x".into(); 17]];
+    let tall: Vec<Vec<String>> = vec![vec!["x".into()]; 201];
+    let long = grid(&[&[&"x".repeat(1001)]]);
+    for cells in [
+        wide,
+        tall,
+        long,
+        grid(&[&["", ""]]),
+        grid(&[&["a", "b"], &["c"]]),
+        grid(&[&["a\0"]]),
+        vec![],
+    ] {
+        let error = create(table_of(&[(1, 1)], cells)).await.unwrap_err();
+        assert!(matches!(error, AppError::Invalid(_)), "{error:?}");
+    }
+    let mut blank = table_of(&[(1, 1)], grid(&[&["a"]]));
+    blank.rationale = "  ".into();
+    assert!(matches!(create(blank).await, Err(AppError::Invalid(_))));
+    let many: Vec<(i64, i64)> = (1..=17).map(|u| (u, 1)).collect();
+    assert!(matches!(
+        create(table_of(&many, grid(&[&["a"]]))).await,
+        Err(AppError::Invalid(_))
+    ));
+    assert!(matches!(
+        create(table_of(&[], grid(&[&["a"]]))).await,
+        Err(AppError::Invalid(_))
+    ));
+    assert!(matches!(
+        create(table_of(&[(1, 1), (1, 1)], grid(&[&["a"]]))).await,
+        Err(AppError::Invalid(_))
+    ));
+    assert!(matches!(
+        create(table_of(&[(999, 1)], grid(&[&["a"]]))).await,
+        Err(AppError::SourceNotFound)
+    ));
+    // A unit without a usable region cannot define a box.
+    assert!(matches!(
+        create(table_of(&[(3, 1)], grid(&[&["a"]]))).await,
+        Err(AppError::Invalid(_))
+    ));
+    assert_eq!(counts(&store).await, before);
+    // Units reaching past the page are clamped to it (unit 4); a box with no area is refused (unit 5).
+    assert!(matches!(
+        create(table_of(&[(5, 1)], grid(&[&["a"]]))).await,
+        Err(AppError::Invalid(_))
+    ));
+    let (unit, _) = create(table_of(&[(4, 1)], grid(&[&["a"]]))).await.unwrap();
+    let polygon: String = store
+        .run(move |db| {
+            Ok(db.query_row(
+                "SELECT polygon FROM source_units WHERE id=?1",
+                [unit],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    let polygon: Vec<[f64; 2]> = serde_json::from_str(&polygon).unwrap();
+    assert_eq!(
+        polygon,
+        [
+            [150.0, 200.0],
+            [200.0, 200.0],
+            [200.0, 300.0],
+            [150.0, 300.0]
+        ]
+    );
+}
+
+#[tokio::test]
+async fn material_migration_028_allows_only_text_and_table_owner_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (dir, store, _auth) = table_fixture().await;
+    let insert = |kind: &'static str, id: i64, state: &'static str, revision: i64| {
+        let store = store.clone();
+        async move {
+            store
+                .run(move |db| {
+                    Ok(db.execute(
+                        "INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin,state,revision) VALUES(1,?1,?2,'[[1,1],[20,1],[20,20],[1,20]]','<p>x</p>','x','owner',?3,?4)",
+                        params![format!("owner:{id}"), kind, state, revision],
+                    ).map_err(|e| e.to_string()))
+                })
+                .await
+                .unwrap()
+        }
+    };
+    assert!(insert("Table", 1, "unreviewed", 1).await.is_ok());
+    assert!(insert("Text", 2, "unreviewed", 1).await.is_ok());
+    for (kind, state, revision) in [
+        ("Form", "unreviewed", 1),
+        ("Caption", "unreviewed", 1),
+        ("Table", "corrected", 1),
+        ("Table", "unreviewed", 2),
+    ] {
+        let error = insert(kind, 3, state, revision).await.unwrap_err();
+        assert!(
+            error.contains("Invalid owner unit identity"),
+            "{kind} {state} {revision}: {error}"
+        );
+    }
+    // Extracted units cannot use the owner namespace, and a Table cannot appear on an unfinalized page.
+    let error = store
+        .run(|db| Ok(db.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1,'owner:9','Table','[]','<p>x</p>','x')", []).map_err(|e| e.to_string())))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("Invalid owner unit identity"), "{error}");
+    // Upgrade path: a database at schema 27 (Text only) gains Table when reopened.
+    let path = dir.path().join("private.sqlite3");
+    store
+        .run(|db| {
+            let old = include_str!("../../migrations/024_source_documents.sql");
+            let start = old
+                .find("CREATE TRIGGER source_unit_origin_insert")
+                .unwrap();
+            let end = old[start..].find("END;").unwrap() + start + 4;
+            db.execute_batch(&format!(
+                "DROP TRIGGER source_unit_origin_insert; {}",
+                &old[start..end]
+            ))?;
+            db.execute_batch("PRAGMA user_version=27;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(insert("Table", 4, "unreviewed", 1).await.is_err());
+    let upgraded = Store::open(&path).unwrap();
+    let ok = upgraded
+        .run(|db| {
+            assert_eq!(db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, crate::SCHEMA_VERSION);
+            Ok(db.execute("INSERT INTO source_units(page_id,block_id,kind,polygon,raw_html,raw_text,origin) VALUES(1,'owner:4','Table','[[1,1],[20,1],[20,20],[1,20]]','<p>x</p>','x','owner')", []).is_ok())
+        })
+        .await
+        .unwrap();
+    assert!(ok);
+}
+
+#[tokio::test]
+async fn material_table_form_prefills_columns_and_saves_through_the_router() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Name'||char(10)||'Sword'||char(10)||char(10)||'Bow' WHERE id=1; UPDATE source_units SET raw_text='Damage | a\\b'||char(10)||'d6' WHERE id=2;",
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // The page offers a checkbox per card that targets the selection form.
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&page);
+    let boxes =
+        scraper::Selector::parse("input[type=checkbox][name=unit][form=table-select]").unwrap();
+    assert!(parsed.select(&boxes).count() >= 2);
+    let form = scraper::Selector::parse("form#table-select").unwrap();
+    assert_eq!(
+        parsed.select(&form).next().unwrap().value().attr("action"),
+        Some("/admin/materials/pages/1/tables/new")
+    );
+    // The reading-order grid: one column per unit, short columns padded, `|` and `\` escaped.
+    let response = router_get(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/tables/new?unit=2&unit=1",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert_eq!(
+        field_value(&html, "textarea[name=cells]"),
+        "Name | Damage \\| a\\\\b\nSword | d6\nBow | "
+    );
+    let hidden = scraper::Selector::parse("input[type=hidden][name=unit]").unwrap();
+    let units: Vec<_> = scraper::Html::parse_document(&html)
+        .select(&hidden)
+        .map(|e| e.value().attr("value").unwrap().to_owned())
+        .collect();
+    assert_eq!(units, ["1:1", "2:1"]);
+    for bad in ["", "?unit=x", "?unit=1&unit=1", "?other=1"] {
+        let response = router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new{bad}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        assert!(body(response).await.contains("table-error"));
+    }
+}
+
+#[tokio::test]
+async fn material_table_refused_save_shows_error_then_saves_and_renders_the_table() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // Refused save: red error, focus target, draft kept.
+    let post = |rationale: &'static str, revision: &'static str| {
+        let app = app.clone();
+        let auth = auth[0].clone();
+        async move {
+            document_at(
+                &app,
+                &auth,
+                "/admin/materials/pages/1/tables",
+                vec![
+                    ("csrf".into(), "a".repeat(64)),
+                    ("revision".into(), revision.into()),
+                    ("unit".into(), "1:1".into()),
+                    ("unit".into(), "2:1".into()),
+                    ("cells".into(), "a | <b>\r\nc | d".into()),
+                    ("rationale".into(), rationale.into()),
+                ],
+            )
+            .await
+        }
+    };
+    let refused = post("", "1").await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let alert = scraper::Selector::parse("#table-error[role=alert][data-save-error]").unwrap();
+    assert!(parsed.select(&alert).next().is_some(), "{html}");
+    let invalid = scraper::Selector::parse("textarea[name=rationale][aria-invalid=true]").unwrap();
+    assert!(parsed.select(&invalid).next().is_some());
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | <b>\nc | d");
+    assert_eq!(counts(&store).await.0, 51);
+    assert_eq!(post("checked", "0").await.status(), StatusCode::CONFLICT);
+    let saved = post("Columns split", "1").await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let location = saved.headers()["location"].to_str().unwrap().to_owned();
+    assert!(
+        location.starts_with("/admin/materials/pages/1?units=") && location.contains("#unit-"),
+        "{location}"
+    );
+    let (kind, html): (String, String) = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT kind,raw_html FROM source_units WHERE origin='owner'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(kind, "Table");
+    assert!(html.contains("<td>&lt;b&gt;</td>"), "{html}");
+    // The page renders the new table inside its card.
+    let page = body(router_get(&app, &auth[0], &location).await).await;
+    assert!(page.contains("<table>") && page.contains("<td>c</td>"));
+}
+
+#[tokio::test]
+async fn material_refused_unit_save_shows_error_beside_unit_summary_and_focus_target() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let mut form = decision(1);
+    form[3].1 = "fixed".into();
+    form[4].1 = String::new();
+    let response = document_post(&app, &auth[0], form).await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let select = |css: &str| scraper::Selector::parse(css).unwrap();
+    let error = parsed
+        .select(&select(
+            "#unit-1 #unit-1-error[role=alert][data-save-error]",
+        ))
+        .next()
+        .expect("error inside unit 1");
+    assert!(error.text().collect::<String>().contains("not saved"));
+    assert!(
+        parsed
+            .select(&select(
+                ".error-summary[role=alert] a[href='#unit-1-error']"
+            ))
+            .next()
+            .is_some()
+    );
+    assert!(html.contains("A save failed"));
+    assert!(
+        parsed
+            .select(&select(
+                "#unit-1 textarea[name=rationale][aria-invalid=true]"
+            ))
+            .next()
+            .is_some()
+    );
+    assert!(
+        parsed
+            .select(&select(
+                "#unit-1 textarea[name=correction][aria-invalid=true]"
+            ))
+            .next()
+            .is_none()
+    );
+    // Only the unit that failed carries an error.
+    assert!(
+        parsed
+            .select(&select("#unit-2 [data-save-error]"))
+            .next()
+            .is_none()
+    );
+    let css = include_str!("../../assets/app.css");
+    assert!(css.contains(".field-error") && css.contains("aria-invalid"));
+    assert!(include_str!("../../assets/source-review.js").contains("[data-save-error]"));
+}
+
+#[tokio::test]
+async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let select = |css: &str| scraper::Selector::parse(css).unwrap();
+    let form = parsed
+        .select(&select("#unit-1 form[data-form=unit]"))
+        .next()
+        .unwrap();
+    assert!(
+        form.select(&select("select")).next().is_none(),
+        "no select any more"
+    );
+    let values: Vec<_> = form
+        .select(&select("input[type=radio][name=state]"))
+        .map(|r| r.value().attr("value").unwrap())
+        .collect();
+    assert_eq!(values, ["accepted", "corrected", "rejected"]);
+    // Accepted has no field of its own: both text fields live in containers that only
+    // `corrected` / `rejected` reveal, and the rationale label says SRC-4 requires it.
+    assert!(
+        form.select(&select(".fields-correction textarea[name=correction]"))
+            .next()
+            .is_some()
+    );
+    assert!(
+        form.select(&select(".fields-rationale textarea[name=rationale]"))
+            .next()
+            .is_some()
+    );
+    assert_eq!(form.select(&select("textarea")).count(), 2);
+    assert!(form.html().contains("SRC-4"));
+    assert!(
+        !form.select(&select("textarea[required]")).any(|_| true),
+        "hidden fields must not block submit"
+    );
+    let css = include_str!("../../assets/app.css");
+    assert!(css.contains(".decision-fields { display: none; }"));
+    assert!(css.contains("input[value=\"corrected\"]:checked ~ .fields-correction"));
+    assert!(css.contains("input[value=\"corrected\"]:checked ~ .fields-rationale"));
+    assert!(css.contains("input[value=\"rejected\"]:checked ~ .fields-rationale"));
+    assert!(!css.contains("input[value=\"rejected\"]:checked ~ .fields-correction"));
+    // Fields that the chosen decision does not use are ignored, not refused or stored.
+    for (state, unit) in [("accepted", 1), ("rejected", 2)] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/units/{unit}"),
+            review_form(&[
+                ("revision", "1"),
+                ("state", state),
+                ("correction", "stale hidden text"),
+                ("rationale", "stale hidden rationale"),
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{state}");
+    }
+    let stored: Vec<(String, String, String)> = store
+        .run(|db| {
+            Ok(db
+                .prepare(
+                    "SELECT state,correction,rationale FROM source_review_events ORDER BY unit_id",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        [
+            ("accepted".into(), String::new(), String::new()),
+            (
+                "rejected".into(),
+                String::new(),
+                "stale hidden rationale".into()
+            )
+        ]
+    );
+    // A corrected unit pre-checks its radio on the next view.
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/3",
+        review_form(&[
+            ("revision", "1"),
+            ("state", "corrected"),
+            ("correction", "fixed"),
+            ("rationale", "checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=2").await).await;
+    assert!(
+        scraper::Html::parse_document(&html)
+            .select(&select("#unit-3 input[value=corrected][checked]"))
+            .next()
+            .is_some()
+    );
 }

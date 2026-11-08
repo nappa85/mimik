@@ -75,26 +75,18 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Review-screen usability (owner, 2026-11-07, first real review of the IT pages):**
   4. A list of all units still to review (per page and per source), to jump between them.
-  5. The decision form is too long: the exclusive choices belong in tabs or a segmented control.
   6. The page image with the unit boxes should stay visible while scrolling (sticky).
   - The "Next page with units to review" link skips pages that need only a completeness
     confirmation (no units, or all reviewed): add a separate "Next incomplete page" link.
-  - A refused save (e.g. a correction without rationale) must be impossible to miss: the error
-    shown next to the unit in red, focus moved there, and the page summary saying a save failed.
-  - Show only the fields a decision needs: accepted (no text field), corrected (corrected text;
-    rationale optional unless SRC-4 needs it: decide), rejected (rationale only). Same panel as
-    the tabbed form above.
   - Unit restructuring actions (owner, 2026-11-08), each rejecting the original units in one
-    batch with the reason and adding owner units (originals and raw stay intact):
+    batch with the reason and adding owner units (originals and raw stay intact). Create table
+    is done (`docs/sources-and-retrieval.md`, "Owner-built tables"); still open:
     1. **Merge units:** several selected units become one text unit (box = their union, text
        joined in reading order).
     2. **Split unit:** one unit covering several columns or blocks becomes several units, the
        owner drawing or adjusting each part's box and text.
-    3. **Create table:** selected units (one per column, as Marker often splits them) or one
-       unit holding several columns become one table unit with rows and cells, so a row's
-       facts (name, damage, cost) stay together.
-    All three replace typing four corners by hand in "Add missing text"; they need a unit kind
-    for tables (owner units are `Text` only today) and a design pass before implementation.
+    Merge and split replace typing four corners by hand in "Add missing text"; they need a design
+    pass before implementation (owner units may be `Text` or `Table` since migration 028).
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB

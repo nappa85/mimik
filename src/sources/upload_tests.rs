@@ -140,7 +140,7 @@ fn exclusion_migration_removes_legacy_guessable_fingerprints() {
             assert!(fingerprint.is_none());
             assert_eq!(
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-                27
+                crate::SCHEMA_VERSION
             );
             Ok(())
         })

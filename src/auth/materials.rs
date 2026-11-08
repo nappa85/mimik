@@ -49,6 +49,7 @@ pub(super) fn routes() -> Router<AuthState> {
             get(suggestion_list),
         )
         .route("/admin/materials/pages/{id}/image", get(image))
+        .route("/admin/materials/pages/{id}/tables/new", get(table_form))
         .route(
             "/assets/source-review.js",
             get(|| async {
@@ -77,6 +78,7 @@ pub(super) fn routes() -> Router<AuthState> {
                 .route("/admin/materials/suggestions/{id}/accept", post(accept))
                 .route("/admin/materials/suggestions/{id}/dismiss", post(dismiss))
                 .route("/admin/materials/pages/{id}/owner-units", post(add_owner))
+                .route("/admin/materials/pages/{id}/tables", post(create_table))
                 .route("/admin/materials/pages/{id}/primary", post(primary))
                 .route("/admin/materials/sources/{id}/primary", post(primary_pages))
                 .route("/admin/materials/pages/{page}/units/{unit}", post(review))
@@ -347,6 +349,8 @@ struct Editor {
     primary_draft: Option<PrimaryDraft>,
     notice: String,
     notice_unit: i64,
+    /// The unit whose refused decision is shown with its error (0: none).
+    error_unit: i64,
 }
 impl Editor {
     fn unit_link(&self, target: &(i64, i64)) -> String {
@@ -425,6 +429,7 @@ impl Editor {
             primary_draft: None,
             notice: saved_notice(c),
             notice_unit: if c.saved == Saved::None { 0 } else { c.to },
+            error_unit: 0,
         }
     }
 }
@@ -555,6 +560,23 @@ struct Draft {
     #[serde(deserialize_with = "crate::form_text::lf")]
     rationale: String,
 }
+impl Draft {
+    /// The fields that matter for the chosen decision (SRC-4): corrected text and rationale for a
+    /// correction, a rationale for a rejection, nothing for an acceptance. Other fields are ignored.
+    fn relevant(&self) -> (String, String) {
+        match self.state.as_str() {
+            "accepted" => (String::new(), String::new()),
+            "rejected" => (String::new(), self.rationale.clone()),
+            _ => (self.correction.clone(), self.rationale.clone()),
+        }
+    }
+    fn correction_missing(&self) -> bool {
+        self.state == "corrected" && self.correction.trim().is_empty()
+    }
+    fn rationale_missing(&self) -> bool {
+        matches!(self.state.as_str(), "corrected" | "rejected") && self.rationale.trim().is_empty()
+    }
+}
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Completion {
@@ -608,8 +630,8 @@ async fn review(
             UnitReview {
                 revision: form.revision,
                 state: form.state.clone(),
-                correction: form.correction.clone(),
-                rationale: form.rationale.clone(),
+                correction: form.relevant().0,
+                rationale: form.relevant().1,
                 actor: String::new(),
             },
         )
@@ -670,6 +692,7 @@ async fn review(
             data.correction.clone_from(&form.correction);
             data.state.clone_from(&form.state);
             editor.message = e.to_string();
+            editor.error_unit = unit;
             editor.draft = Some(form);
             trusted_editor(&editor, error(&e))
         }
@@ -1130,6 +1153,172 @@ async fn primary(
             editor.message = e.to_string();
             editor.primary_draft = Some(form);
             trusted_editor(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "material_table.html")]
+struct TableEditor {
+    page: i64,
+    csrf: String,
+    revision: i64,
+    /// Hidden `unit` fields, `id:revision`, in reading order.
+    units: Vec<String>,
+    grid: String,
+    rationale: String,
+    message: String,
+}
+fn table_editor_response(editor: &TableEditor, status: StatusCode) -> AuthResult {
+    let mut response = html(editor)?;
+    *response.status_mut() = status;
+    response.extensions_mut().insert(TrustedDraft);
+    Ok(response)
+}
+/// The create-table form, prefilled from the units chosen with the cards' checkboxes.
+async fn table_form(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Query(fields): Query<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
+    let mut editor = TableEditor {
+        page,
+        csrf,
+        revision: 0,
+        units: Vec::new(),
+        grid: String::new(),
+        rationale: String::new(),
+        message: String::new(),
+    };
+    let chosen = fields
+        .iter()
+        .map(|(key, value)| {
+            (key == "unit")
+                .then(|| value.parse::<i64>().ok())
+                .flatten()
+                .ok_or(AppError::Invalid(
+                    "Choose 1-16 different units for a table.",
+                ))
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let prefill = match chosen {
+        Ok(units) => {
+            state
+                .sessions
+                .store
+                .material_table_prefill(auth, page, units)
+                .await
+        }
+        Err(e) => Err(e),
+    };
+    match prefill {
+        Ok(prefill) => {
+            editor.revision = prefill.page_revision;
+            editor.units = prefill
+                .units
+                .iter()
+                .map(|(u, r)| format!("{u}:{r}"))
+                .collect();
+            editor.grid = prefill.grid;
+            html(&editor)
+        }
+        Err(e @ AppError::Invalid(_)) => {
+            editor.message = e.to_string();
+            table_editor_response(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+async fn create_table(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let (mut csrf_token, mut revision, mut cells, mut rationale) =
+        (None, None, None, None::<String>);
+    let mut units = Vec::new();
+    let mut malformed = false;
+    for (key, value) in fields {
+        let value = crate::form_text::newlines_to_lf(value);
+        match key.as_str() {
+            "csrf" if csrf_token.is_none() => csrf_token = Some(value),
+            "revision" if revision.is_none() => revision = value.parse::<i64>().ok(),
+            "cells" if cells.is_none() => cells = Some(value),
+            "rationale" if rationale.is_none() => rationale = Some(value),
+            "unit" => units.push(value),
+            _ => malformed = true,
+        }
+    }
+    let csrf_token = csrf_token.ok_or(StatusCode::FORBIDDEN)?;
+    let csrf = csrf_admission(&session, &csrf_token).await?;
+    let mut editor = TableEditor {
+        page,
+        csrf: csrf_token,
+        revision: revision.unwrap_or(0),
+        units,
+        grid: cells.unwrap_or_default(),
+        rationale: rationale.unwrap_or_default(),
+        message: String::new(),
+    };
+    let sources = editor
+        .units
+        .iter()
+        .map(|unit| {
+            let (id, revision) = unit.split_once(':')?;
+            Some(crate::sources::TableSource {
+                unit: id.parse().ok()?,
+                revision: revision.parse().ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>();
+    let result = match (malformed || revision.is_none(), sources) {
+        (false, Some(sources)) => match crate::sources::tables::parse_grid(&editor.grid) {
+            Ok(cells) => {
+                state
+                    .sessions
+                    .store
+                    .material_create_table(
+                        auth.clone(),
+                        csrf,
+                        page,
+                        crate::sources::OwnerTable {
+                            revision: editor.revision,
+                            sources,
+                            cells,
+                            actor: String::new(),
+                            rationale: editor.rationale.clone(),
+                        },
+                    )
+                    .await
+            }
+            Err(e) => Err(e),
+        },
+        _ => Err(AppError::Invalid(
+            "The table form was incomplete; reopen it from the page.",
+        )),
+    };
+    match result {
+        Ok((unit, _)) => {
+            let cursor = state
+                .sessions
+                .store
+                .material_unit_cursor(auth, page, unit)
+                .await
+                .unwrap_or(0);
+            Ok(Redirect::to(&format!(
+                "/admin/materials/pages/{page}?units={cursor}#unit-{unit}"
+            ))
+            .into_response())
+        }
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            editor.message = e.to_string();
+            table_editor_response(&editor, error(&e))
         }
         Err(e) => Err(error(&e)),
     }

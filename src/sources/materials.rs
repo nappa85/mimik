@@ -123,6 +123,90 @@ impl Store {
         .await
     }
 
+    /// The grid prefilled from the selected units: one column per unit in reading order, one row per
+    /// nonempty line (corrected text where the unit was corrected, the extraction otherwise).
+    pub(crate) async fn material_table_prefill(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        units: Vec<i64>,
+    ) -> Result<TablePrefill, AppError> {
+        if units.is_empty()
+            || units.len() > super::tables::MAX_COLUMNS
+            || units
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != units.len()
+        {
+            return Err(AppError::Invalid(
+                "Choose 1-16 different units for a table.",
+            ));
+        }
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let revision: i64 = tx
+                .query_row("SELECT revision FROM source_pages WHERE id=?1", [page], |r| r.get(0))
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            let sql = format!(
+                "{ORDERED_UNITS} SELECT position,revision,CASE WHEN state='corrected' THEN {} ELSE {} END FROM ordered WHERE id=?2",
+                text("correction", 65_536),
+                text("raw_text", 65_536)
+            );
+            let mut rows = Vec::with_capacity(units.len());
+            for unit in &units {
+                let (position, unit_revision, text): (i64, i64, String) = tx
+                    .query_row(&sql, params![page, unit], |r| {
+                        Ok((r.get(0)?, r.get(1)?, read_text(r, 2)?))
+                    })
+                    .optional()?
+                    .ok_or(AppError::SourceNotFound)?;
+                rows.push((position, *unit, unit_revision, text));
+            }
+            rows.sort_unstable();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            let columns: Vec<String> = rows.iter().map(|r| r.3.clone()).collect();
+            let grid = super::tables::columns_to_grid(&columns)?;
+            Ok(TablePrefill {
+                page_revision: revision,
+                units: rows.iter().map(|r| (r.1, r.2)).collect(),
+                grid: super::tables::format_grid(&grid),
+            })
+        })
+        .await
+    }
+
+    /// Create an owner table from selected units: one immediate transaction rechecks the Owner,
+    /// CSRF, page revision and every unit revision, adds the table unit and rejects the originals.
+    pub(crate) async fn material_create_table(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        page: i64,
+        mut table: super::OwnerTable,
+    ) -> Result<(i64, Vec<i64>), AppError> {
+        table.actor = format!("account:{}", auth.account_id());
+        super::documents::validate_table(&table)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let created = super::documents::add_owner_table(&tx, page, &table, |tx, event| {
+                    audit(tx, &auth, event)
+                })?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                tx.commit()?;
+                Ok(created)
+            })
+        })
+        .await
+    }
+
     pub(crate) async fn material_set_primary_source(
         &self,
         auth: RequestAuth,
@@ -456,4 +540,12 @@ impl Store {
 pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(), AppError> {
     db.execute("INSERT INTO source_web_events(event_id,actor_id,actor_epoch,session_digest) VALUES(?1,?2,?3,?4)",params![event,auth.account_id(),auth.epoch(),auth.digest()])?;
     Ok(())
+}
+
+/// What the create-table form needs: the tokens to submit back and the editable grid text.
+pub(crate) struct TablePrefill {
+    pub page_revision: i64,
+    /// Selected units in reading order with the revision the Owner saw.
+    pub units: Vec<(i64, i64)>,
+    pub grid: String,
 }

@@ -9,13 +9,16 @@ mod suggestions;
 pub mod uploads;
 #[cfg(target_os = "linux")]
 pub mod worker;
-pub use documents::{OwnerUnit, PrimaryPageState, UnitDecision, parse_page_list};
+pub use documents::{
+    OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision, parse_page_list,
+};
 pub use reports::SuggestionReportSummary;
 pub use suggestions::{SourceSuggestion, SuggestionApplication, SuggestionTarget, SuggestionUnit};
 pub(crate) mod materials;
 pub(crate) mod region;
 pub(crate) mod review;
 pub(crate) mod search;
+pub(crate) mod tables;
 pub use search::SEARCH_SCHEMA;
 mod store;
 pub(crate) mod web;
