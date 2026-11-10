@@ -5078,8 +5078,26 @@ async fn material_create_table_bar_and_no_script_buttons() {
     );
     let js = include_str!("../../assets/source-review.js");
     assert!(js.contains("table-bar") && js.contains("units selected"));
+    assert!(js.contains("has-table-bar") && js.contains("data-selected-announce"));
+    assert!(
+        parsed
+            .select(&css(
+                "form#table-select p.sr-only[aria-live=polite][data-selected-announce]"
+            ))
+            .next()
+            .is_some(),
+        "an always-present live region outside the hidden bar"
+    );
     let sheet = include_str!("../../assets/app.css");
     assert!(sheet.contains(".table-bar") && sheet.contains("position: fixed"));
+    assert!(
+        sheet.contains(".has-table-bar { scroll-padding-bottom")
+            && sheet.contains(".has-table-bar body { padding-bottom")
+    );
+    assert!(
+        html.contains("buttons above and below the cards")
+            && html.contains("applies to the cards shown")
+    );
 }
 
 #[tokio::test]
@@ -5209,7 +5227,7 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
     let html = body(response).await;
     let parsed = scraper::Html::parse_document(&html);
     let groups: Vec<_> = parsed.select(&css("section[data-review-page]")).collect();
-    assert_eq!(groups.len(), 50, "the first request lists 50 pages");
+    assert_eq!(groups.len(), 10, "the first request lists 10 pages");
     let first = groups[0];
     assert_eq!(first.value().attr("data-review-page"), Some("1"));
     let text: String = first.text().collect();
@@ -5235,7 +5253,14 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
     let dense = groups[1];
     assert_eq!(dense.select(&css("a[data-unit-link]")).count(), 100);
     assert!(dense.text().collect::<String>().contains("20 more"));
-    assert!(dense.select(&css("a[data-more-link]")).next().is_some());
+    // "More" opens the page at the first unlisted unit (the 101st card of page 2).
+    assert_eq!(
+        dense
+            .select(&css("a[data-more-link]"))
+            .next()
+            .and_then(|a| a.value().attr("href")),
+        Some("/admin/materials/pages/2?units=100#unit-2101")
+    );
     // Unit text is escaped.
     assert!(!html.contains("<b>"));
     // Paging by PDF page with one lookahead.
@@ -5245,17 +5270,22 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
         .expect("next link");
     assert_eq!(
         next.value().attr("href"),
-        Some("/admin/materials/sources/1/review?after=51")
+        Some("/admin/materials/sources/1/review?after=11")
     );
     let second =
-        body(router_get(&app, &auth[0], "/admin/materials/sources/1/review?after=51").await).await;
+        body(router_get(&app, &auth[0], "/admin/materials/sources/1/review?after=11").await).await;
     let parsed = scraper::Html::parse_document(&second);
     let pages: Vec<_> = parsed
         .select(&css("section[data-review-page]"))
         .map(|s| s.value().attr("data-review-page").unwrap())
         .collect();
-    assert_eq!(pages.len(), 9);
-    assert_eq!(pages[0], "52");
+    assert_eq!(pages.len(), 10);
+    assert_eq!(pages[0], "12");
+    assert!(parsed.select(&css("a[data-next-review]")).next().is_some());
+    let last =
+        body(router_get(&app, &auth[0], "/admin/materials/sources/1/review?after=51").await).await;
+    let parsed = scraper::Html::parse_document(&last);
+    assert_eq!(parsed.select(&css("section[data-review-page]")).count(), 9);
     assert!(parsed.select(&css("a[data-next-review]")).next().is_none());
     // Bad cursor and unknown source are refused.
     assert_eq!(
@@ -5336,9 +5366,13 @@ async fn material_next_incomplete_page_reaches_pages_without_units_to_review() {
     store
         .run(|db| {
             // Page 2 has no units (needs only a completeness check), page 3 has an unreviewed unit,
-            // page 4 has only a reviewed unit.
+            // page 4 has only a reviewed unit. Later pages that must be skipped: a complete page 5 and an
+            // incomplete page of another source.
             db.execute_batch(
                 "INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47'),(3,1,3,x'89504e47'),(4,1,4,x'89504e47');
+                 INSERT INTO source_pages(id,source_id,pdf_page,png,complete) VALUES(5,1,5,x'89504e47',1);
+                 INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(2,'other','other','Other','mork-borg','Other edition','en',hex(zeroblob(32)),x'',x'',x'',1);
+                 INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(100,2,6,x'89504e47');
                  INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(900,3,'a','Text','[]','<p>x</p>','x'),(901,4,'b','Text','[]','<p>x</p>','x');",
             )?;
             crate::sources::search::ensure(db)?;
@@ -5367,15 +5401,74 @@ async fn material_next_incomplete_page_reaches_pages_without_units_to_review() {
         Some("/admin/materials/pages/3")
     );
     assert_eq!(
-        link(&one, "Next incomplete page").as_deref(),
+        link(&one, "Next page to confirm complete").as_deref(),
         Some("/admin/materials/pages/2")
     );
     let two = body(router_get(&app, &auth[0], "/admin/materials/pages/2").await).await;
     assert_eq!(
-        link(&two, "Next incomplete page").as_deref(),
+        link(&two, "Next page to confirm complete").as_deref(),
         Some("/admin/materials/pages/4")
     );
     let four = body(router_get(&app, &auth[0], "/admin/materials/pages/4").await).await;
-    assert_eq!(link(&four, "Next incomplete page"), None);
+    assert_eq!(link(&four, "Next page to confirm complete"), None);
     assert_eq!(link(&four, "Next page with units to review"), None);
+}
+
+#[tokio::test]
+async fn material_review_list_response_fits_the_html_budget_with_adversarial_text() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            // Pages 2..=11 with 101 units each: maximum-length kinds of `&` and 80-character
+            // snippets of quotes (escaped to five bytes each) or four-byte characters.
+            db.execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 2 UNION ALL SELECT i+1 FROM n WHERE i<11) INSERT INTO source_pages(id,source_id,pdf_page,png) SELECT i,1,i,x'89504e47' FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<101), pg(p) AS (SELECT 2 UNION ALL SELECT p+1 FROM pg WHERE p<11)
+                 INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text)
+                 SELECT 10000+p*1000+i,p,'b'||p||'-'||i,replace(hex(zeroblob(50)),'0','&'),'[]','<p>x</p>',
+                        CASE WHEN p%2=0 THEN replace(hex(zeroblob(40)),'0','\"') ELSE replace(hex(zeroblob(40)),'0','😀') END
+                 FROM n,pg;",
+            )?;
+            crate::sources::search::ensure(db)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = router_get(&app, &auth[0], "/admin/materials/sources/1/review").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let links = html.matches("data-unit-link").count();
+    assert!(
+        links > 900 && links <= 1000,
+        "a response lists at most 1,000 units: {links}"
+    );
+    assert!(
+        html.len() <= 2 * 1024 * 1024,
+        "worst-case review list: {} bytes",
+        html.len()
+    );
+    assert!(html.contains("data-next-review"));
+}
+
+#[tokio::test]
+async fn material_review_list_after_a_read_deadline_shows_counts_and_the_next_link() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = review_list_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    store
+        .force_read_deadline("review_list", std::time::Duration::ZERO)
+        .await;
+    let response = router_get(&app, &auth[0], "/admin/materials/sources/1/review").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(html.contains("Read deadline reached"), "{html}");
+    assert!(html.contains("229 unreviewed unit(s) on 60 page(s)"));
+    assert!(!html.contains("data-review-page"));
+    assert!(html.contains("review?after=10"));
+    // The next request is complete again.
+    let html = body(router_get(&app, &auth[0], "/admin/materials/sources/1/review").await).await;
+    assert!(!html.contains("Read deadline reached") && html.contains("data-review-page"));
 }

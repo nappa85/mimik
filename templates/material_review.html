@@ -4,10 +4,11 @@
 <h1>Source #{{ source }} — units to review</h1>
 {% if list.unreviewed_units == 0 %}<p>No unit is waiting for review in this source. Pages may still need a completeness confirmation: open them from the <a href="/admin/materials/sources/{{ source }}">page list</a>.</p>
 {% else %}<p>{{ list.unreviewed_units }} unreviewed unit(s) on {{ list.unreviewed_pages }} page(s), grouped by PDF page. Each link opens the page at that unit's card.</p>
-{% for row in list.listing.rows %}<section class="panel" data-review-page="{{ row.pdf_page }}"><h2>PDF page {{ row.pdf_page }}</h2>
+{% if list.reduced %}<p role="status">Read deadline reached: the per-page lists are omitted. Reload, or continue with the next pages.</p>{% endif %}
+{% for row in list.rows %}<section class="panel" data-review-page="{{ row.pdf_page }}"><h2>PDF page {{ row.pdf_page }}</h2>
 <p>{{ row.unreviewed }} of {{ row.total }} units unreviewed · <a href="/admin/materials/pages/{{ row.id }}">Open the page</a></p>
 <ul>{% for unit in row.units %}<li><a data-unit-link href="{{ unit.link(*row.id) }}">Unit {{ unit.id }} ({{ unit.kind }})</a>{% if !unit.snippet.is_empty() %} — {{ unit.snippet }}{% endif %}</li>{% endfor %}</ul>
-{% if row.more > 0 %}<p>{{ row.more }} more unreviewed unit(s) not listed here. <a data-more-link href="/admin/materials/pages/{{ row.id }}">Open the page and use "Next unreviewed unit"</a>.</p>{% endif %}</section>
+{% if row.more > 0 %}<p>{{ row.more }} more unreviewed unit(s) not listed here. <a data-more-link href="{{ row.more_link }}">Open the page at the first unlisted unit</a>.</p>{% endif %}</section>
 {% endfor %}{% endif %}
-{% if let Some(next) = list.listing.next %}<a data-next-review href="/admin/materials/sources/{{ source }}/review?after={{ next }}">Next pages</a> · {% endif %}<a href="/admin/materials/sources/{{ source }}/review">First pages</a>
+{% if let Some(next) = list.next %}<a data-next-review href="/admin/materials/sources/{{ source }}/review?after={{ next }}">Next pages</a> · {% endif %}<a href="/admin/materials/sources/{{ source }}/review">First pages</a>
 {% endblock %}

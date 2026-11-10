@@ -41,11 +41,16 @@
   if (bar) {
     const ticks = () => [...document.querySelectorAll('input[name=unit][form=table-select]')];
     const count = bar.querySelector('[data-selected-count]');
+    const announce = document.querySelector('[data-selected-announce]');
     document.querySelectorAll('[data-no-script-table]').forEach(button => { button.hidden = true; });
     const refresh = () => {
       const n = ticks().filter(box => box.checked).length;
       bar.hidden = n === 0;
-      count.textContent = (n === 1 ? '1 unit selected' : `${n} units selected`) + (n > 16 ? ' (at most 16 per table)' : '');
+      // The bar must not cover the content: pad the page while it shows.
+      document.documentElement.classList.toggle('has-table-bar', n > 0);
+      const message = (n === 1 ? '1 unit selected' : `${n} units selected`) + (n > 16 ? ' (at most 16 per table)' : '');
+      count.textContent = message;
+      if (announce) announce.textContent = n === 0 ? '' : message;
     };
     ticks().forEach(box => box.addEventListener('change', refresh));
     bar.querySelector('[data-clear-selection]').addEventListener('click', () => {

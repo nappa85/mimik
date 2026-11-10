@@ -534,7 +534,24 @@ In particular, a card Accept/Dismiss failure opens the suggestion detail panel, 
 the submitted draft there, rather than re-rendering it on the original card. This supplies
 one bounded edit/error form for multi-target advice and a matching-card return link.
 
-Navigation links lead to the next unreviewed unit, the next later page with units to review, the next later incomplete page (not complete and with no unreviewed unit, so it needs only a completeness confirmation) and the source's review list. The review list (`GET /admin/materials/sources/{id}/review`) groups the source's unreviewed units by PDF page, with the counts per page and a link to each unit's card (`#unit-N`, with the card-window cursor when the unit is beyond the first 50); it is keyset-paged by PDF page (50 pages per request), lists at most 100 units per page (the count of the rest is shown), runs under the read deadline and is linked from the source and page screens. On wide screens the page image with the unit boxes is sticky beside the cards (`.sticky-original`); on narrow screens it stays above them. Ticking "Select unit N for a table" records no decision: with script a bar fixed to the bottom of the viewport shows the count with "Create table" and "Clear"; without script the "Create table from selected units" button appears before and after the card list (same GET form). Re-deciding a unit that was already reviewed stays on that unit (`then=stay`), with the same true-link check; first decisions advance as above. With the script, `j`/`k` focus adjacent cards and `a` focuses an acceptance
+Navigation links lead to the next unreviewed unit, the next later page with units to review, the
+next later page to confirm complete (not complete and with no unreviewed unit, so it needs only a
+completeness confirmation; later complete pages and pages of other sources are skipped) and the
+source's review list. The review list (`GET /admin/materials/sources/{id}/review`) groups the
+source's unreviewed units by PDF page, with the counts per page and a link to each unit's card
+(`#unit-N`, with the card-window cursor when the unit is beyond the first 50); it is keyset-paged
+by PDF page, 10 pages per request and at most 100 unit links per page (so at most 1,000 links,
+kinds and 80-character snippets escaped, which keeps the worst case far under the 2 MiB HTML
+budget; these are technical bounds in the sense of SRC-15). "N more" opens the page at the first
+unlisted unit. It runs under the read deadline; after a deadline it shows only the counts and the
+next link. It is linked from the source and page screens. On wide screens the page image with the
+unit boxes is sticky beside the cards (`.sticky-original`); on narrow screens it stays above
+them. Ticking "Select unit N for a table" records no decision: with script a bar fixed to the
+bottom of the viewport shows the count with "Create table" and "Clear"; without script the
+"Create table from selected units" button appears before and after the card list (same GET form).
+Re-deciding a unit that was already reviewed stays on that unit (`then=stay`), with the same
+true-link check; first decisions advance as above. With the script, `j`/`k` focus adjacent cards
+and `a` focuses an acceptance
 rationale without submitting. Shortcuts apply only inside the review list, outside form fields
 and editable elements, and can be disabled per browser in the help panel. Focus indicators are
 visible. Every Owner material page carries the sheet pages' strict policy (`SHEET_CSP`:
