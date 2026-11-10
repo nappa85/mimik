@@ -159,6 +159,9 @@ pub struct EvidenceSearch {
     pub matches: Vec<Evidence>,
 }
 
+/// Sanitise unit HTML to the allowlist below. `search::flatten_tables` relies on its output
+/// carrying no attribute but numeric `colspan`/`rowspan` on `td`/`th` (no free-text
+/// attributes), lowercase tags and escaped `<` in text; a test pins this.
 pub(crate) fn sanitized(html: &str) -> Result<String, crate::AppError> {
     let bad_span = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let invalid_span = bad_span.clone();

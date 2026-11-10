@@ -20,7 +20,7 @@ const MAX_RAW_HTML_BYTES: usize = 64 * 1024;
 
 /// Bump whenever [`search_text`] output can change (including html2text upgrades);
 /// the golden test below fails until this is bumped deliberately.
-pub(crate) const SEARCH_NORMALISER: i64 = 1;
+pub(crate) const SEARCH_NORMALISER: i64 = 2;
 /// Matches the `source_search_text.search_text` CHECK constraint.
 const MAX_SEARCH_TEXT_BYTES: usize = 256 * 1024;
 /// Wide enough that no unit (raw HTML is at most 64 KiB) is ever wrapped.
@@ -28,13 +28,151 @@ const UNWRAPPED_WIDTH: usize = 1 << 20;
 pub(crate) const MATCH_LIMIT: usize = 50;
 const MAX_QUERY_PIECES: usize = 16;
 
-/// Unwrapped, undecorated plain text for indexing. Tables are flattened to one cell per
-/// line, so a quoted phrase can match across adjacent cells (documented behaviour).
+/// Separator between the cells of a table row in the search text (the same as the lookup
+/// text of owner tables, `tables::plain`).
+const CELL_SEPARATOR: &str = " | ";
+
+/// Inline tags of the sanitiser allowlist that do not separate words inside a cell.
+const INLINE_TAGS: [&str; 7] = ["b", "strong", "i", "em", "sub", "sup", "code"];
+
+/// Where text inside a table goes.
+#[derive(Clone, Copy, PartialEq)]
+enum Open {
+    /// Between rows or cells: text becomes its own line (a caption unwrapped by the
+    /// sanitiser, for instance).
+    Nothing,
+    /// Inside a stray-text line.
+    Stray,
+    /// Inside the last cell of the last row.
+    Cell,
+}
+
+/// Rewrite every table of sanitised HTML as one `<pre>` block: one line per row (`tr`),
+/// cells in order joined by [`CELL_SEPARATOR`]. Cell text keeps its entities, loses its
+/// markup (block tags and `br` become a space) and has whitespace collapsed; empty cells
+/// stay as empty positions so columns stay aligned (`a |  | c`); `colspan`/`rowspan` are
+/// not expanded. A table nested in a cell is flattened into that cell's text. Text in a
+/// table but outside any cell gets its own line. HTML without a table is returned
+/// unchanged.
+///
+/// Relies on the guarantees of [`sanitized`]: lowercase tags, `<` escaped in text, and no
+/// attribute other than numeric `colspan`/`rowspan`, so a `<` always starts a tag and a
+/// tag ends at the first `>`.
+fn flatten_tables(clean: &str) -> std::borrow::Cow<'_, str> {
+    if !clean.contains("<table") {
+        return std::borrow::Cow::Borrowed(clean);
+    }
+    let mut out = String::with_capacity(clean.len());
+    let mut rest = clean;
+    let mut depth = 0_usize;
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    let mut open = Open::Nothing;
+    while !rest.is_empty() {
+        let (text, tag_start) = rest.split_at(rest.find('<').unwrap_or(rest.len()));
+        if depth == 0 {
+            out.push_str(text);
+        } else {
+            append_text(&mut lines, &mut open, text);
+        }
+        let end = tag_start.find('>').map_or(tag_start.len(), |i| i + 1);
+        let tag = &tag_start[..end];
+        rest = &tag_start[end..];
+        if tag.is_empty() {
+            break;
+        }
+        let name = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .next()
+            .unwrap_or("");
+        let closing = tag.starts_with("</");
+        match (name, closing) {
+            ("table", false) => {
+                depth += 1;
+                if depth == 1 {
+                    lines.clear();
+                    open = Open::Nothing;
+                } else {
+                    append_text(&mut lines, &mut open, " ");
+                }
+            }
+            ("table", true) if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push_str("<pre>");
+                    let rendered: Vec<String> = lines
+                        .iter()
+                        .map(|line| {
+                            line.iter()
+                                .map(|cell| cell.trim_end())
+                                .collect::<Vec<_>>()
+                                .join(CELL_SEPARATOR)
+                        })
+                        .collect();
+                    out.push_str(&rendered.join("\n"));
+                    out.push_str("</pre>");
+                } else {
+                    append_text(&mut lines, &mut open, " ");
+                }
+            }
+            ("tr", false) if depth == 1 => {
+                lines.push(Vec::new());
+                open = Open::Nothing;
+            }
+            ("td" | "th", false) if depth == 1 => {
+                if open == Open::Stray || lines.is_empty() {
+                    lines.push(Vec::new());
+                }
+                if let Some(line) = lines.last_mut() {
+                    line.push(String::new());
+                }
+                open = Open::Cell;
+            }
+            ("tr" | "td" | "th", true) if depth == 1 => open = Open::Nothing,
+            _ if depth == 0 => out.push_str(tag),
+            _ if INLINE_TAGS.contains(&name) => {}
+            _ => append_text(&mut lines, &mut open, " "),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Append text to the open cell, collapsing whitespace runs to one space. Outside a cell,
+/// non-blank text starts (or continues) a line of its own.
+fn append_text(lines: &mut Vec<Vec<String>>, open: &mut Open, text: &str) {
+    if text.trim().is_empty() && *open != Open::Cell && *open != Open::Stray {
+        return;
+    }
+    if *open == Open::Nothing {
+        lines.push(vec![String::new()]);
+        *open = Open::Stray;
+    }
+    let Some(cell) = lines.last_mut().and_then(|line| line.last_mut()) else {
+        return;
+    };
+    let mut gap = text.starts_with(char::is_whitespace);
+    for word in text.split_whitespace() {
+        if gap && !cell.is_empty() && !cell.ends_with(' ') {
+            cell.push(' ');
+        }
+        cell.push_str(word);
+        gap = true;
+    }
+    if text.ends_with(char::is_whitespace) && !cell.is_empty() && !cell.ends_with(' ') {
+        cell.push(' ');
+    }
+}
+
+/// Unwrapped, undecorated plain text for indexing. Each table row is one line, cells
+/// joined by ` | ` (see [`flatten_tables`]), so a search hit keeps which cells share a row
+/// and a quoted phrase can match across adjacent cells and rows (documented behaviour).
 ///
 /// # Errors
 /// Rejects unsanitizable HTML or output above the stored byte bound.
 pub(crate) fn search_text(raw_html: &str) -> Result<String, AppError> {
-    let clean = sanitized(raw_html)?;
+    let sanitised = sanitized(raw_html)?;
+    let clean = flatten_tables(&sanitised);
     let text = html2text::config::plain_no_decorate()
         .raw_mode(true)
         .no_table_borders()
@@ -394,12 +532,28 @@ pub(crate) fn rebuild(db: &Connection) -> Result<i64, AppError> {
 /// Every open: batched derivation of missing rows plus a count comparison; full rebuild
 /// (with FTS5 integrity check) only when the counts disagree. An upgrade creates empty
 /// tables, so any eligible unit forces that rebuild. Equal counts with stale content are
-/// not detected here; use [`crate::Store::rebuild_search_index`]. Returns the failed-unit count.
+/// not detected here; use [`crate::Store::rebuild_search_index`]. A changed normaliser
+/// re-derives every unit inside the caller's single transaction (startup blocks until done;
+/// one line is printed with the count) and then optimises the FTS index. Returns the
+/// failed-unit count.
 ///
 /// # Errors
 /// Storage failures only; unnormalisable units are recorded, not fatal.
 pub(crate) fn ensure(db: &Connection) -> Result<i64, AppError> {
+    let stale: i64 = db.query_row(
+        "SELECT count(*) FROM source_search_text WHERE normaliser<>?1",
+        [SEARCH_NORMALISER],
+        |row| row.get(0),
+    )?;
+    if stale > 0 {
+        eprintln!(
+            "Re-deriving the search text of {stale} unit(s) for a new search normaliser; startup waits for it."
+        );
+    }
     let failed = derive_missing(db)?;
+    if stale > 0 {
+        db.execute_batch("INSERT INTO source_search_fts(source_search_fts) VALUES('optimize');")?;
+    }
     let (indexed, eligible): (i64, i64) = db.query_row(&format!("SELECT (SELECT count(*) FROM source_search_fts),(SELECT count(*) FROM ({EXPECTED_INDEX}))"), [], |row| Ok((row.get(0)?, row.get(1)?)))?;
     if indexed != eligible {
         rebuild(db)?;
@@ -434,13 +588,13 @@ mod tests {
     #[test]
     fn normaliser_output_is_golden() {
         // If this fails after a dependency upgrade, bump SEARCH_NORMALISER and update.
-        assert_eq!(SEARCH_NORMALISER, 1);
+        assert_eq!(SEARCH_NORMALISER, 2);
         let html = "<h2>Armi</h2><p>Una <b>spada</b> <i>lunga</i> che continua per molte parole senza mai andare a capo anche oltre centoventi colonne di testo continuo qui</p><table><tr><th>Arma</th><th>Danno</th></tr><tr><td>Spada lunga a due mani</td><td>d8 più forza</td></tr></table><ul><li>uno</li><li>due</li></ul><ol><li>tre</li></ol><blockquote>citazione</blockquote><p>a<br>b</p>";
         assert_eq!(
             search_text(html).unwrap(),
             // Structural markers (`##`, `*`, `1.`, `>`) remain; unicode61 drops the
             // punctuation, but ordered-list numbers are indexed as number tokens.
-            "## Armi\n\nUna spada lunga che continua per molte parole senza mai andare a capo anche oltre centoventi colonne di testo continuo qui\n\nArma\nDanno\nSpada lunga a due mani\nd8 più forza\n* uno\n* due\n1. tre\n\n> citazione\n\na\nb\n"
+            "## Armi\n\nUna spada lunga che continua per molte parole senza mai andare a capo anche oltre centoventi colonne di testo continuo qui\n\nArma | Danno\nSpada lunga a due mani | d8 più forza\n* uno\n* due\n1. tre\n\n> citazione\n\na\nb\n"
         );
     }
 
@@ -505,6 +659,105 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(state, (1, 0, 0));
+    }
+
+    fn flat(html: &str) -> String {
+        search_text(html).unwrap().trim_end().to_owned()
+    }
+
+    #[test]
+    fn text_in_a_table_outside_any_cell_gets_its_own_line() {
+        assert_eq!(
+            flat("<table><caption>Armi</caption><tr><td>a</td><td>b</td></tr></table>"),
+            "Armi\na | b"
+        );
+    }
+
+    #[test]
+    fn block_tags_in_a_cell_separate_words_and_inline_tags_do_not() {
+        assert_eq!(
+            flat(
+                "<table><tr><td><h4>Titolo</h4>testo</td><td>s<sub>1</sub>x<b>y</b></td></tr></table>"
+            ),
+            "Titolo testo | s1xy"
+        );
+    }
+
+    #[test]
+    fn several_tables_footers_empty_rows_and_nested_containers() {
+        assert_eq!(
+            flat(
+                "<table><tr><td>a</td></tr></table><p>mezzo</p><table><tr><td>b</td><td>c</td></tr></table>"
+            ),
+            "a\n\nmezzo\n\nb | c"
+        );
+        assert_eq!(
+            flat(
+                "<table><tbody><tr><td>x</td></tr></tbody><tfoot><tr><td>Totale</td><td>3</td></tr></tfoot></table>"
+            ),
+            "x\nTotale | 3"
+        );
+        assert_eq!(
+            flat(
+                "<table><tr><td>a</td><td>b</td></tr><tr><td></td><td></td></tr><tr><td>c</td><td>d</td></tr></table>"
+            ),
+            "a | b\n | \nc | d"
+        );
+        assert_eq!(
+            flat(
+                "<ul><li>voce<table><tr><td>a</td><td>b</td></tr></table></li></ul><blockquote><table><tr><td>c</td><td>d</td></tr></table></blockquote>"
+            ),
+            "* voce\n  \n  a | b\n\n> c | d"
+        );
+    }
+
+    #[test]
+    fn the_sanitiser_leaves_no_attribute_but_numeric_spans() {
+        let dirty = "<TABLE class=x onclick=\"a>b\" title=\"<td>\"><TR id=r><TD colspan=\"2\" rowspan=3 style=\"x\" data-x=1>a &lt;b&gt;</TD><th ROWSPAN=\"2\" title='>'>c</th></TR></TABLE><p class=z>t</p><a href=\"javascript:1\">l</a>";
+        let clean = sanitized(dirty).unwrap();
+        let tags = regex::Regex::new(r"<[^>]*>").unwrap();
+        let span = regex::Regex::new(r#"^<(td|th)( (colspan|rowspan)="[0-9]+")*>$"#).unwrap();
+        let plain = regex::Regex::new(r"^</?[a-z0-9]+>$").unwrap();
+        for tag in tags.find_iter(&clean) {
+            assert!(
+                plain.is_match(tag.as_str()) || span.is_match(tag.as_str()),
+                "{} in {clean}",
+                tag.as_str()
+            );
+        }
+        assert!(!clean.contains('<') || tags.replace_all(&clean, "").find('<').is_none());
+    }
+
+    #[test]
+    fn html_without_a_table_is_not_rewritten() {
+        let html = "<h2>Armi</h2><p>Una <b>spada</b> &amp; <i>lunga</i></p><ul><li>uno</li><li>due</li></ul><ol><li>tre</li></ol><blockquote>citazione</blockquote><p>a<br>b</p>";
+        let clean = sanitized(html).unwrap();
+        assert_eq!(flatten_tables(&clean), clean);
+        assert_eq!(
+            search_text(html).unwrap(),
+            "## Armi\n\nUna spada & lunga\n* uno\n* due\n1. tre\n\n> citazione\n\na\nb\n"
+        );
+    }
+
+    #[test]
+    fn table_rows_become_lines_with_aligned_empty_cells() {
+        let marker = "<table><thead><tr><th>Arma</th><th>Danno</th><th>Note</th></tr></thead><tbody><tr><td>Spada <b>lunga</b></td><td>d8 &amp; d6</td><td></td></tr><tr><td colspan=\"2\">Ascia</td><td>a una mano<br>o due<table><tr><td>x</td><td>y</td></tr></table></td></tr></tbody></table><p>Dopo</p>";
+        assert_eq!(
+            search_text(marker).unwrap(),
+            "Arma | Danno | Note\nSpada lunga | d8 & d6 | \nAscia | a una mano o due x y\n\nDopo\n"
+        );
+        let owner = crate::sources::tables::html(&[
+            vec!["Spada".to_owned(), "d8".to_owned(), String::new()],
+            vec!["Ascia".to_owned(), "d6".to_owned(), "una mano".to_owned()],
+        ]);
+        let text = search_text(&owner).unwrap();
+        assert_eq!(
+            text.trim_end(),
+            crate::sources::tables::plain(&[
+                vec!["Spada".to_owned(), "d8".to_owned(), String::new()],
+                vec!["Ascia".to_owned(), "d6".to_owned(), "una mano".to_owned()],
+            ])
+        );
     }
 
     #[test]
