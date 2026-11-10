@@ -260,7 +260,7 @@ async fn material_final_invalid_state_copies_fit_budget() {
     assert!(html.contains("Submitted invalid decision: &#34;&#34;&#34;"));
     assert!(
         parsed
-            .select(&scraper::Selector::parse("#unit-1 input[name=state][checked]").unwrap())
+            .select(&scraper::Selector::parse("#unit-1 option[selected]:not([value=''])").unwrap())
             .next()
             .is_none()
     );
@@ -2365,12 +2365,12 @@ async fn material_document_conflict_validation_and_nul_retain_escaped_drafts() {
         let parsed = scraper::Html::parse_document(&html);
         let checked = parsed
             .select(
-                &scraper::Selector::parse("[data-form=unit] input[name=state][checked]").unwrap(),
+                &scraper::Selector::parse("#unit-1 select[name=state] option[selected]").unwrap(),
             )
-            .map(|radio| radio.value().attr("value").unwrap())
+            .map(|option| option.value().attr("value").unwrap())
             .collect::<Vec<_>>();
         if state == "invalid" {
-            assert_eq!(checked, Vec::<&str>::new());
+            assert_eq!(checked, [""]);
             assert!(html.contains("Submitted invalid decision: invalid."));
         } else {
             assert_eq!(checked, [state]);
@@ -4724,26 +4724,39 @@ async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
         .select(&select("#unit-1 form[data-form=unit]"))
         .next()
         .unwrap();
+    // One dropdown, on the heading row, tied to the form by id; no radios.
     assert!(
-        form.select(&select("select")).next().is_none(),
-        "no select any more"
+        form.select(&select("input[type=radio]")).next().is_none(),
+        "no radios any more"
     );
-    let values: Vec<_> = form
-        .select(&select("input[type=radio][name=state]"))
+    let form_id = form.value().attr("id").expect("the form has an id");
+    let dropdown = parsed
+        .select(&select("#unit-1 .unit-head select[name=state]"))
+        .next()
+        .expect("the decision dropdown is on the heading row");
+    assert_eq!(dropdown.value().attr("form"), Some(form_id));
+    assert!(dropdown.value().attr("required").is_some());
+    let values: Vec<_> = dropdown
+        .select(&select("option"))
         .map(|r| r.value().attr("value").unwrap())
         .collect();
-    assert_eq!(values, ["accepted", "corrected", "rejected"]);
+    assert_eq!(values, ["", "accepted", "corrected", "rejected"]);
+    assert_eq!(parsed.select(&select("#unit-1 select")).count(), 1);
     // Accepted has no field of its own: both text fields live in containers that only
     // `corrected` / `rejected` reveal, and the rationale label says SRC-4 requires it.
     assert!(
-        form.select(&select(".fields-correction textarea[name=correction]"))
-            .next()
-            .is_some()
+        form.select(&select(
+            "[data-decision-fields=corrected] textarea[name=correction]"
+        ))
+        .next()
+        .is_some()
     );
     assert!(
-        form.select(&select(".fields-rationale textarea[name=rationale]"))
-            .next()
-            .is_some()
+        form.select(&select(
+            "[data-decision-fields~=rejected] textarea[name=rationale]"
+        ))
+        .next()
+        .is_some()
     );
     assert_eq!(form.select(&select("textarea")).count(), 2);
     assert!(form.html().contains("SRC-4"));
@@ -4751,12 +4764,22 @@ async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
         !form.select(&select("textarea[required]")).any(|_| true),
         "hidden fields must not block submit"
     );
+    // Without script every field shows (nothing is hidden by the sheet); the script hides the
+    // fields the chosen decision does not use.
     let css = include_str!("../../assets/app.css");
-    assert!(css.contains(".decision-fields { display: none; }"));
-    assert!(css.contains("input[value=\"corrected\"]:checked ~ .fields-correction"));
-    assert!(css.contains("input[value=\"corrected\"]:checked ~ .fields-rationale"));
-    assert!(css.contains("input[value=\"rejected\"]:checked ~ .fields-rationale"));
-    assert!(!css.contains("input[value=\"rejected\"]:checked ~ .fields-correction"));
+    assert!(!css.contains(".decision-fields { display: none; }"));
+    assert!(!css.contains(":checked ~ .fields-"));
+    let js = include_str!("../../assets/source-review.js");
+    assert!(js.contains("data-decision-fields") && js.contains("select[name=state]"));
+}
+
+#[tokio::test]
+async fn material_unused_decision_fields_are_ignored_and_a_corrected_unit_preselects() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let select = |css: &str| scraper::Selector::parse(css).unwrap();
     // Fields that the chosen decision does not use are ignored, not refused or stored.
     for (state, unit) in [("accepted", 1), ("rejected", 2)] {
         let response = document_at(
@@ -4795,7 +4818,7 @@ async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
             )
         ]
     );
-    // A corrected unit pre-checks its radio on the next view.
+    // A corrected unit pre-selects its option on the next view.
     let response = document_at(
         &app,
         &auth[0],
@@ -4812,7 +4835,7 @@ async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
     let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=2").await).await;
     assert!(
         scraper::Html::parse_document(&html)
-            .select(&select("#unit-3 input[value=corrected][checked]"))
+            .select(&select("#unit-3 option[value=corrected][selected]"))
             .next()
             .is_some()
     );
@@ -4989,4 +5012,370 @@ async fn material_table_refuses_other_page_units_and_reports_bounds() {
         Err(AppError::Invalid(_))
     ));
     assert_eq!(counts(&store).await, before);
+}
+
+// ---- Review flow: create-table bar, re-decided units, review list, sticky image, next page ----
+
+fn css(selector: &str) -> scraper::Selector {
+    scraper::Selector::parse(selector).unwrap()
+}
+
+#[tokio::test]
+async fn material_create_table_bar_and_no_script_buttons() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    // The bar lives in the selection form, is hidden until the script shows it, and has a count,
+    // a submit button and a clear button.
+    let bar = parsed
+        .select(&css("form#table-select #table-bar"))
+        .next()
+        .expect("table bar inside the selection form");
+    assert!(bar.value().attr("hidden").is_some());
+    assert!(bar.select(&css("[data-selected-count]")).next().is_some());
+    let submit: String = bar
+        .select(&css("button[type=submit]"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert_eq!(submit.trim(), "Create table");
+    let clear: String = bar
+        .select(&css("button[type=button][data-clear-selection]"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert_eq!(clear.trim(), "Clear");
+    // Without script: today's button above the list plus one after the card list.
+    let buttons = parsed
+        .select(&css("[data-no-script-table]"))
+        .filter(|b| {
+            b.text()
+                .collect::<String>()
+                .contains("Create table from selected units")
+        })
+        .count();
+    assert_eq!(buttons, 2, "one before and one after the cards");
+    let after = parsed.select(&css("button[form=table-select]")).count();
+    assert!(after >= 1, "the trailing button targets the selection form");
+    // Each card says what the tick does.
+    assert!(
+        parsed
+            .select(&css("#unit-1 .select-unit .tick-hint"))
+            .next()
+            .is_some()
+    );
+    // The GET contract is unchanged.
+    let form = parsed.select(&css("form#table-select")).next().unwrap();
+    assert_eq!(form.value().attr("method"), Some("get"));
+    assert_eq!(
+        form.value().attr("action"),
+        Some("/admin/materials/pages/1/tables/new")
+    );
+    let js = include_str!("../../assets/source-review.js");
+    assert!(js.contains("table-bar") && js.contains("units selected"));
+    let sheet = include_str!("../../assets/app.css");
+    assert!(sheet.contains(".table-bar") && sheet.contains("position: fixed"));
+}
+
+#[tokio::test]
+async fn material_re_decided_unit_stays_while_first_decisions_advance() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // First decision: still goes to the next unreviewed unit.
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    assert_eq!(
+        location(&response),
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit#unit-2"
+    );
+    // Correcting the accepted unit stays on that unit.
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        review_form(&[
+            ("revision", "2"),
+            ("state", "corrected"),
+            ("correction", "Fixed"),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let target = location(&response);
+    assert_eq!(
+        target,
+        "/admin/materials/pages/1?saved=corrected&saved_unit=1&to=1&then=stay#unit-1"
+    );
+    let html = body(router_get(&app, &auth[0], &target).await).await;
+    assert!(
+        html.contains("Saved unit 1: corrected with source evidence."),
+        "{html}"
+    );
+    assert!(html.contains("Staying on this unit"));
+    assert!(
+        scraper::Html::parse_document(&html)
+            .select(&css("#unit-1 strong"))
+            .next()
+            .is_some(),
+        "the card repeats the confirmation"
+    );
+    // A forged stay link for a unit in another state shows no notice.
+    let false_link = "/admin/materials/pages/1?saved=rejected&saved_unit=1&to=1&then=stay";
+    assert!(
+        !body(router_get(&app, &auth[0], false_link).await)
+            .await
+            .contains("Saved unit")
+    );
+    // A deep unit (outside the default 50-card window) keeps its window cursor when re-decided.
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/51",
+        accept_form(1, ""),
+    )
+    .await;
+    assert!(location(&response).contains("then=unit") || location(&response).contains("then=done"));
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/51",
+        review_form(&[
+            ("revision", "2"),
+            ("state", "rejected"),
+            ("correction", ""),
+            ("rationale", "No"),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        location(&response),
+        "/admin/materials/pages/1?units=50&saved=rejected&saved_unit=51&to=51&then=stay#unit-51"
+    );
+}
+
+async fn review_list_fixture() -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    let (dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            // Page ids equal PDF pages 2..=60; page 2 has 120 unreviewed units, the others one.
+            db.execute_batch(
+                "WITH RECURSIVE n(i) AS (SELECT 2 UNION ALL SELECT i+1 FROM n WHERE i<60) INSERT INTO source_pages(id,source_id,pdf_page,png) SELECT i,1,i,x'89504e47' FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<120) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT 2000+i,2,'t'||i,'Text','[]','<p>x</p>','Dense '||i FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 3 UNION ALL SELECT i+1 FROM n WHERE i<60) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT 3000+i,i,'s'||i,'Table','[]','<p>x</p>','Row <b>'||i FROM n;
+                 INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(2,'other','other','Other','mork-borg','Other edition','en',hex(zeroblob(32)),x'',x'',x'',1);
+                 INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(100,2,1,x'89504e47');
+                 INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(5000,100,'o','Text','[]','<p>x</p>','Foreign unit');",
+            )?;
+            crate::sources::search::ensure(db)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    (dir, store, auth)
+}
+
+#[tokio::test]
+async fn material_review_list_groups_unreviewed_units_by_page_within_the_source() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = review_list_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // Review unit 1 and unit 3003 so they leave the list.
+    for (page, unit) in [(1, 1), (3, 3003)] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/{page}/units/{unit}"),
+            accept_form(1, ""),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    let response = router_get(&app, &auth[0], "/admin/materials/sources/1/review").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let groups: Vec<_> = parsed.select(&css("section[data-review-page]")).collect();
+    assert_eq!(groups.len(), 50, "the first request lists 50 pages");
+    let first = groups[0];
+    assert_eq!(first.value().attr("data-review-page"), Some("1"));
+    let text: String = first.text().collect();
+    assert!(
+        text.contains("PDF page 1") && text.contains("50 of 51 units unreviewed"),
+        "{text}"
+    );
+    let links: Vec<_> = first
+        .select(&css("a[data-unit-link]"))
+        .map(|a| a.value().attr("href").unwrap())
+        .collect();
+    assert_eq!(links.len(), 50);
+    assert_eq!(links[0], "/admin/materials/pages/1#unit-2");
+    assert_eq!(
+        *links.last().unwrap(),
+        "/admin/materials/pages/1?units=50#unit-51"
+    );
+    // Units outside the default card window link with their window cursor.
+    // Page 3 has no unreviewed unit left and is not listed; the foreign source never appears.
+    assert!(!html.contains("data-review-page=\"3\""));
+    assert!(!html.contains("Foreign unit") && !html.contains("unit-5000"));
+    // The per-page listing is bounded and says what is left.
+    let dense = groups[1];
+    assert_eq!(dense.select(&css("a[data-unit-link]")).count(), 100);
+    assert!(dense.text().collect::<String>().contains("20 more"));
+    assert!(dense.select(&css("a[data-more-link]")).next().is_some());
+    // Unit text is escaped.
+    assert!(!html.contains("<b>"));
+    // Paging by PDF page with one lookahead.
+    let next = parsed
+        .select(&css("a[data-next-review]"))
+        .next()
+        .expect("next link");
+    assert_eq!(
+        next.value().attr("href"),
+        Some("/admin/materials/sources/1/review?after=51")
+    );
+    let second =
+        body(router_get(&app, &auth[0], "/admin/materials/sources/1/review?after=51").await).await;
+    let parsed = scraper::Html::parse_document(&second);
+    let pages: Vec<_> = parsed
+        .select(&css("section[data-review-page]"))
+        .map(|s| s.value().attr("data-review-page").unwrap())
+        .collect();
+    assert_eq!(pages.len(), 9);
+    assert_eq!(pages[0], "52");
+    assert!(parsed.select(&css("a[data-next-review]")).next().is_none());
+    // Bad cursor and unknown source are refused.
+    assert_eq!(
+        router_get(&app, &auth[0], "/admin/materials/sources/1/review?after=-1")
+            .await
+            .status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        router_get(&app, &auth[0], "/admin/materials/sources/99/review")
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    // The other source lists only its own unit.
+    let other = body(router_get(&app, &auth[0], "/admin/materials/sources/2/review").await).await;
+    assert!(other.contains("Foreign unit") && !other.contains("Dense 1"));
+    // Linked from the source and page screens.
+    let source = body(router_get(&app, &auth[0], "/admin/materials/sources/1").await).await;
+    assert!(source.contains("href=\"/admin/materials/sources/1/review\""));
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(page.contains("href=\"/admin/materials/sources/1/review\""));
+}
+
+#[tokio::test]
+async fn material_review_list_of_a_fully_reviewed_source_says_so() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    accept_all_but_first(&store, &auth[0]).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        accept_form(1, ""),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let html = body(router_get(&app, &auth[0], "/admin/materials/sources/1/review").await).await;
+    assert!(html.contains("No unit is waiting for review"));
+    assert!(!html.contains("data-review-page"));
+}
+
+#[tokio::test]
+async fn material_page_image_is_sticky_beside_the_cards() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(
+        parsed
+            .select(&css(
+                ".evidence-columns > aside.source-original.sticky-original"
+            ))
+            .next()
+            .is_some()
+    );
+    let sheet = include_str!("../../assets/app.css");
+    let rule = sheet
+        .lines()
+        .find(|line| line.contains(".sticky-original") && line.contains("position: sticky"))
+        .expect("a sticky rule");
+    assert!(rule.contains("max-height"), "{rule}");
+    assert!(
+        sheet.contains("@media (max-width: 700px)")
+            && sheet.contains(".sticky-original { position: static")
+    );
+}
+
+#[tokio::test]
+async fn material_next_incomplete_page_reaches_pages_without_units_to_review() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            // Page 2 has no units (needs only a completeness check), page 3 has an unreviewed unit,
+            // page 4 has only a reviewed unit.
+            db.execute_batch(
+                "INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47'),(3,1,3,x'89504e47'),(4,1,4,x'89504e47');
+                 INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(900,3,'a','Text','[]','<p>x</p>','x'),(901,4,'b','Text','[]','<p>x</p>','x');",
+            )?;
+            crate::sources::search::ensure(db)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/4/units/901",
+        accept_form(1, ""),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let link = |html: &str, text: &str| {
+        scraper::Html::parse_document(html)
+            .select(&css("nav a"))
+            .find(|a| a.text().collect::<String>() == text)
+            .map(|a| a.value().attr("href").unwrap().to_owned())
+    };
+    let one = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert_eq!(
+        link(&one, "Next page with units to review").as_deref(),
+        Some("/admin/materials/pages/3")
+    );
+    assert_eq!(
+        link(&one, "Next incomplete page").as_deref(),
+        Some("/admin/materials/pages/2")
+    );
+    let two = body(router_get(&app, &auth[0], "/admin/materials/pages/2").await).await;
+    assert_eq!(
+        link(&two, "Next incomplete page").as_deref(),
+        Some("/admin/materials/pages/4")
+    );
+    let four = body(router_get(&app, &auth[0], "/admin/materials/pages/4").await).await;
+    assert_eq!(link(&four, "Next incomplete page"), None);
+    assert_eq!(link(&four, "Next page with units to review"), None);
 }
