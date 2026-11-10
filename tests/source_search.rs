@@ -532,7 +532,7 @@ async fn table_cells_are_flattened_so_phrases_can_span_adjacent_cells() {
     assert_eq!(texts(&store, "\"lunga d8\"").await.len(), 1);
     assert_eq!(
         texts(&store, "\"spada lunga\"").await,
-        vec!["Spada lunga\nd8 danni\n".to_owned()]
+        vec!["Spada lunga | d8 danni\n".to_owned()]
     );
 }
 
@@ -888,4 +888,92 @@ async fn measure_lookup_latency_on_100k_units() {
         timings.last().unwrap(),
         p95
     );
+}
+
+const WEAPONS: &str = "<table><thead><tr><th>Arma</th><th>Danno</th><th>Note</th></tr></thead><tbody><tr><td>Spada <b>lunga</b></td><td>d8</td><td></td></tr><tr><td>Ascia</td><td>d6</td><td>a una mano<br>o due</td></tr></tbody></table>";
+
+#[tokio::test]
+async fn table_rows_are_single_lines_and_two_facts_of_a_row_share_a_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_seeded(dir.path(), |db| {
+        seed(
+            db,
+            1,
+            "MÖRK BORG — IT 2025",
+            Some("it-2025"),
+            &[(1, true)],
+            &[unit(1, 1, WEAPONS)],
+        );
+    });
+    let found = texts(&store, "spada d8").await;
+    assert_eq!(found.len(), 1);
+    let lines: Vec<&str> = found[0].lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "Arma | Danno | Note",
+            "Spada lunga | d8 | ",
+            "Ascia | d6 | a una mano o due"
+        ]
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Spada") && l.contains("d8"))
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l.contains("Spada") && l.contains("d6"))
+    );
+}
+
+#[tokio::test]
+async fn reindex_after_a_normaliser_bump_rebuilds_old_rows_only_in_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("search.sqlite3");
+    let store = open_seeded(dir.path(), |db| {
+        seed(
+            db,
+            1,
+            "MÖRK BORG — IT 2025",
+            Some("it-2025"),
+            &[(1, true)],
+            &[
+                unit(1, 1, WEAPONS),
+                unit(2, 1, "<p>Regola <b>antica</b></p>"),
+            ],
+        );
+    });
+    drop(store);
+    // Rewind to the previous normaliser: one cell per line for the table.
+    let db = Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE source_search_text SET normaliser=1,search_text=CASE unit_id WHEN 1 THEN 'Arma\nDanno\nNote\nSpada lunga\nd8\n' ELSE search_text END",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let store = Store::open(&path).unwrap();
+    let db = Connection::open(&path).unwrap();
+    let rows: Vec<(i64, i64, String)> = db
+        .prepare("SELECT unit_id,normaliser,search_text FROM source_search_text ORDER BY unit_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|r| r.1 == 2));
+    assert!(
+        rows[0]
+            .2
+            .starts_with("Arma | Danno | Note\nSpada lunga | d8 | \n")
+    );
+    assert_eq!(rows[1].2, "Regola antica\n");
+    let fts = fts_rows(dir.path());
+    assert_eq!(fts.len(), 2);
+    assert_eq!(fts[0].1, rows[0].2);
+    assert_eq!(fts[1].1, rows[1].2);
+    assert_eq!(texts(&store, "ascia d6").await.len(), 1);
 }

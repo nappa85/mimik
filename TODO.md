@@ -89,9 +89,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
        owner drawing or adjusting each part's box and text.
     Merge and split replace typing four corners by hand in "Add missing text"; they need a design
     pass before implementation (owner units may be `Text` or `Table` since migration 028).
-  - Row-aware search text for tables (owner approved 2026-11-10): Marker's and owner tables are
-    flattened one cell per line with no row marker, so search results lose row boundaries;
-    flatten by rows, bump `SEARCH_NORMALISER` and reindex (L-SRC-TABLE).
   - Decision control (owner 2026-11-10): the accepted/corrected/rejected radios wrap below the
     unit; use one dropdown on the same row as the unit, fields shown for the chosen decision.
   - Create table is hard to find (owner 2026-11-10): the "Select unit N for a table" checkboxes
