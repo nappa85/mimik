@@ -42,6 +42,7 @@ pub(super) fn routes() -> Router<AuthState> {
     router
         .route("/admin/materials", get(directory))
         .route("/admin/materials/sources/{id}", get(pages))
+        .route("/admin/materials/sources/{id}/review", get(review_list))
         .route("/admin/materials/pages/{id}", get(page))
         .route("/admin/materials/suggestions/{id}", get(suggestion))
         .route(
@@ -172,6 +173,8 @@ enum Then {
     Page,
     Done,
     Unknown,
+    /// The unit was already reviewed: the save stays on it.
+    Stay,
 }
 impl Then {
     fn key(self) -> &'static str {
@@ -180,6 +183,7 @@ impl Then {
             Self::Page => "page",
             Self::Done => "done",
             Self::Unknown => "unknown",
+            Self::Stay => "stay",
         }
     }
 }
@@ -239,6 +243,28 @@ async fn pages(
         rationale: String::new(),
         after: c.after,
     })
+}
+
+#[derive(Template)]
+#[template(path = "material_review.html")]
+struct ReviewListPage {
+    source: i64,
+    list: crate::sources::materials::ReviewList,
+}
+async fn review_list(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Query(c): Query<Cursor>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let list = state
+        .sessions
+        .store
+        .material_review_list(auth, id, c.after)
+        .await
+        .map_err(|e| error(&e))?;
+    html(&ReviewListPage { source: id, list })
 }
 
 async fn primary_pages(
@@ -448,6 +474,7 @@ fn saved_notice(c: PageCursor) -> String {
             " No unit is left to review on this page or after it; confirm page completeness below."
         }
         Then::Unknown => " The next unit could not be found in time; use \"Next unreviewed unit\".",
+        Then::Stay => " Staying on this unit, which was already reviewed.",
     };
     format!("Saved unit {}: {}.{tail}", c.saved_unit, c.saved.label())
 }
@@ -631,6 +658,18 @@ fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext) -> String 
         ),
     }
 }
+/// The redirect after re-deciding a reviewed unit: back to that unit, with its card window.
+fn stay_target(page: i64, unit: i64, state: &str, cursor: i64) -> String {
+    let label = Saved::of(state).key();
+    let units = if cursor >= 50 {
+        format!("units={cursor}&")
+    } else {
+        String::new()
+    };
+    format!(
+        "/admin/materials/pages/{page}?{units}saved={label}&saved_unit={unit}&to={unit}&then=stay#unit-{unit}"
+    )
+}
 async fn review(
     State(state): State<AuthState>,
     session: Session,
@@ -639,6 +678,14 @@ async fn review(
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
     let csrf = csrf_admission(&session, &form.csrf).await?;
+    // A unit that was already decided stays in view after a re-decision; the state is read before
+    // the save (a stale read is harmless: the revision check refuses a conflicting save).
+    let was_reviewed = state
+        .sessions
+        .store
+        .material_unit_state(auth.clone(), page, unit)
+        .await
+        .is_ok_and(|before| Saved::of(&before) != Saved::None);
     let result = state
         .sessions
         .store
@@ -659,6 +706,17 @@ async fn review(
     match result {
         Ok(()) => {
             // The decision is stored; a failed lookup only loses the jump, not the save.
+            if was_reviewed
+                && let Ok(cursor) = state
+                    .sessions
+                    .store
+                    .material_unit_cursor(auth.clone(), page, unit)
+                    .await
+            {
+                return Ok(
+                    Redirect::to(&stay_target(page, unit, &form.state, cursor)).into_response()
+                );
+            }
             let next = state
                 .sessions
                 .store

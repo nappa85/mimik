@@ -78,10 +78,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Next steps
 
 - **Review-screen usability (owner, 2026-11-07, first real review of the IT pages):**
-  4. A list of all units still to review (per page and per source), to jump between them.
-  6. The page image with the unit boxes should stay visible while scrolling (sticky).
-  - The "Next page with units to review" link skips pages that need only a completeness
-    confirmation (no units, or all reviewed): add a separate "Next incomplete page" link.
   - Unit restructuring actions (owner, 2026-11-08), each rejecting the original units in one
     batch with the reason and adding owner units (originals and raw stay intact). Create table
     is done (`docs/sources-and-retrieval.md`, "Owner-built tables"); still open:
@@ -91,14 +87,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
        owner drawing or adjusting each part's box and text.
     Merge and split replace typing four corners by hand in "Add missing text"; they need a design
     pass before implementation (owner units may be `Text` or `Table` since migration 028).
-  - Decision control (owner 2026-11-10): the accepted/corrected/rejected radios wrap below the
-    unit; use one dropdown on the same row as the unit, fields shown for the chosen decision.
-  - Create table is hard to find (owner 2026-11-10): the "Select unit N for a table" checkboxes
-    belong to a separate form whose button sits above the card list, while each card's "Record
-    decision" ignores them. Show the create-table action next to the selection (a bar that
-    appears once a unit is ticked, with the count), and say on the card what the tick does.
-  - Re-deciding an already reviewed unit (e.g. correcting an accepted one) jumps to the next
-    unreviewed unit elsewhere, so it looks impossible: stay on that unit after the save.
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB

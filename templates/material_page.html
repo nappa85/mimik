@@ -3,7 +3,7 @@
 <a href="/admin/materials/sources/{{ page.source_id }}">← Selected pages</a>
 <h1>{{ page.title }} — PDF page {{ page.pdf_page }}</h1>
 <p>{{ page.edition }} · stored printed label {{ page.printed_label }} · stored page revision {{ page.revision }} · {% if page.complete %}review complete{% else %}incomplete; excluded from lookup{% endif %}</p>
-<nav>{% if let Some(unit) = screen.next_unit %}<a href="{{ self.unit_link(unit) }}">Next unreviewed unit</a>{% endif %} · {% if let Some(next) = screen.next_page %}<a href="/admin/materials/pages/{{ next }}">Next page with units to review</a>{% endif %}</nav>
+<nav>{% if let Some(unit) = screen.next_unit %}<a href="{{ self.unit_link(unit) }}">Next unreviewed unit</a>{% endif %} · {% if let Some(next) = screen.next_page %}<a href="/admin/materials/pages/{{ next }}">Next page with units to review</a>{% endif %} · {% if let Some(next) = screen.next_incomplete %}<a href="/admin/materials/pages/{{ next }}">Next page to confirm complete</a>{% endif %} · <a href="/admin/materials/sources/{{ page.source_id }}/review">Units to review in this source</a></nav>
 {% if !notice.is_empty() %}<div class="panel" id="saved-notice" role="status" tabindex="-1"><p>{{ notice }}</p></div>
 {% endif %}{% if error_unit > 0 %}<div class="panel error-summary"><p>A save failed — <a href="#unit-{{ error_unit }}-error">see unit {{ error_unit }}</a>.</p></div>
 {% endif %}<details><summary>Review keyboard help</summary><p>Within the review list, outside form fields: j / k focus the next / previous card; a focuses an acceptance rationale and never submits.</p><label hidden><input type="checkbox" id="review-shortcuts" checked>Enable review keyboard shortcuts in this browser</label></details>
@@ -11,7 +11,7 @@
 <div class="panel" {% if error_unit == 0 %}role="alert"{% endif %}><p>{{ message }}</p><p>Your draft was not saved. <a href="{{ self.draft_link() }}">Go to the matching draft form</a>. Its submitted revision is preserved separately from current stored revisions. Copy your draft, <a href="/admin/materials/pages/{{ page.id }}">reload</a>, and reassess the original before submitting again.</p></div>
 {% endif %}
 <div class="columns evidence-columns" data-region-editor data-width="{{ screen.width }}" data-height="{{ screen.height }}">
-<aside class="panel source-original">
+<aside class="panel source-original sticky-original">
 <h2>Original PDF render</h2>
 <a href="/admin/materials/pages/{{ page.id }}/image" target="_blank" rel="noopener">Open full-size image</a>
 {% if !screen.geometry %}<p>Page geometry unavailable: overlays and drawing omitted. The original image and manual coordinate form remain available.</p>{% endif %}
@@ -27,10 +27,12 @@
 </svg>{% endif %}</div></div>
 </aside>
 <section id="review-list" aria-label="Unit review cards">
-<form id="table-select" method="get" action="/admin/materials/pages/{{ page.id }}/tables/new" class="panel"><p>Tick "Select unit N for a table" on 1 to 16 cards, in any order, then open the table form.</p><button>Create table from selected units</button></form>
+<form id="table-select" method="get" action="/admin/materials/pages/{{ page.id }}/tables/new" class="panel"><p>Tick "Select unit N for a table" on 1 to 16 cards, in any order, then open the table form. Ticking only selects: it records no decision.</p><button data-no-script-table>Create table from selected units</button>
+<div id="table-bar" class="table-bar" role="region" aria-label="Selected units" hidden><span data-selected-count></span><button type="submit">Create table</button><button type="button" data-clear-selection>Clear</button></div><p class="sr-only" role="status" aria-live="polite" data-selected-announce></p></form>
 {% for unit in page.units %}
 <article class="panel" id="unit-{{ unit.id }}" data-unit="{{ unit.id }}" tabindex="0">
-<h2>{{ unit.kind }} — {{ unit.state }}</h2><p class="select-unit"><input type="checkbox" name="unit" value="{{ unit.id }}" form="table-select" id="select-{{ unit.id }}"><label for="select-{{ unit.id }}">Select unit {{ unit.id }} for a table</label></p>{% if error_unit == unit.id %}<p class="field-error" id="unit-{{ unit.id }}-error" role="alert" tabindex="-1" autofocus data-save-error>This decision was not saved: {{ message }}</p>{% endif %}{% if notice_unit == unit.id && !notice.is_empty() %}<p><strong>{{ notice }}</strong></p>{% endif %}<p>Stored unit revision {{ unit.revision }}</p>
+<div class="unit-head"><h2>{{ unit.kind }} — {{ unit.state }}</h2>{% for card in screen.cards %}{% if card.unit == unit.id && !card.form_omitted %}<label class="decision-select" for="decision-{{ unit.id }}">Decision<span class="sr-only"> for unit {{ unit.id }}</span><select id="decision-{{ unit.id }}" name="state" form="unit-form-{{ unit.id }}" required><option value="" {% if unit.state != "accepted" && unit.state != "corrected" && unit.state != "rejected" %}selected{% endif %}>Choose a decision…</option><option value="accepted" {% if unit.state == "accepted" %}selected{% endif %}>Accepted as extracted</option><option value="corrected" {% if unit.state == "corrected" %}selected{% endif %}>Corrected with source evidence</option><option value="rejected" {% if unit.state == "rejected" %}selected{% endif %}>Rejected / not evidence</option></select></label>{% endif %}{% endfor %}</div>
+<p class="select-unit"><input type="checkbox" name="unit" value="{{ unit.id }}" form="table-select" id="select-{{ unit.id }}"><label for="select-{{ unit.id }}">Select unit {{ unit.id }} for a table</label><small class="tick-hint">Create table: use the bar at the bottom, or the buttons above and below the cards. The selection applies to the cards shown. Ticking does not record a decision.</small></p>{% if error_unit == unit.id %}<p class="field-error" id="unit-{{ unit.id }}-error" role="alert" tabindex="-1" autofocus data-save-error>This decision was not saved: {{ message }}</p>{% endif %}{% if notice_unit == unit.id && !notice.is_empty() %}<p><strong>{{ notice }}</strong></p>{% endif %}<p>Stored unit revision {{ unit.revision }}</p>
 {% if screen.reads_reduced() %}<p>Screen read deadline reached. <a href="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/suggestions">Inspect this unit's suggestions</a>. Only the first unit decision form is retained.</p>{% endif %}
 <figure class="source-region">
 <img src="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/image" loading="lazy" alt="Original-page bounding-region preview for {{ unit.kind }}; inspect the full page for context">
@@ -43,22 +45,18 @@
 <h3>Lookup text</h3>{% if screen.reads_reduced() %}<p>Lookup not read (time limit)</p>{% else if unit.state == "unreviewed" %}<p>Not evidence yet.</p>{% else if unit.state == "rejected" %}<p>Rejected; no lookup text.</p>{% else %}{% for card in screen.cards %}{% if card.unit == unit.id %}{% if card.preview %}<p>Lookup text preview: response text budget reached. <a href="?units={{ card.cursor }}#unit-{{ unit.id }}">Read this unit first on a card page</a>.</p>{% endif %}<pre class="evidence-text">{{ "\n" }}{{ card.lookup }}</pre>{% endif %}{% endfor %}{% endif %}
 {% for card in screen.cards %}{% if card.unit == unit.id %}{% for advice in card.advice %}{% include "material_advice.html" %}{% endfor %}{% if let Some(next) = card.next %}<a href="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/suggestions?after={{ next }}">More suggestions for this unit</a>{% endif %}{% endif %}{% endfor %}
 {% for card in screen.cards %}{% if card.unit == unit.id %}{% if card.form_omitted %}<p>Correction form omitted to keep the response text budget bounded. <a href="?units={{ card.cursor }}#unit-{{ unit.id }}">Open the full decision form for unit {{ unit.id }}</a>.</p>{% else %}
-<form method="post" action="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}" data-form="unit" data-target="{{ unit.id }}">
+<form id="unit-form-{{ unit.id }}" method="post" action="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}" data-form="unit" data-target="{{ unit.id }}">
 <input type="hidden" name="csrf" value="{{ csrf }}">
 {% if card.cursor == units %}{% if let Some(draft) = draft %}
 <p>Submitted revision {{ draft.revision|truncate(64) }}</p><input type="hidden" name="revision" value="{{ draft.revision }}">
 {% else %}<input type="hidden" name="revision" value="{{ unit.revision }}">{% endif %}
 {% else %}<input type="hidden" name="revision" value="{{ unit.revision }}">{% endif %}
-<fieldset class="decision"><legend>Decision after comparing original</legend>
+<fieldset class="decision"><legend>Decision after comparing original (choose it in the list at the top of this card)</legend>
 {% if unit.state != "accepted" && unit.state != "corrected" && unit.state != "rejected" && unit.state != "unreviewed" %}<p>Submitted invalid decision: {{ unit.state }}. Choose one of the decisions below.</p>{% endif %}
-<input type="radio" id="decision-{{ unit.id }}-accepted" name="state" value="accepted" required {% if unit.state == "accepted" %}checked{% endif %}><label for="decision-{{ unit.id }}-accepted">Accepted as extracted</label>
-<input type="radio" id="decision-{{ unit.id }}-corrected" name="state" value="corrected" {% if unit.state == "corrected" %}checked{% endif %}><label for="decision-{{ unit.id }}-corrected">Corrected with source evidence</label>
-<input type="radio" id="decision-{{ unit.id }}-rejected" name="state" value="rejected" {% if unit.state == "rejected" %}checked{% endif %}><label for="decision-{{ unit.id }}-rejected">Rejected / not evidence</label>
-<p class="decision-hint">Choose a decision to see its fields. Accepted needs nothing more.</p>
-<div class="decision-fields fields-correction"><label>Corrected text (plain text, at most 20,000 Unicode characters)
+<div class="decision-fields" data-decision-fields="corrected"><label>Corrected text, used only for "Corrected" (plain text, at most 20,000 Unicode characters)
 <textarea name="correction" {% if error_unit == unit.id && card.cursor == units %}{% if let Some(draft) = draft %}{% if draft.correction_missing() %}aria-invalid="true" aria-describedby="unit-{{ unit.id }}-error"{% endif %}{% endif %}{% endif %}>
 {{ unit.correction }}</textarea></label></div>
-<div class="decision-fields fields-rationale"><label>Rationale / what you checked (required for corrected and rejected, SRC-4; at most 5,000 Unicode characters)
+<div class="decision-fields" data-decision-fields="corrected rejected"><label>Rationale / what you checked, used for "Corrected" and "Rejected" (required for both, SRC-4; at most 5,000 Unicode characters)
 <textarea name="rationale" {% if error_unit == unit.id && card.cursor == units %}{% if let Some(draft) = draft %}{% if draft.rationale_missing() %}aria-invalid="true" aria-describedby="unit-{{ unit.id }}-error"{% endif %}{% endif %}{% endif %}>
 {% if card.cursor == units %}{% if let Some(draft) = draft %}{{ draft.rationale }}{% endif %}{% endif %}</textarea></label></div>
 </fieldset>
@@ -66,6 +64,7 @@
 </form>
 {% endif %}{% endif %}{% endfor %}</article>
 {% endfor %}
+<p><button form="table-select" data-no-script-table>Create table from selected units</button></p>
 {% if let Some(next) = units_next %}<a href="/admin/materials/pages/{{ page.id }}?units={{ next }}&amp;history={{ history }}">Next units</a>{% endif %} ·
 <a href="/admin/materials/pages/{{ page.id }}?history={{ history }}">First units</a>
 <section class="panel" id="lookup-panel"><h2>Lookup text — current card page</h2><p>{% if !page.complete %}Not evidence until this page is complete. {% endif %}{% if !self.is_primary() %}This reading is not used by lookup.{% endif %}</p>{% if screen.reads_reduced() %}<p>Lookup not read (time limit)</p>{% else %}{% for card in screen.cards %}{% if card.preview %}<p>Lookup text preview for unit {{ card.unit }}: response text budget reached. <a href="?units={{ card.cursor }}#unit-{{ card.unit }}">Read this unit first on a card page</a>.</p>{% endif %}<pre class="evidence-text" data-lookup-unit="{{ card.unit }}">{{ "\n" }}{{ card.lookup }}</pre>{% endfor %}{% endif %}</section>

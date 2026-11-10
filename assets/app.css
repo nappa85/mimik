@@ -125,14 +125,9 @@ input[type="file"] { max-width: 100%; }
 .evidence-columns > *, .source-original { min-width: 0; }
 ins { background: #d5f5dc; color: #13381d; }
 del { background: #ffdddd; color: #501515; }
-/* Decision form: one radio per decision, the fields it needs revealed by :checked (no script). */
+/* Decision form: the dropdown sits on the card heading row; every field shows without script and
+   source-review.js hides the ones the chosen decision does not use. */
 .decision { margin: .5rem 0; min-width: 0; }
-.decision > label[for^="decision-"] { display: inline-block; margin: 0 1rem .4rem .25rem; }
-.decision-fields { display: none; }
-.decision input[value="corrected"]:checked ~ .fields-correction,
-.decision input[value="corrected"]:checked ~ .fields-rationale,
-.decision input[value="rejected"]:checked ~ .fields-rationale { display: block; }
-.decision input[type="radio"]:checked ~ .decision-hint { display: none; }
 .decision-fields textarea { width: 100%; }
 /* A refused save: red text and border, never colour alone (the text says what failed). */
 .field-error { color: #8f1d1d; background: #fdecea; border-left: 4px solid #b42329; padding: .5rem .75rem; font-weight: 600; overflow-wrap: anywhere; }
@@ -140,8 +135,22 @@ del { background: #ffdddd; color: #501515; }
 textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b42329; }
 .field-error:focus { outline: 3px solid #b42329; outline-offset: 2px; }
 .select-unit { margin: .2rem 0; }
-.decision input[type="radio"], .select-unit input { display: inline-block; width: auto; }
-.decision > label[for^="decision-"] { width: auto; margin: 0 .5rem .4rem 0; padding: .3rem .7rem; border: 1px solid #90998e; border-radius: 6px; }
-.decision input[type="radio"]:checked + label { background: #e6efe2; border-color: #1a7f37; font-weight: 700; }
-.decision input[type="radio"]:focus-visible + label { outline: 3px solid #075ba6; }
+.select-unit input { display: inline-block; width: auto; }
 .select-unit label { display: inline-block; width: auto; margin: 0 0 0 .4rem; }
+/* Unit card heading row: the kind and state on the left, the decision dropdown on the right. */
+.unit-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1rem; }
+.unit-head h2 { margin: 0; }
+.decision-select { display: flex; align-items: center; gap: .5rem; width: auto; margin: 0; }
+.decision-select select { width: auto; min-width: 14rem; }
+.tick-hint { display: inline; margin-left: .6rem; }
+/* Create-table bar: fixed to the bottom of the viewport while units are ticked (script shows it). */
+.table-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .5rem 1rem; padding: .5rem 1rem; background: #fffef9; border-top: 3px solid #285d4c; box-shadow: 0 -2px 8px rgb(0 0 0 / 15%); }
+.table-bar[hidden] { display: none; }
+.table-bar button { margin: 0; }
+/* The page image with the unit boxes stays in view while the cards scroll (wide screens). */
+.sticky-original { position: sticky; top: .5rem; max-height: calc(100vh - 1rem); overflow-y: auto; }
+@media (max-width: 700px) { .sticky-original { position: static; max-height: none; overflow-y: visible; } }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+/* While the create-table bar shows, keep room for it so it covers nothing (also when jumping to #unit-N). */
+.has-table-bar { scroll-padding-bottom: 5rem; }
+.has-table-bar body { padding-bottom: 5rem; }

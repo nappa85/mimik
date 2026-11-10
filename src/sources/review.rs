@@ -552,6 +552,9 @@ pub(crate) struct Screen {
     pub notes_next: Option<i64>,
     pub next_unit: Option<(i64, i64)>,
     pub next_page: Option<i64>,
+    /// The next page of the source that is not complete and has no unreviewed unit: it needs only
+    /// a completeness confirmation.
+    pub next_incomplete: Option<i64>,
     pub primary: super::PrimaryPageState,
 }
 impl Screen {
@@ -779,7 +782,8 @@ impl Store {
             }
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
-            Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,primary},budget))
+            let next_incomplete=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND p.complete=0 AND NOT EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
+            Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,next_incomplete,primary},budget))
              });
             // Drop the progress handler before authority checks and the reduced
             // response. Only reads run under the handler; no interrupted writes.
@@ -787,7 +791,7 @@ impl Store {
                  Err(AppError::Invalid(READ_TIMEOUT)) => read_with_deadline(&tx, "reduced", || {
                     let (document,pdf):(i64,i64)=tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
                     let primary=super::documents::primary_state(&tx,document,pdf)?;
-                    Ok((Screen{reads:ScreenReads::Deadline,geometry:false,width:0.0,height:0.0,overlay:Vec::new(),overlay_omitted:true,regions_omitted:true,cards:Vec::new(),notes:Vec::new(),notes_next:None,next_unit:None,next_page:None,primary},Budget::default()))
+                    Ok((Screen{reads:ScreenReads::Deadline,geometry:false,width:0.0,height:0.0,overlay:Vec::new(),overlay_omitted:true,regions_omitted:true,cards:Vec::new(),notes:Vec::new(),notes_next:None,next_unit:None,next_page:None,next_incomplete:None,primary},Budget::default()))
                  }),
                 other => other,
             }?;

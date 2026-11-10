@@ -1,5 +1,6 @@
 {% extends "material_base.html" %}
 {% block content %}<h1>Source #{{ source }} — selected pages</h1><p>These are imported pages, not a whole-book completeness certificate.</p>
+<p><a href="/admin/materials/sources/{{ source }}/review">List of units still to review in this source</a></p>
 <p>Each page has one <strong>primary reading</strong>: the imported source whose reviewed text lookup uses for that page. To make source #{{ source }} the primary reading of some pages, tick them, write a rationale and press the button below the list. Ticking alone changes nothing.</p>
 {% if !message.is_empty() %}<p role="alert">{{ message }} Your primary-choice draft and its submitted tokens are retained.</p>{% endif %}
 <form id="primary-pages" method="post" action="/admin/materials/sources/{{ source }}/primary" data-form="primary-pages" data-target="{{ source }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="after" value="{{ after }}">

@@ -59,6 +59,59 @@ pub(crate) struct PrimaryMaterialPage {
     pub submitted: Option<super::PrimaryPageState>,
 }
 
+/// Pages per review-list request and unit links per page: at most 1,000 links per response, so
+/// the escaped worst case (long kinds and snippets of `&` or quotes) stays far below 2 MiB.
+pub(crate) const REVIEW_LIST_PAGES: usize = 10;
+pub(crate) const REVIEW_LIST_UNITS: usize = 100;
+/// Characters of extracted text shown beside each link.
+const REVIEW_LIST_SNIPPET: usize = 80;
+pub(crate) struct ReviewUnit {
+    pub id: i64,
+    pub kind: String,
+    /// The start of the extracted text, to tell units apart.
+    pub snippet: String,
+    /// Card-window cursor of the page screen that shows this unit.
+    pub cursor: i64,
+}
+pub(crate) struct ReviewPage {
+    pub id: i64,
+    pub pdf_page: i64,
+    pub total: i64,
+    pub unreviewed: i64,
+    pub units: Vec<ReviewUnit>,
+    /// Unreviewed units not listed here (over `REVIEW_LIST_UNITS`).
+    pub more: i64,
+    /// Where "more" opens the page: the first unlisted unit's card (empty when none).
+    pub more_link: String,
+}
+pub(crate) struct ReviewList {
+    pub unreviewed_units: i64,
+    pub unreviewed_pages: i64,
+    pub rows: Vec<ReviewPage>,
+    pub next: Option<i64>,
+    /// The per-page lists were omitted after a read deadline.
+    pub reduced: bool,
+}
+fn review_counts(tx: &Connection, source: i64) -> Result<(i64, i64), AppError> {
+    Ok(tx.query_row(
+        "SELECT count(*),count(DISTINCT u.page_id) FROM source_units u JOIN source_pages p ON p.id=u.page_id WHERE p.source_id=?1 AND u.state='unreviewed'",
+        [source],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+impl ReviewUnit {
+    pub(crate) fn link(&self, page: i64) -> String {
+        if self.cursor > 0 {
+            format!(
+                "/admin/materials/pages/{page}?units={}#unit-{}",
+                self.cursor, self.id
+            )
+        } else {
+            format!("/admin/materials/pages/{page}#unit-{}", self.id)
+        }
+    }
+}
+
 // The CASE guards execute in SQLite, before a string crosses the allocation boundary.
 // NULL signals corrupt/oversized evidence; it is never substituted or truncated.
 pub(crate) fn text(column: &str, limit: usize) -> String {
@@ -453,6 +506,101 @@ impl Store {
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(next)
+        })
+        .await
+    }
+    /// The stored state of a unit of this page, read before a save so the redirect can tell a
+    /// first decision from a re-decision.
+    pub(crate) async fn material_unit_state(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+    ) -> Result<String, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let state = tx
+                .query_row(
+                    &format!(
+                        "SELECT {} FROM source_units WHERE id=?1 AND page_id=?2",
+                        text("state", 32)
+                    ),
+                    params![unit, page],
+                    |r| read_text(r, 0),
+                )
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(state)
+        })
+        .await
+    }
+    /// The unreviewed units of one source, grouped by PDF page. Bounded so that the response
+    /// fits the 2 MiB HTML budget (SRC-15 keeps only technical bounds): `REVIEW_LIST_PAGES`
+    /// pages per request (keyset on the PDF page) and `REVIEW_LIST_UNITS` units per page, i.e.
+    /// at most 1,000 unit links per response. After a read deadline only the counts and the
+    /// next cursor are returned.
+    pub(crate) async fn material_review_list(
+        &self,
+        auth: RequestAuth,
+        source: i64,
+        after: i64,
+    ) -> Result<ReviewList, AppError> {
+        cursor(after)?;
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let full = super::review::read_with_deadline(&tx, "review_list", || {
+                if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sources WHERE id=?1)", [source], |r| r.get::<_, bool>(0))? {
+                    return Err(AppError::SourceNotFound);
+                }
+                let (unreviewed_units, unreviewed_pages) = review_counts(&tx, source)?;
+                let heads = {
+                    let mut q = tx.prepare_cached("SELECT p.id,p.pdf_page,(SELECT count(*) FROM source_units u WHERE u.page_id=p.id),(SELECT count(*) FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') FROM source_pages p WHERE p.source_id=?1 AND p.pdf_page>?2 AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT ?3")?;
+                    q.query_map(params![source, after, REVIEW_LIST_PAGES + 1], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)))?.collect::<Result<Vec<_>, _>>()?
+                };
+                let mut rows = Vec::new();
+                for (id, pdf_page, total, unreviewed) in heads {
+                    let mut units = {
+                        let mut q = tx.prepare_cached(&format!("{ORDERED_UNITS} SELECT id,{},CASE WHEN typeof(raw_text)='text' THEN substr(raw_text,1,{REVIEW_LIST_SNIPPET}) ELSE '' END,position FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT {}", text("kind", 100), REVIEW_LIST_UNITS + 1))?;
+                        q.query_map([id], |r| {
+                            let position: i64 = r.get(3)?;
+                            Ok(ReviewUnit {
+                                id: r.get(0)?,
+                                kind: read_text(r, 1)?,
+                                snippet: r.get(2)?,
+                                // The default card window already shows positions 1..=50.
+                                cursor: if position <= 50 { 0 } else { position - 1 },
+                            })
+                        })?.collect::<Result<Vec<_>, _>>()?
+                    };
+                    // The first unit that is not listed: "more" opens the page at it.
+                    let first_unlisted = if units.len() > REVIEW_LIST_UNITS { units.pop() } else { None };
+                    let more = unreviewed - i64::try_from(units.len()).unwrap_or(0);
+                    let more_link = first_unlisted.map(|unit| unit.link(id)).unwrap_or_default();
+                    rows.push(ReviewPage { id, pdf_page, total, unreviewed, units, more, more_link });
+                }
+                let next = (rows.len() > REVIEW_LIST_PAGES).then(|| rows[REVIEW_LIST_PAGES - 1].pdf_page);
+                rows.truncate(REVIEW_LIST_PAGES);
+                Ok(ReviewList { unreviewed_units, unreviewed_pages, rows, next, reduced: false })
+            });
+            let list = match full {
+                Err(AppError::Invalid(super::review::READ_TIMEOUT)) => {
+                    super::review::read_with_deadline(&tx, "review_list_reduced", || {
+                        let (unreviewed_units, unreviewed_pages) = review_counts(&tx, source)?;
+                        let mut q = tx.prepare_cached("SELECT p.pdf_page FROM source_pages p WHERE p.source_id=?1 AND p.pdf_page>?2 AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT ?3")?;
+                        let pages = q.query_map(params![source, after, REVIEW_LIST_PAGES + 1], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
+                        let next = (pages.len() > REVIEW_LIST_PAGES).then(|| pages[REVIEW_LIST_PAGES - 1]);
+                        Ok(ReviewList { unreviewed_units, unreviewed_pages, rows: Vec::new(), next, reduced: true })
+                    })?
+                }
+                other => other?,
+            };
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(list)
         })
         .await
     }
