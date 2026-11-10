@@ -60,7 +60,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   oversubscription (2026-11-07, pass alone): `assistant::download::task::tests::cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range`
   (`Err(Finishing)`, task_tests.rs:347) and
   `assistant::runtime::launch::tests::a_port_that_cannot_be_bound_is_tried_three_times_then_fails`
-  (launch_tests.rs:463): find their timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  (launch_tests.rs:463), and `assistant::runtime::launch::tests::a_leftover_still_running_blocks_the_start_and_keeps_its_entry`
+  (failed once in a full gate beside another test container, 2026-11-10; 3 of 3 alone): find their
+  timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
 - **Resume after a reboot:** build/test agent worktrees with
