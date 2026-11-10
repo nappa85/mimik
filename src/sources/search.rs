@@ -32,40 +32,54 @@ const MAX_QUERY_PIECES: usize = 16;
 /// text of owner tables, `tables::plain`).
 const CELL_SEPARATOR: &str = " | ";
 
+/// Inline tags of the sanitiser allowlist that do not separate words inside a cell.
+const INLINE_TAGS: [&str; 7] = ["b", "strong", "i", "em", "sub", "sup", "code"];
+
+/// Where text inside a table goes.
+#[derive(Clone, Copy, PartialEq)]
+enum Open {
+    /// Between rows or cells: text becomes its own line (a caption unwrapped by the
+    /// sanitiser, for instance).
+    Nothing,
+    /// Inside a stray-text line.
+    Stray,
+    /// Inside the last cell of the last row.
+    Cell,
+}
+
 /// Rewrite every table of sanitised HTML as one `<pre>` block: one line per row (`tr`),
 /// cells in order joined by [`CELL_SEPARATOR`]. Cell text keeps its entities, loses its
-/// markup and has whitespace collapsed; empty cells stay as empty positions so columns
-/// stay aligned (`a |  | c`); `colspan`/`rowspan` are not expanded. A table nested in a
-/// cell is flattened into that cell's text. HTML without a table is returned unchanged.
+/// markup (block tags and `br` become a space) and has whitespace collapsed; empty cells
+/// stay as empty positions so columns stay aligned (`a |  | c`); `colspan`/`rowspan` are
+/// not expanded. A table nested in a cell is flattened into that cell's text. Text in a
+/// table but outside any cell gets its own line. HTML without a table is returned
+/// unchanged.
 ///
-/// The input is ammonia output (lowercase tags, escaped `<` in text), so a `<` always
-/// starts a tag.
-fn flatten_tables(clean: &str) -> String {
+/// Relies on the guarantees of [`sanitized`]: lowercase tags, `<` escaped in text, and no
+/// attribute other than numeric `colspan`/`rowspan`, so a `<` always starts a tag and a
+/// tag ends at the first `>`.
+fn flatten_tables(clean: &str) -> std::borrow::Cow<'_, str> {
     if !clean.contains("<table") {
-        return clean.to_owned();
+        return std::borrow::Cow::Borrowed(clean);
     }
     let mut out = String::with_capacity(clean.len());
     let mut rest = clean;
     let mut depth = 0_usize;
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    let mut open = Open::Nothing;
     while !rest.is_empty() {
-        let Some(open) = rest.find('<') else {
-            if depth == 0 {
-                out.push_str(rest);
-            } else {
-                append_cell(&mut rows, rest);
-            }
-            break;
-        };
-        let (text, tag_start) = rest.split_at(open);
+        let (text, tag_start) = rest.split_at(rest.find('<').unwrap_or(rest.len()));
         if depth == 0 {
             out.push_str(text);
         } else {
-            append_cell(&mut rows, text);
+            append_text(&mut lines, &mut open, text);
         }
         let end = tag_start.find('>').map_or(tag_start.len(), |i| i + 1);
         let tag = &tag_start[..end];
         rest = &tag_start[end..];
+        if tag.is_empty() {
+            break;
+        }
         let name = tag
             .trim_start_matches('<')
             .trim_start_matches('/')
@@ -77,60 +91,73 @@ fn flatten_tables(clean: &str) -> String {
             ("table", false) => {
                 depth += 1;
                 if depth == 1 {
-                    rows.clear();
+                    lines.clear();
+                    open = Open::Nothing;
                 } else {
-                    append_cell(&mut rows, " ");
+                    append_text(&mut lines, &mut open, " ");
                 }
             }
             ("table", true) if depth > 0 => {
                 depth -= 1;
                 if depth == 0 {
                     out.push_str("<pre>");
-                    let lines: Vec<String> = rows
+                    let rendered: Vec<String> = lines
                         .iter()
-                        .map(|row| {
-                            row.iter()
+                        .map(|line| {
+                            line.iter()
                                 .map(|cell| cell.trim_end())
                                 .collect::<Vec<_>>()
                                 .join(CELL_SEPARATOR)
                         })
                         .collect();
-                    out.push_str(&lines.join("\n"));
+                    out.push_str(&rendered.join("\n"));
                     out.push_str("</pre>");
                 } else {
-                    append_cell(&mut rows, " ");
+                    append_text(&mut lines, &mut open, " ");
                 }
             }
-            ("tr", false) if depth == 1 => rows.push(Vec::new()),
+            ("tr", false) if depth == 1 => {
+                lines.push(Vec::new());
+                open = Open::Nothing;
+            }
             ("td" | "th", false) if depth == 1 => {
-                if rows.is_empty() {
-                    rows.push(Vec::new());
+                if open == Open::Stray || lines.is_empty() {
+                    lines.push(Vec::new());
                 }
-                if let Some(row) = rows.last_mut() {
-                    row.push(String::new());
+                if let Some(line) = lines.last_mut() {
+                    line.push(String::new());
                 }
+                open = Open::Cell;
             }
-            ("tr" | "td" | "th" | "br" | "p" | "li" | "ul" | "ol", _) if depth > 0 => {
-                append_cell(&mut rows, " ");
-            }
+            ("tr" | "td" | "th", true) if depth == 1 => open = Open::Nothing,
             _ if depth == 0 => out.push_str(tag),
-            _ => {}
+            _ if INLINE_TAGS.contains(&name) => {}
+            _ => append_text(&mut lines, &mut open, " "),
         }
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
-/// Append text to the open cell, collapsing whitespace runs to one space; text outside
-/// any cell (between `tr`/`td`) is dropped.
-fn append_cell(rows: &mut [Vec<String>], text: &str) {
-    let Some(cell) = rows.last_mut().and_then(|row| row.last_mut()) else {
+/// Append text to the open cell, collapsing whitespace runs to one space. Outside a cell,
+/// non-blank text starts (or continues) a line of its own.
+fn append_text(lines: &mut Vec<Vec<String>>, open: &mut Open, text: &str) {
+    if text.trim().is_empty() && *open != Open::Cell && *open != Open::Stray {
+        return;
+    }
+    if *open == Open::Nothing {
+        lines.push(vec![String::new()]);
+        *open = Open::Stray;
+    }
+    let Some(cell) = lines.last_mut().and_then(|line| line.last_mut()) else {
         return;
     };
+    let mut gap = text.starts_with(char::is_whitespace);
     for word in text.split_whitespace() {
-        if !cell.is_empty() && !cell.ends_with(' ') {
+        if gap && !cell.is_empty() && !cell.ends_with(' ') {
             cell.push(' ');
         }
         cell.push_str(word);
+        gap = true;
     }
     if text.ends_with(char::is_whitespace) && !cell.is_empty() && !cell.ends_with(' ') {
         cell.push(' ');
@@ -139,12 +166,13 @@ fn append_cell(rows: &mut [Vec<String>], text: &str) {
 
 /// Unwrapped, undecorated plain text for indexing. Each table row is one line, cells
 /// joined by ` | ` (see [`flatten_tables`]), so a search hit keeps which cells share a row
-/// and a quoted phrase can match across adjacent cells of a row (documented behaviour).
+/// and a quoted phrase can match across adjacent cells and rows (documented behaviour).
 ///
 /// # Errors
 /// Rejects unsanitizable HTML or output above the stored byte bound.
 pub(crate) fn search_text(raw_html: &str) -> Result<String, AppError> {
-    let clean = flatten_tables(&sanitized(raw_html)?);
+    let sanitised = sanitized(raw_html)?;
+    let clean = flatten_tables(&sanitised);
     let text = html2text::config::plain_no_decorate()
         .raw_mode(true)
         .no_table_borders()
@@ -504,12 +532,28 @@ pub(crate) fn rebuild(db: &Connection) -> Result<i64, AppError> {
 /// Every open: batched derivation of missing rows plus a count comparison; full rebuild
 /// (with FTS5 integrity check) only when the counts disagree. An upgrade creates empty
 /// tables, so any eligible unit forces that rebuild. Equal counts with stale content are
-/// not detected here; use [`crate::Store::rebuild_search_index`]. Returns the failed-unit count.
+/// not detected here; use [`crate::Store::rebuild_search_index`]. A changed normaliser
+/// re-derives every unit inside the caller's single transaction (startup blocks until done;
+/// one line is printed with the count) and then optimises the FTS index. Returns the
+/// failed-unit count.
 ///
 /// # Errors
 /// Storage failures only; unnormalisable units are recorded, not fatal.
 pub(crate) fn ensure(db: &Connection) -> Result<i64, AppError> {
+    let stale: i64 = db.query_row(
+        "SELECT count(*) FROM source_search_text WHERE normaliser<>?1",
+        [SEARCH_NORMALISER],
+        |row| row.get(0),
+    )?;
+    if stale > 0 {
+        eprintln!(
+            "Re-deriving the search text of {stale} unit(s) for a new search normaliser; startup waits for it."
+        );
+    }
     let failed = derive_missing(db)?;
+    if stale > 0 {
+        db.execute_batch("INSERT INTO source_search_fts(source_search_fts) VALUES('optimize');")?;
+    }
     let (indexed, eligible): (i64, i64) = db.query_row(&format!("SELECT (SELECT count(*) FROM source_search_fts),(SELECT count(*) FROM ({EXPECTED_INDEX}))"), [], |row| Ok((row.get(0)?, row.get(1)?)))?;
     if indexed != eligible {
         rebuild(db)?;
@@ -615,6 +659,73 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(state, (1, 0, 0));
+    }
+
+    fn flat(html: &str) -> String {
+        search_text(html).unwrap().trim_end().to_owned()
+    }
+
+    #[test]
+    fn text_in_a_table_outside_any_cell_gets_its_own_line() {
+        assert_eq!(
+            flat("<table><caption>Armi</caption><tr><td>a</td><td>b</td></tr></table>"),
+            "Armi\na | b"
+        );
+    }
+
+    #[test]
+    fn block_tags_in_a_cell_separate_words_and_inline_tags_do_not() {
+        assert_eq!(
+            flat(
+                "<table><tr><td><h4>Titolo</h4>testo</td><td>s<sub>1</sub>x<b>y</b></td></tr></table>"
+            ),
+            "Titolo testo | s1xy"
+        );
+    }
+
+    #[test]
+    fn several_tables_footers_empty_rows_and_nested_containers() {
+        assert_eq!(
+            flat(
+                "<table><tr><td>a</td></tr></table><p>mezzo</p><table><tr><td>b</td><td>c</td></tr></table>"
+            ),
+            "a\n\nmezzo\n\nb | c"
+        );
+        assert_eq!(
+            flat(
+                "<table><tbody><tr><td>x</td></tr></tbody><tfoot><tr><td>Totale</td><td>3</td></tr></tfoot></table>"
+            ),
+            "x\nTotale | 3"
+        );
+        assert_eq!(
+            flat(
+                "<table><tr><td>a</td><td>b</td></tr><tr><td></td><td></td></tr><tr><td>c</td><td>d</td></tr></table>"
+            ),
+            "a | b\n | \nc | d"
+        );
+        assert_eq!(
+            flat(
+                "<ul><li>voce<table><tr><td>a</td><td>b</td></tr></table></li></ul><blockquote><table><tr><td>c</td><td>d</td></tr></table></blockquote>"
+            ),
+            "* voce\n  \n  a | b\n\n> c | d"
+        );
+    }
+
+    #[test]
+    fn the_sanitiser_leaves_no_attribute_but_numeric_spans() {
+        let dirty = "<TABLE class=x onclick=\"a>b\" title=\"<td>\"><TR id=r><TD colspan=\"2\" rowspan=3 style=\"x\" data-x=1>a &lt;b&gt;</TD><th ROWSPAN=\"2\" title='>'>c</th></TR></TABLE><p class=z>t</p><a href=\"javascript:1\">l</a>";
+        let clean = sanitized(dirty).unwrap();
+        let tags = regex::Regex::new(r"<[^>]*>").unwrap();
+        let span = regex::Regex::new(r#"^<(td|th)( (colspan|rowspan)="[0-9]+")*>$"#).unwrap();
+        let plain = regex::Regex::new(r"^</?[a-z0-9]+>$").unwrap();
+        for tag in tags.find_iter(&clean) {
+            assert!(
+                plain.is_match(tag.as_str()) || span.is_match(tag.as_str()),
+                "{} in {clean}",
+                tag.as_str()
+            );
+        }
+        assert!(!clean.contains('<') || tags.replace_all(&clean, "").find('<').is_none());
     }
 
     #[test]
