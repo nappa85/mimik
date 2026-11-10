@@ -61,7 +61,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   (`Err(Finishing)`, task_tests.rs:347) and
   `assistant::runtime::launch::tests::a_port_that_cannot_be_bound_is_tried_three_times_then_fails`
   (launch_tests.rs:463), and `assistant::runtime::launch::tests::a_leftover_still_running_blocks_the_start_and_keeps_its_entry`
-  (failed once in a full gate beside another test container, 2026-11-10; 3 of 3 alone): find their
+  (failed once in a full gate beside another test container, 2026-11-10; 3 of 3 alone), and seven
+  `assistant::download::task` tests on a slow post-merge run (2026-11-10, 1,360 s suite; the
+  5 s `until` poll in task_tests.rs:214 ran out; 52 of 52 pass alone, 3 of 3): find their
   timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
