@@ -13,6 +13,7 @@
 {% for choice in shapes %}<button name="shape" value="{{ choice.key }}"{% if choice.current %} aria-pressed="true"{% endif %}>{{ choice.label }}{% if let Some(score) = choice.score %} ({{ score }}){% endif %}</button> {% endfor %}
 </form>
 {% if !problems.is_empty() %}<div class="panel" role="status" id="table-problems"><p>The draft has problems to check; none was fixed automatically:</p><ul>{% for problem in problems %}<li>{{ problem }}</li>{% endfor %}</ul></div>{% endif %}
+{% if !words_note.is_empty() %}<p role="status" id="table-words-note">{{ words_note }}</p>{% endif %}
 {% if overlap_unchecked %}<p role="status" id="table-overlap-unchecked">This page has too many units to check whether the table would cover unselected ones; the overlap check was not done.</p>{% endif %}
 <p>Saving rejects the {{ units.len() }} selected unit(s) with your rationale and adds one table unit covering their combined area. It stays unreviewed until you check it against the original page. The original units and the raw extraction stay as they are.</p>
 <form method="post" action="/admin/materials/pages/{{ page }}/tables" data-form="table" data-target="{{ page }}">

@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS source_page_words;
 DROP TABLE IF EXISTS source_owner_tables;
 DROP TABLE source_primary_web_events;
 DROP TABLE source_primary_events;

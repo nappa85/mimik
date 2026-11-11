@@ -191,6 +191,13 @@ impl Files {
         }
         rustix::fs::fchmod(fd, Mode::RUSR | Mode::WUSR).map_err(io)
     }
+    /// The path of a spool file, for a confined reader of its bytes.
+    /// # Errors
+    /// Refuses an invalid name.
+    pub fn spool_path(&self, name: &str) -> Result<PathBuf, AppError> {
+        valid_name(name)?;
+        Ok(self.path.join(name))
+    }
     /// # Errors
     /// Returns invalid-name, unlink or directory-sync failures.
     pub fn remove_spool(&self, name: &str) -> Result<(), AppError> {

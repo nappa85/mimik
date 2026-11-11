@@ -9,8 +9,10 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
+use super::page_words::PageWord;
 use super::tables::{self, MAX_CELL_CHARS, MAX_COLUMNS, MAX_ROWS};
 
+mod columns;
 mod labels;
 mod progression;
 mod roll;
@@ -31,16 +33,18 @@ pub(crate) enum Shape {
     Progression,
     Stat,
     Label,
+    Column,
     Plain,
 }
 
 impl Shape {
     /// The fixed order that breaks score ties.
-    pub(crate) const ALL: [Shape; 5] = [
+    pub(crate) const ALL: [Shape; 6] = [
         Shape::Roll,
         Shape::Progression,
         Shape::Stat,
         Shape::Label,
+        Shape::Column,
         Shape::Plain,
     ];
 
@@ -50,6 +54,7 @@ impl Shape {
             Shape::Progression => "progression",
             Shape::Stat => "stat",
             Shape::Label => "label",
+            Shape::Column => "column",
             Shape::Plain => "plain",
         }
     }
@@ -60,6 +65,7 @@ impl Shape {
             Shape::Progression => "Progression",
             Shape::Stat => "Stat line",
             Shape::Label => "Label and value",
+            Shape::Column => "Column grid",
             Shape::Plain => "Plain columns",
         }
     }
@@ -202,6 +208,9 @@ impl Draft {
 /// corrected, extraction text otherwise: the caller chooses).
 pub(crate) struct ShapeInput {
     units: Vec<Vec<String>>,
+    /// The stored words whose centres lie inside the selected units' polygons; `None` when the
+    /// page has no usable word boxes (the Column grid then reads each line's wide gaps).
+    words: Option<Vec<PageWord>>,
 }
 
 impl ShapeInput {
@@ -218,7 +227,14 @@ impl ShapeInput {
                         .collect()
                 })
                 .collect(),
+            words: None,
         }
+    }
+
+    /// Adds the selected units' word boxes for the Column grid.
+    pub(crate) fn with_words(mut self, words: Option<Vec<PageWord>>) -> ShapeInput {
+        self.words = words;
+        self
     }
 
     /// The lines of all units in reading order with html2text's decoration removed.
@@ -386,6 +402,7 @@ pub(crate) fn read(input: &ShapeInput, shape: Shape) -> Draft {
         Shape::Progression => progression::read(&input.lines()),
         Shape::Stat => stats::read(&input.lines()),
         Shape::Label => labels::read(&input.lines()),
+        Shape::Column => columns::read(input),
     }
 }
 

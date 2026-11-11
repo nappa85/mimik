@@ -149,7 +149,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    - *Rounding and the page edge:* after rounding outward each box is clamped to
      `[0, page width] x [0, page height]` (`padded()` clamps to the page edge,
      `upload_exclusions.rs:368-375`; `validate` refuses `b[2] > width_points`, `:296-300`; e.g.
-     595.2756 would round to 595.28). 029 rounds outward and clamps the old rows in its copy.
+     595.2756 would round to 595.28). 030 rounds outward and clamps the old rows in its copy.
      Confirmed proposals whose rounded boxes coincide are de-duplicated, not refused. Today's proposal rule (`propose_keyed`, `:437`: recur on at least
      max(3, ceil(3n/5)) pages) makes proposals over 64 pages routine from 107 selected pages.
 8. **Proposals stream pages, with bounded memory and time.** `upload_exclusions.rs:141-170` reads
@@ -186,7 +186,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    error). The CLI import (`import.rs:375,584`) stores through the same call after its hash check
    and compares by hash.
    - *Migration.* The migration loop (`store.rs:111-117`, one IMMEDIATE transaction) runs a Rust
-     pre-step only when version >= 3 and < 30, just before 030: read blobs one at a time
+     pre-step only when version >= 3 and < 31, just before 031: read blobs one at a time
      (`sqlite3_blob_open`, streaming), write each to the store, verify SHA-256 equals `pdf_hash`,
      then SQL drops the column. Idempotent if interrupted (files are complete before the column
      goes). **Disk (N5):** the pre-step doubles every PDF and `DROP COLUMN` rewrites every
@@ -196,7 +196,7 @@ nothing re-verifies the file. Pages are published inside the render callback
      to run it (or a CLI `compact`) afterwards to reclaim the space.
    - *Hash failure.* Default: abort with a fixed message naming source ids (no paths). Ways out,
      documented: restore from backup, or a CLI command that moves the bad blob to
-     `sources/quarantine/`. Before 030 `pdf` is NOT NULL, so the command writes an empty blob
+     `sources/quarantine/`. Before 031 `pdf` is NOT NULL, so the command writes an empty blob
      plus a quarantine marker for that row; the pre-step treats a marked row as a missing file
      (`pdf_corrupt` on use) instead of aborting again.
    - *Backup/restore.* The database file alone no longer holds PDFs: `release-scope.md:119` and
@@ -239,7 +239,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    (sparse padding), xref beyond 4 GiB (sparse, 64-bit seeks), peak RSS far below 75% of
    `RLIMIT_AS`, the gzip-with-`%PDF-` fixture, a missing input. Pinned-profile test unchanged (no
    new grant). Update the DEP-29 sentence.
-2. **Migration 029 (upload tables).** New bounds, `document_changed` in `source_jobs.reason` (026
+2. **Migration 030 (upload tables).** New bounds, `document_changed` in `source_jobs.reason` (026
    `:122` would otherwise reject it) and `source_uploads.document_changed`, `error_code` mapping
    (`uploads.rs:1398`). Migrations run in an IMMEDIATE transaction with foreign keys on
    (`store.rs`): `DROP TABLE source_uploads` cascades into pages, exclusions (audit history) and
@@ -277,7 +277,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    disk, weekend window), all render batches, cancel, restart reconciliation; fix the
    per-page inspection budget constants from the measurements; time `progress` polls and the page
    screen at 20,000 pages.
-7. **Content-addressed PDF store** (decision 9): store, interface, Rust pre-step, migration 030,
+7. **Content-addressed PDF store** (decision 9): store, interface, Rust pre-step, migration 031,
    CLI import through it, sweep with the `flock` and age rule, backup note; test fixtures inserting `pdf` (`documents.rs:509`, `search.rs:455`, `campaigns/tests.rs`) updated. Tests: legacy blobs migrated and verified (hash
    mismatch aborts untouched), an interrupted migration resumes, two sources with one PDF share a
    file, a tampered or missing file is `pdf_corrupt`, a symlink in the store directory is refused,
@@ -301,7 +301,7 @@ of agent work run in containers; weekday builds at 2 cores.
 - Disk can fill; the margin keeps SQLite/WAL writable but other processes race free space. Every
   write failure releases slot, spool and reservation (slice 4 tests).
 - Hashing a multi-GB file once per job is heavy on the magnetic disk; it runs outside locks.
-- Migrations 029/030 touch live tables and the PDF column; both are tested on seeded data and sit
+- Migrations 030/031 touch live tables and the PDF column; both are tested on seeded data and sit
   under the backup-before-upgrade guidance (the backup now includes `sources/`).
 - Unlimited selection moves failures to render time; step 4 must create the source page by page.
 

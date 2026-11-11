@@ -131,3 +131,21 @@ fn import_source_points_to_the_owner_review_screen() {
     assert!(message.contains("/admin/materials"), "{message}");
     assert!(!message.contains("Open /sources"), "{message}");
 }
+
+#[test]
+fn import_words_message_says_what_happened_to_the_word_boxes() {
+    use mimik::sources::WordsReport;
+    let said = |stored, missing, unavailable: Option<&str>| {
+        import_words_message(&WordsReport {
+            stored,
+            missing,
+            unavailable: unavailable.map(str::to_owned),
+        })
+    };
+    assert!(said(3, 0, None).contains("stored for 3 page(s)"));
+    assert!(said(0, 0, None).contains("already has them"));
+    assert!(said(2, 1, None).contains("1 page(s) have none"));
+    let message = said(0, 4, Some("sandbox step unshare failed"));
+    assert!(message.contains("not read") && message.contains("sandbox step unshare failed"));
+    assert!(message.contains("4 page(s) have none"), "{message}");
+}

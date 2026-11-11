@@ -1254,6 +1254,8 @@ struct TableEditor {
     problems: Vec<String>,
     overlaps: String,
     overlap_unchecked: bool,
+    /// Why Column grid read text instead of word boxes (empty when it had them).
+    words_note: &'static str,
     /// The shape the draft was read as (a hidden field, so a refused save can show the notes).
     shape_key: String,
     rationale: String,
@@ -1280,6 +1282,7 @@ impl TableEditor {
             problems: Vec::new(),
             overlaps: String::new(),
             overlap_unchecked: false,
+            words_note: "",
             shape_key: String::new(),
             rationale: String::new(),
             message: String::new(),
@@ -1374,6 +1377,7 @@ async fn table_form(
             editor.problems = prefill.problems;
             editor.overlaps = overlap_note(&prefill.overlaps);
             editor.overlap_unchecked = !prefill.overlap_checked;
+            editor.words_note = prefill.words.note();
             prefill.shape.key().clone_into(&mut editor.shape_key);
             html(&editor)
         }
@@ -1423,6 +1427,7 @@ async fn refresh_table_notes(
         editor.problems = prefill.problems;
         editor.overlaps = overlap_note(&prefill.overlaps);
         editor.overlap_unchecked = !prefill.overlap_checked;
+        editor.words_note = prefill.words.note();
         prefill.shape.key().clone_into(&mut editor.shape_key);
     }
 }

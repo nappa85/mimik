@@ -1,6 +1,6 @@
 use super::{
     Error, Inspection, Page, RenderedPage, geometry, pixel_size,
-    records::{self, Document, Stats, TextLine},
+    records::{self, Document, PageWords, Stats, TextLine, Word},
 };
 use mupdf::{
     Colorspace, Device, Matrix, Pixmap, TextCharFlags, TextPageFlags,
@@ -527,6 +527,125 @@ fn text(
     )
     .map_err(|_| Error::TooLarge)?;
     Ok((stats, lines))
+}
+
+/// A split of a word at a gap wider than this share of the font size, or at whitespace.
+const WORD_GAP: f32 = 0.25;
+
+fn push_word(
+    words: &mut Vec<Word>,
+    text: &mut String,
+    bounds: &mut Option<mupdf::Rect>,
+    info: &Page,
+    correction: &Matrix,
+) -> Result<(), Error> {
+    let value = std::mem::take(text);
+    let Some(rect) = bounds.take() else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        return Ok(());
+    }
+    let b = clipped(rect, info, correction);
+    if b[0] >= b[2] || b[1] >= b[3] {
+        return Ok(());
+    }
+    if words.len() == records::MAX_WORDS {
+        return Err(Error::TooLarge);
+    }
+    words.push(Word {
+        text: value,
+        bounds: b,
+    });
+    Ok(())
+}
+
+/// The words of one page: whitespace and font-size gaps split a line's characters; a run longer
+/// than the word bound is cut at a character boundary.
+fn page_words(document: &PdfDocument, info: &Page) -> Result<PageWords, Error> {
+    let page =
+        document.load_pdf_page(i32::try_from(info.n - 1).map_err(|_| Error::Unsupported)?)?;
+    let mut correction = page.ctm()?.invert().ok_or(Error::Unsupported)?;
+    correction.concat(matrix(info.transform));
+    let text = page.to_text_page(
+        TextPageFlags::CLIP
+            | TextPageFlags::PRESERVE_IMAGES
+            | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE,
+    )?;
+    let mut words = Vec::new();
+    let mut chars = 0_u32;
+    for block in text.blocks() {
+        for line in block.lines() {
+            let mut value = String::new();
+            let mut bounds: Option<mupdf::Rect> = None;
+            for ch in line.chars() {
+                chars += 1;
+                if chars > 1_000_000 {
+                    return Err(Error::TooLarge);
+                }
+                let unmapped = ch
+                    .flags()
+                    .intersects(TextCharFlags::UNICODE_IS_CID | TextCharFlags::UNICODE_IS_GID)
+                    || ch.char().is_none()
+                    || ch.char() == Some('\u{fffd}');
+                let value_char = if unmapped {
+                    '\u{fffd}'
+                } else {
+                    ch.char().unwrap_or('\u{fffd}')
+                };
+                if value_char.is_whitespace() {
+                    push_word(&mut words, &mut value, &mut bounds, info, &correction)?;
+                    continue;
+                }
+                let rect = mupdf::Rect::from(ch.quad());
+                if let Some(previous) = bounds {
+                    let gap = (rect.x0 - previous.x1)
+                        .max(previous.x0 - rect.x1)
+                        .max(rect.y0 - previous.y1)
+                        .max(previous.y0 - rect.y1);
+                    if gap > WORD_GAP * ch.size()
+                        || value.len() + value_char.len_utf8() > records::MAX_WORD_BYTES
+                    {
+                        push_word(&mut words, &mut value, &mut bounds, info, &correction)?;
+                    }
+                }
+                bounds = Some(match bounds {
+                    Some(previous) => previous.r#union(&rect),
+                    None => rect,
+                });
+                value.push(value_char);
+            }
+            push_word(&mut words, &mut value, &mut bounds, info, &correction)?;
+        }
+    }
+    records::validate_words(&words, info)?;
+    Ok(PageWords { n: info.n, words })
+}
+
+/// The words of one to eight distinct pages, in requested order.
+///
+/// # Errors
+/// Returns fixed reasons; source content and file names never enter errors.
+pub(super) fn words_each(
+    input: Input<'_>,
+    pages: &[u32],
+    mut emit: impl FnMut(PageWords) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let document = open(input)?;
+    if pages.is_empty()
+        || pages.len() > 8
+        || pages.iter().collect::<BTreeSet<_>>().len() != pages.len()
+    {
+        return Err(Error::Unsupported);
+    }
+    let count = u32::try_from(document.page_count()?).map_err(|_| Error::Unreadable)?;
+    for &n in pages {
+        if n == 0 || n > count {
+            return Err(Error::Unsupported);
+        }
+        emit(page_words(&document, &page_info(&document, n)?)?)?;
+    }
+    Ok(())
 }
 
 /// Render a batch of one to eight distinct pages, in requested order.

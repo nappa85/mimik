@@ -392,7 +392,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     if let Some(command) = args.command {
-        return local_command(&store, command).await;
+        return local_command(&store, command, &data_dir(&path)?).await;
     }
     if args.assistant.on {
         options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
@@ -425,7 +425,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The local operator commands that print their results.
-async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn std::error::Error>> {
+async fn local_command(
+    store: &Store,
+    command: Command,
+    data: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let Some(command) = publication_command(store, command).await? else {
         return Ok(());
     };
@@ -458,8 +462,7 @@ async fn local_command(store: &Store, command: Command) -> Result<(), Box<dyn st
             )?
         ),
         Command::ImportSource { bundle, pdf } => {
-            let id = store.import_source(&bundle, &pdf).await?;
-            println!("{}", import_source_message(id));
+            import_source_command(store, &bundle, &pdf, data).await?;
         }
         Command::ImportSuggestions { source, report } => {
             let summary = store.import_suggestion_report(source, &report).await?;
@@ -759,11 +762,51 @@ async fn catalogue_command(
     Ok(None)
 }
 
+/// `import-source`: register the bundle and read the word boxes the table shapes use.
+async fn import_source_command(
+    store: &Store,
+    bundle: &std::path::Path,
+    pdf: &std::path::Path,
+    data: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    let (id, words) = store.import_source_with_words(bundle, pdf, data).await?;
+    #[cfg(not(target_os = "linux"))]
+    let (id, words) = {
+        let _ = data;
+        (
+            store.import_source(bundle, pdf).await?,
+            mimik::sources::WordsReport {
+                unavailable: Some("not supported on this platform".into()),
+                ..Default::default()
+            },
+        )
+    };
+    println!("{}", import_source_message(id));
+    println!("{}", import_words_message(&words));
+    Ok(())
+}
+
 /// What `import-source` prints; the review screen is the Owner materials page.
 fn import_source_message(id: impl std::fmt::Display) -> String {
     format!(
         "Registered source {id}. New imports are unreviewed; existing imports retain their review state. Review it at /admin/materials."
     )
+}
+
+/// What `import-source` says about the word boxes the table shapes read.
+fn import_words_message(words: &mimik::sources::WordsReport) -> String {
+    match (&words.unavailable, words.stored, words.missing) {
+        (Some(reason), _, _) => format!(
+            "Word boxes were not read ({reason}); {} page(s) have none. Tables still draft from each line's text; run import-source again where the worker is available to add them.",
+            words.missing
+        ),
+        (None, 0, 0) => "Word boxes: every page already has them.".to_owned(),
+        (None, stored, 0) => format!("Word boxes stored for {stored} page(s)."),
+        (None, stored, missing) => format!(
+            "Word boxes stored for {stored} page(s); {missing} page(s) have none (the worker could not read them). Run import-source again to retry."
+        ),
+    }
 }
 
 #[cfg(test)]

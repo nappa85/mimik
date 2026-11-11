@@ -8,7 +8,8 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     // Callers may already have selected an older migration fixture version.
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     db.execute_batch(
-        "DROP TABLE IF EXISTS source_owner_tables;
+        "DROP TABLE IF EXISTS source_page_words;
+         DROP TABLE IF EXISTS source_owner_tables;
          DROP VIEW IF EXISTS source_upload_invalid_exclusion;
          DROP VIEW IF EXISTS source_upload_invalid_inspection;
          DROP TABLE IF EXISTS source_upload_exclusions;

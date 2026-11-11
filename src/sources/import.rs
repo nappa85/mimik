@@ -554,17 +554,181 @@ fn load_import(directory: &Path, pdf_path: &Path) -> Result<Import, AppError> {
     })
 }
 
+/// A page whose words are wanted: its PDF page number and the bundle's size in points.
+#[derive(Clone, Copy, Debug)]
+pub struct WantedPage {
+    pub pdf_page: u32,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// What a [`WordSource`] produced: the encoded, validated rows by PDF page, and why it stopped
+/// early when it could not run (the worker is missing, unconfined or failed).
+#[derive(Default)]
+pub struct Fetched {
+    /// The encoded rows (`page_words`'s version 1 encoding) by PDF page number.
+    pub rows: BTreeMap<u32, Vec<u8>>,
+    pub unavailable: Option<String>,
+}
+
+/// Where the word boxes of the wanted pages come from at import. It runs outside the write
+/// transaction; the caller inserts what it returns.
+pub trait WordSource: Send + Sync {
+    fn fetch(&self, pdf: &[u8], pdf_sha256: &str, pages: &[WantedPage]) -> Fetched;
+}
+
+/// How an import's word boxes went, for the line `import-source` prints.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WordsReport {
+    /// Pages whose words were stored by this run.
+    pub stored: usize,
+    /// Pages that still have no words (the run could not read them).
+    pub missing: usize,
+    /// Why the worker could not run, when it could not.
+    pub unavailable: Option<String>,
+}
+
+/// Page numbers of the bundle's pages that have no words row yet (all of them for a new source).
+fn pages_without_words(
+    db: &rusqlite::Connection,
+    bundle_hash: &str,
+    candidates: &[WantedPage],
+) -> Result<Vec<WantedPage>, AppError> {
+    let source: Option<i64> = db
+        .query_row(
+            "SELECT id FROM sources WHERE bundle_hash=?1",
+            [bundle_hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut wanted = Vec::new();
+    for page in candidates {
+        let has_words = match source {
+            Some(id) => db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM source_page_words w JOIN source_pages p ON p.id=w.page_id WHERE p.source_id=?1 AND p.pdf_page=?2)",
+                params![id, page.pdf_page],
+                |row| row.get::<_, bool>(0),
+            )?,
+            None => false,
+        };
+        if !has_words {
+            wanted.push(*page);
+        }
+    }
+    Ok(wanted)
+}
+
+/// Insert the rows for pages that have none (insert-once: an existing row is never replaced).
+fn insert_words(
+    db: &rusqlite::Connection,
+    source_id: i64,
+    rows: &BTreeMap<u32, Vec<u8>>,
+) -> Result<usize, AppError> {
+    let mut stored = 0;
+    for (pdf_page, words) in rows {
+        let page_id: Option<i64> = db
+            .query_row(
+                "SELECT id FROM source_pages WHERE source_id=?1 AND pdf_page=?2",
+                params![source_id, pdf_page],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(page_id) = page_id else { continue };
+        stored += db.execute(
+            "INSERT INTO source_page_words(page_id,words) SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM source_page_words WHERE page_id=?1)",
+            params![page_id, words],
+        )?;
+    }
+    Ok(stored)
+}
+
 impl Store {
-    /// Register a prepared local source directory. Incoming approvals are never used.
+    /// Register a prepared local source directory. Incoming approvals are never used. No word
+    /// boxes are read (see [`Store::import_source_with_words`]).
     ///
     /// # Errors
     /// Rejects inconsistent/unsupported artifacts, bounds, hashes, symlinks, sizes or storage errors.
     pub async fn import_source(&self, directory: &Path, pdf: &Path) -> Result<i64, AppError> {
+        Ok(self.import_source_from(directory, pdf, None).await?.0)
+    }
+
+    /// As [`Store::import_source`], and read the word boxes of the pages that have none with the
+    /// confined worker (the verified PDF goes through a private file in `data`'s staging area).
+    /// An existing matching source is filled in for its pages without words only. Without a
+    /// usable worker the import still succeeds, and the report says why there are no words.
+    ///
+    /// # Errors
+    /// As [`Store::import_source`].
+    #[cfg(target_os = "linux")]
+    pub async fn import_source_with_words(
+        &self,
+        directory: &Path,
+        pdf: &Path,
+        data: &Path,
+    ) -> Result<(i64, WordsReport), AppError> {
+        let source: std::sync::Arc<dyn WordSource> = match super::staging::Files::open(data) {
+            Ok(files) => std::sync::Arc::new(super::import_words::WorkerWords::new(files)),
+            Err(_) => std::sync::Arc::new(super::import_words::Unavailable("staging area")),
+        };
+        self.import_source_from(directory, pdf, Some(source)).await
+    }
+
+    /// As [`Store::import_source_with_words`], with the words from `words` (`None` reads none).
+    ///
+    /// # Errors
+    /// As [`Store::import_source`].
+    pub async fn import_source_from(
+        &self,
+        directory: &Path,
+        pdf: &Path,
+        words: Option<std::sync::Arc<dyn WordSource>>,
+    ) -> Result<(i64, WordsReport), AppError> {
         let directory = directory.to_owned();
         let pdf = pdf.to_owned();
         let data = tokio::task::spawn_blocking(move || load_import(&directory, &pdf))
             .await
             .map_err(|_| AppError::Worker)??;
+        let Some(source) = words else {
+            return self
+                .commit_import(data, Vec::new(), Fetched::default())
+                .await;
+        };
+        let bundle_hash = hash(&data.prepared);
+        let candidates: Vec<WantedPage> = data
+            .bundle
+            .pages
+            .iter()
+            .map(|page| WantedPage {
+                pdf_page: page.pdf_page,
+                width: page.width_points,
+                height: page.height_points,
+            })
+            .collect();
+        let wanted = self
+            .run(move |db| pages_without_words(db, &bundle_hash, &candidates))
+            .await?;
+        // The worker runs here, outside the write transaction.
+        let pages = wanted.clone();
+        let (data, fetched) = tokio::task::spawn_blocking(move || {
+            let fetched = if pages.is_empty() {
+                Fetched::default()
+            } else {
+                source.fetch(&data.pdf, &data.bundle.source_sha256, &pages)
+            };
+            (data, fetched)
+        })
+        .await
+        .map_err(|_| AppError::Worker)?;
+        self.commit_import(data, wanted, fetched).await
+    }
+
+    async fn commit_import(
+        &self,
+        data: Import,
+        wanted: Vec<WantedPage>,
+        fetched: Fetched,
+    ) -> Result<(i64, WordsReport), AppError> {
+        let Fetched { rows, unavailable } = fetched;
         self.run(move |db| {
             let tx = db.transaction()?;
             let resolved = crate::registry::source_identity(&tx, &data.bundle.system_id, &data.bundle.edition, data.bundle.stable_edition()?)?;
@@ -577,8 +741,9 @@ impl Store {
                 verify_existing(&tx, id, &data)?;
                 if total_pages == 0 { tx.execute("UPDATE sources SET total_pages=?1 WHERE id=?2 AND total_pages=0", params![data.total_pages,id])?; }
                 finalize(&tx, id, &data)?;
+                let stored = insert_words(&tx, id, &rows)?;
                 tx.commit()?;
-                return Ok(id);
+                return Ok((id, report(stored, &wanted, &rows, unavailable)));
             }
             let source = &data.bundle;
             tx.execute("INSERT INTO sources (bundle_hash, source_id, title, system_id, edition, language, pdf_hash, pdf, raw_json, prepared_json,total_pages) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![bundle_hash, source.source_id, source.title, source.system_id, source.edition, source.language, source.source_sha256, data.pdf, data.raw, data.prepared,data.total_pages])?;
@@ -596,8 +761,25 @@ impl Store {
             }
             finalize(&tx, id, &data)?;
             super::documents::register_import(&tx, id)?;
+            let stored = insert_words(&tx, id, &rows)?;
             tx.commit()?;
-            Ok(id)
+            Ok((id, report(stored, &wanted, &rows, unavailable)))
         }).await
+    }
+}
+
+fn report(
+    stored: usize,
+    wanted: &[WantedPage],
+    rows: &BTreeMap<u32, Vec<u8>>,
+    unavailable: Option<String>,
+) -> WordsReport {
+    WordsReport {
+        stored,
+        missing: wanted
+            .iter()
+            .filter(|page| !rows.contains_key(&page.pdf_page))
+            .count(),
+        unavailable,
     }
 }

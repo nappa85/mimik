@@ -614,3 +614,192 @@ fn prose_steps_and_title_lines_are_near_misses() {
     assert_eq!(title.rows[0], ["Table 3 Fighter", "", ""]);
     assert_eq!(title.rows.len(), 4);
 }
+
+// Column grid. Word boxes are synthetic: 5 points per character, 10 points high, rows 14 apart.
+fn f(n: usize) -> f32 {
+    f32::from(u16::try_from(n).unwrap())
+}
+fn boxed(text: &str, x0: f32, row: usize) -> PageWord {
+    let (top, width) = (20.0 + f(row) * 14.0, f(text.chars().count()) * 5.0);
+    PageWord {
+        text: text.into(),
+        bounds: [x0, top, x0 + width, top + 10.0],
+    }
+}
+/// Left-aligned cells: each row is `(text, x0)` pairs; multi-word cells are split on spaces.
+fn left_aligned(rows: &[&[(&str, f32)]]) -> Vec<PageWord> {
+    let mut words = Vec::new();
+    for (row, cells) in rows.iter().enumerate() {
+        for (text, x0) in *cells {
+            let mut x = *x0;
+            for part in text.split(' ') {
+                words.push(boxed(part, x, row));
+                x += f(part.chars().count()) * 5.0 + 5.0;
+            }
+        }
+    }
+    words
+}
+fn grid(words: Vec<PageWord>) -> Draft {
+    read(&input(&[""]).with_words(Some(words)), Shape::Column)
+}
+
+#[test]
+fn column_grid_reads_words_by_baseline_and_recurring_columns() {
+    let words = left_aligned(&[
+        &[("Item", 10.0), ("Cost", 100.0), ("Weight", 160.0)],
+        &[("Sword", 10.0), ("10", 100.0), ("5", 160.0)],
+        &[("Giant rat", 10.0), ("2", 100.0), ("1", 160.0)],
+        &[("Shield", 10.0), ("7", 100.0), ("6", 160.0)],
+    ]);
+    let draft = grid(words);
+    assert_eq!(draft.shape, Shape::Column);
+    assert_eq!(draft.rows.len(), 4);
+    assert_eq!(draft.rows[0], ["Item", "Cost", "Weight"]);
+    // A two-word cell stays in one cell.
+    assert_eq!(draft.rows[2], ["Giant rat", "2", "1"]);
+    assert!(draft.header, "non-numeric first row over numeric rows");
+    assert!(draft.problems.is_empty(), "{:?}", draft.problems);
+    assert_eq!(draft.score, 80);
+}
+
+#[test]
+fn column_grid_has_no_header_when_the_first_row_is_data() {
+    let draft = grid(left_aligned(&[
+        &[("Sword", 10.0), ("10", 100.0)],
+        &[("Axe", 10.0), ("8", 100.0)],
+        &[("Bow", 10.0), ("20", 100.0)],
+    ]));
+    assert!(!draft.header);
+    assert_eq!(draft.rows[0], ["Sword", "10"]);
+    // Text everywhere is no header either.
+    let text = grid(left_aligned(&[
+        &[("Name", 10.0), ("Notes", 100.0)],
+        &[("Sword", 10.0), ("sharp", 100.0)],
+        &[("Axe", 10.0), ("heavy", 100.0)],
+    ]));
+    assert!(!text.header);
+}
+
+#[test]
+fn column_grid_right_aligned_numbers_share_a_column_by_their_right_edge() {
+    // Right edges at x=200; the left edges differ with the number of digits.
+    let mut words = left_aligned(&[
+        &[("Item", 10.0)],
+        &[("Sword", 10.0)],
+        &[("Axe", 10.0)],
+        &[("Bow", 10.0)],
+    ]);
+    for (row, number) in ["Cost", "5", "120", "30"].into_iter().enumerate() {
+        let x0 = 200.0 - f(number.chars().count()) * 5.0;
+        words.push(boxed(number, x0, row));
+    }
+    let draft = grid(words);
+    assert_eq!(draft.rows[1], ["Sword", "5"]);
+    assert_eq!(draft.rows[2], ["Axe", "120"]);
+    assert_eq!(draft.rows[3], ["Bow", "30"]);
+    assert!(draft.header);
+}
+
+#[test]
+fn column_grid_flags_ragged_rows_and_scores_them_lower() {
+    let draft = grid(left_aligned(&[
+        &[("Sword", 10.0), ("10", 100.0), ("5", 160.0)],
+        &[("Axe", 10.0), ("8", 100.0), ("4", 160.0)],
+        &[("Bow", 10.0), ("20", 100.0)],
+        &[("Pike", 10.0), ("9", 100.0), ("7", 160.0)],
+    ]));
+    assert_eq!(draft.problems, [Problem::Ragged(3)]);
+    assert_eq!(draft.rows[2], ["Bow", "20", ""]);
+    assert_eq!(draft.score, 60);
+}
+
+#[test]
+fn column_grid_near_misses_lose_to_plain_columns() {
+    // One column of left edges is no grid.
+    let single = left_aligned(&[&[("alpha", 10.0)], &[("beta", 10.0)], &[("gamma", 10.0)]]);
+    // Words at drifting positions never recur in half the rows.
+    let drift = left_aligned(&[
+        &[("a", 10.0), ("b", 60.0)],
+        &[("c", 33.0), ("d", 97.0)],
+        &[("e", 71.0), ("f", 141.0)],
+        &[("g", 120.0), ("h", 201.0)],
+    ]);
+    // A single row is no table.
+    let one_row = left_aligned(&[&[("a", 10.0), ("b", 100.0)]]);
+    for words in [single, drift, one_row] {
+        let read_as_grid = grid(words.clone());
+        assert!(read_as_grid.rows.is_empty(), "{words:?}");
+        assert_eq!(read_as_grid.score, 0);
+        let drafts = best(&input(&["x\ny"]).with_words(Some(words)));
+        assert_eq!(drafts[0].shape, Shape::Plain);
+    }
+}
+
+#[test]
+fn column_grid_loses_to_a_roll_table_that_also_fits() {
+    let texts = "1 Rats\n2 Goblins\n3 Ogres\n4 Wolves\n5 Bandits\n6 A dragon";
+    let words = left_aligned(&[
+        &[("1", 10.0), ("Rats", 40.0)],
+        &[("2", 10.0), ("Goblins", 40.0)],
+        &[("3", 10.0), ("Ogres", 40.0)],
+        &[("4", 10.0), ("Wolves", 40.0)],
+        &[("5", 10.0), ("Bandits", 40.0)],
+        &[("6", 10.0), ("A dragon", 40.0)],
+    ]);
+    let both = input(&[texts]).with_words(Some(words));
+    assert!(read(&both, Shape::Column).score > 0);
+    assert_eq!(best(&both)[0].shape, Shape::Roll);
+}
+
+#[test]
+fn column_grid_without_word_boxes_splits_on_wide_gaps_and_scores_lower() {
+    let text = "Item    Cost    Weight\nSword    10    5\nShield    7    6\nAxe    8    4";
+    let draft = read(&input(&[text]), Shape::Column);
+    assert_eq!(draft.rows[0], ["Item", "Cost", "Weight"]);
+    assert_eq!(draft.rows[2], ["Shield", "7", "6"]);
+    assert!(draft.header);
+    assert_eq!(draft.score, 60);
+    assert!(draft.score < 80, "the text reading is weaker than words");
+    // Words that are present but unusable (none inside the units) fall back the same way.
+    let empty = read(&input(&[text]).with_words(Some(Vec::new())), Shape::Column);
+    assert_eq!(empty.rows, draft.rows);
+    // Single spaces are no gaps.
+    assert!(!fits(&["Sword 10 5\nShield 7 6\nAxe 8 4"], Shape::Column));
+    // A caption stays a single-cell row before the grid; ragged lines are flagged.
+    let captioned = read(
+        &input(&["Gear\nSword    10\nAxe    8\nBow    20\nrope"]),
+        Shape::Column,
+    );
+    assert_eq!(captioned.rows[0], ["Gear", ""]);
+    assert!(!captioned.header);
+    assert_eq!(captioned.problems, [Problem::Ragged(4)]);
+}
+
+#[test]
+fn column_grid_words_win_over_the_text_reading() {
+    let words = left_aligned(&[
+        &[("Sword", 10.0), ("10", 100.0)],
+        &[("Axe", 10.0), ("8", 100.0)],
+        &[("Bow", 10.0), ("20", 100.0)],
+    ]);
+    // The text has no wide gaps, so only the words can read the grid.
+    let with = input(&["Sword 10\nAxe 8\nBow 20"]).with_words(Some(words));
+    assert_eq!(read(&with, Shape::Column).score, 80);
+    assert!(!fits(&["Sword 10\nAxe 8\nBow 20"], Shape::Column));
+}
+
+#[test]
+fn column_grid_stays_within_the_table_bounds() {
+    // 300 rows is more than a table holds: refused with a problem, not offered.
+    let rows: Vec<Vec<(&str, f32)>> = (0..300).map(|_| vec![("a", 10.0), ("1", 100.0)]).collect();
+    let refs: Vec<&[(&str, f32)]> = rows.iter().map(Vec::as_slice).collect();
+    let draft = grid(left_aligned(&refs));
+    assert!(draft.rows.is_empty(), "{:?}", draft.rows);
+    assert!(draft.problems.contains(&Problem::TooManyRows));
+    // The page's full 20,000 words terminate quickly.
+    let many: Vec<PageWord> = (0..20_000)
+        .map(|i| boxed("w", f(i % 40) * 7.0, i / 40))
+        .collect();
+    let _ = grid(many);
+}

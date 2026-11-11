@@ -4525,7 +4525,7 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                "DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;
@@ -4869,6 +4869,132 @@ async fn material_table_saves_a_twenty_unit_roll_table() {
     assert_eq!(saved.status(), StatusCode::SEE_OTHER);
     let after = counts(&store).await;
     assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 20));
+}
+
+/// Words laid out as three rows of two columns inside the boxes of units 1 and 2.
+fn grid_words() -> Vec<crate::sources::page_words::PageWord> {
+    use crate::sources::page_words::PageWord;
+    let mut words = Vec::new();
+    for (row, (a, b)) in [("Item", "Cost"), ("Sword", "10"), ("Axe", "8")]
+        .into_iter()
+        .enumerate()
+    {
+        let top = 20.0 + 14.0 * f32::from(u8::try_from(row).unwrap());
+        for (text, x0) in [(a, 15.0_f32), (b, 70.0)] {
+            let width = 5.0 * f32::from(u8::try_from(text.len()).unwrap());
+            words.push(PageWord {
+                text: text.into(),
+                bounds: [x0, top, x0 + width, top + 10.0],
+            });
+        }
+    }
+    words
+}
+
+async fn store_words(store: &Store, bytes: Vec<u8>) {
+    store
+        .run(move |db| {
+            db.execute(
+                "INSERT INTO source_page_words(page_id,words) VALUES(1,?1)",
+                params![bytes],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_table_form_reads_stored_words_for_the_column_grid() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&unit=2&shape=column",
+        )
+        .await,
+    )
+    .await;
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(
+        cells.trim().lines().collect::<Vec<_>>(),
+        ["| Item | Cost |", "| Sword | 10 |", "| Axe | 8 |"]
+    );
+    assert!(html.contains("Column grid (80)"), "{html}");
+    assert!(!html.contains("table-words-note"), "{html}");
+}
+
+#[tokio::test]
+async fn material_table_form_says_why_a_page_has_no_usable_words() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // No row: the text shapes still work and the form says why Column grid is the weaker one.
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Sword    10\nAxe    8\nBow    20' WHERE id=1;",
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let url = "/admin/materials/pages/1/tables/new?unit=1&shape=column";
+    let html = body(router_get(&app, &auth[0], url).await).await;
+    assert!(html.contains("id=\"table-words-note\""), "{html}");
+    assert!(html.contains("no stored word boxes"), "{html}");
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(cells.trim().lines().next().unwrap(), "| Sword | 10 |");
+    assert!(html.contains("Column grid (60)"), "{html}");
+    // An invalid row is ignored and reported, never trusted.
+    // Version 1 but truncated in the middle of a word (the table's CHECK only sees the version).
+    store_words(&store, vec![1, 0, 0]).await;
+    let html = body(router_get(&app, &auth[0], url).await).await;
+    assert!(
+        html.contains("could not be read and were ignored"),
+        "{html}"
+    );
+    assert_eq!(
+        field_value(&html, "textarea[name=cells]")
+            .trim()
+            .lines()
+            .next()
+            .unwrap(),
+        "| Sword | 10 |"
+    );
+}
+
+#[tokio::test]
+async fn material_table_form_notes_words_outside_the_selected_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Sword    10\nAxe    8\nBow    20' WHERE id=1;",
+    )
+    .await;
+    // The words sit far from unit 1's box.
+    let mut words = grid_words();
+    for word in &mut words {
+        word.bounds[1] += 150.0;
+        word.bounds[3] += 150.0;
+    }
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&words, 200.0, 300.0).unwrap(),
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&shape=column",
+        )
+        .await,
+    )
+    .await;
+    assert!(html.contains("inside the selected units"), "{html}");
 }
 
 const TWO_HUNDRED_UNITS: &str = "WITH RECURSIVE n(i) AS (SELECT 52 UNION ALL SELECT i+1 FROM n WHERE i<200) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT i,1,'unit-'||i,'Text','[]','<p>x</p>','x' FROM n; UPDATE source_units SET raw_text='Item '||id||': gold '||id WHERE id<=200;";

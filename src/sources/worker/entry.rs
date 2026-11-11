@@ -52,7 +52,8 @@ pub fn run_entry(spec_path: &Path) -> Result<(), Error> {
     let spec: Spec = serde_json::from_slice(&spec_bytes).map_err(|_| Error::Unreadable)?;
     if spec.settings != RenderSettings::default()
         || spec.operation == Operation::Inspect && !spec.pages.is_empty()
-        || spec.operation == Operation::Render && (spec.pages.is_empty() || spec.pages.len() > 8)
+        || matches!(spec.operation, Operation::Render | Operation::Words)
+            && (spec.pages.is_empty() || spec.pages.len() > 8)
     {
         return Err(Error::Unsupported);
     }
@@ -76,6 +77,9 @@ pub fn run_entry(spec_path: &Path) -> Result<(), Error> {
         super::live_tests::misbehave()?;
         match spec.operation {
             Operation::Inspect => writer.inspection(&operations::inspect(Input::Bytes(&bytes))?),
+            Operation::Words => {
+                operations::words_each(Input::Bytes(&bytes), &spec.pages, |p| writer.words(&p))
+            }
             Operation::Render => operations::render_each(Input::Bytes(&bytes), &spec.pages, |p| {
                 writer.rendered(&p)?;
                 #[cfg(test)]
