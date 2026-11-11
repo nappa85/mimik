@@ -1,5 +1,6 @@
 //! Owner-only source comparison and explicitly attributed review forms.
 use super::{AuthResult, AuthState, csrf_admission, owner_auth};
+use crate::sources::shapes::Shape;
 use crate::{
     AppError,
     sources::{
@@ -1245,9 +1246,57 @@ struct TableEditor {
     /// Hidden `unit` fields, `id:revision`, in reading order.
     units: Vec<String>,
     grid: String,
+    /// The first row is the header (the form's checkbox).
+    header: bool,
+    /// "Read as" choices; scores only after a draft was computed.
+    shapes: Vec<ShapeChoice>,
+    /// Draft notes: a caption kept apart, problems found, units the table's box would cover.
+    caption: String,
+    problems: Vec<String>,
+    overlaps: String,
     rationale: String,
     message: String,
 }
+
+struct ShapeChoice {
+    key: &'static str,
+    label: &'static str,
+    score: Option<u32>,
+    current: bool,
+}
+
+impl TableEditor {
+    /// The plain unit ids (no revisions) the "Read as" form submits back.
+    fn unit_ids(&self) -> Vec<&str> {
+        self.units
+            .iter()
+            .map(|unit| unit.split_once(':').map_or(unit.as_str(), |(id, _)| id))
+            .collect()
+    }
+}
+
+/// Every shape the form offers; scores are shown for those a draft was computed for.
+fn shape_choices(
+    current: Option<Shape>,
+    scores: &[(Shape, u32)],
+    units: usize,
+) -> Vec<ShapeChoice> {
+    Shape::ALL
+        .into_iter()
+        .filter(|shape| {
+            let offered = scores.is_empty() || scores.iter().any(|(s, _)| s == shape);
+            let plain_ok = *shape != Shape::Plain || units <= crate::sources::tables::MAX_COLUMNS;
+            plain_ok && (offered || current == Some(*shape))
+        })
+        .map(|shape| ShapeChoice {
+            key: shape.key(),
+            label: shape.label(),
+            score: scores.iter().find(|(s, _)| *s == shape).map(|(_, n)| *n),
+            current: current == Some(shape),
+        })
+        .collect()
+}
+
 fn table_editor_response(editor: &TableEditor, status: StatusCode) -> AuthResult {
     let mut response = html(editor)?;
     *response.status_mut() = status;
@@ -1269,29 +1318,40 @@ async fn table_form(
         revision: 0,
         units: Vec::new(),
         grid: String::new(),
+        header: false,
+        shapes: Vec::new(),
+        caption: String::new(),
+        problems: Vec::new(),
+        overlaps: String::new(),
         rationale: String::new(),
         message: String::new(),
     };
-    let chosen = fields
-        .iter()
-        .map(|(key, value)| {
-            (key == "unit")
-                .then(|| value.parse::<i64>().ok())
-                .flatten()
-                .ok_or(AppError::Invalid(
-                    "Choose 1-16 different units for a table.",
-                ))
-        })
-        .collect::<Result<Vec<_>, _>>();
-    let prefill = match chosen {
-        Ok(units) => {
+    // `unit` (repeated) and at most one `shape`; nothing else is read from the URL.
+    let mut shape = None;
+    let mut ids = Vec::new();
+    let mut malformed = None;
+    for (key, value) in &fields {
+        match key.as_str() {
+            "unit" => match value.parse::<i64>() {
+                Ok(id) => ids.push(id),
+                Err(_) => malformed = Some("Choose 1-200 different units for a table."),
+            },
+            "shape" if shape.is_none() => match Shape::from_key(value) {
+                Some(s) => shape = Some(s),
+                None => malformed = Some("Unknown table shape."),
+            },
+            _ => malformed = Some("Choose 1-200 different units for a table."),
+        }
+    }
+    let prefill = match malformed {
+        None => {
             state
                 .sessions
                 .store
-                .material_table_prefill(auth, page, units)
+                .material_table_prefill(auth, page, ids, shape)
                 .await
         }
-        Err(e) => Err(e),
+        Some(message) => Err(AppError::Invalid(message)),
     };
     match prefill {
         Ok(prefill) => {
@@ -1302,6 +1362,11 @@ async fn table_form(
                 .map(|(u, r)| format!("{u}:{r}"))
                 .collect();
             editor.grid = prefill.grid;
+            editor.header = prefill.header;
+            editor.shapes = shape_choices(Some(prefill.shape), &prefill.scores, editor.units.len());
+            editor.caption = prefill.caption.unwrap_or_default();
+            editor.problems = prefill.problems;
+            editor.overlaps = overlap_note(&prefill.overlaps);
             html(&editor)
         }
         Err(e @ AppError::Invalid(_)) => {
@@ -1310,6 +1375,21 @@ async fn table_form(
         }
         Err(e) => Err(error(&e)),
     }
+}
+/// Names the unselected units the table's combined box would cover (the first few).
+fn overlap_note(units: &[i64]) -> String {
+    const NAMED: usize = 8;
+    if units.is_empty() {
+        return String::new();
+    }
+    let named: Vec<String> = units.iter().take(NAMED).map(i64::to_string).collect();
+    let more = units.len().saturating_sub(NAMED);
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    format!("unit {}{tail}", named.join(", unit "))
 }
 async fn create_table(
     State(state): State<AuthState>,
@@ -1320,6 +1400,7 @@ async fn create_table(
     let auth = owner_auth(&state, &session).await?;
     let (mut csrf_token, mut revision, mut cells, mut rationale) =
         (None, None, None, None::<String>);
+    let mut header = None::<bool>;
     let mut units = Vec::new();
     let mut malformed = false;
     for (key, value) in fields {
@@ -1329,6 +1410,7 @@ async fn create_table(
             "revision" if revision.is_none() => revision = value.parse::<i64>().ok(),
             "cells" if cells.is_none() => cells = Some(value),
             "rationale" if rationale.is_none() => rationale = Some(value),
+            "header" if header.is_none() && value == "1" => header = Some(true),
             "unit" => units.push(value),
             _ => malformed = true,
         }
@@ -1341,9 +1423,15 @@ async fn create_table(
         revision: revision.unwrap_or(0),
         units,
         grid: cells.unwrap_or_default(),
+        header: header.unwrap_or(false),
+        shapes: Vec::new(),
+        caption: String::new(),
+        problems: Vec::new(),
+        overlaps: String::new(),
         rationale: rationale.unwrap_or_default(),
         message: String::new(),
     };
+    editor.shapes = shape_choices(None, &[], editor.units.len());
     let sources = editor
         .units
         .iter()
@@ -1356,27 +1444,30 @@ async fn create_table(
         })
         .collect::<Option<Vec<_>>>();
     let result = match (malformed || revision.is_none(), sources) {
-        (false, Some(sources)) => match crate::sources::tables::parse_grid(&editor.grid) {
-            Ok(cells) => {
-                state
-                    .sessions
-                    .store
-                    .material_create_table(
-                        auth.clone(),
-                        csrf,
-                        page,
-                        crate::sources::OwnerTable {
-                            revision: editor.revision,
-                            sources,
-                            cells,
-                            actor: String::new(),
-                            rationale: editor.rationale.clone(),
-                        },
-                    )
-                    .await
+        (false, Some(sources)) => {
+            match crate::sources::tables::parse_grid(&editor.grid, editor.header) {
+                Ok(cells) => {
+                    state
+                        .sessions
+                        .store
+                        .material_create_table(
+                            auth.clone(),
+                            csrf,
+                            page,
+                            crate::sources::OwnerTable {
+                                revision: editor.revision,
+                                sources,
+                                cells,
+                                header: editor.header,
+                                actor: String::new(),
+                                rationale: editor.rationale.clone(),
+                            },
+                        )
+                        .await
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
-        },
+        }
         _ => Err(AppError::Invalid(
             "The table form was incomplete; reopen it from the page.",
         )),

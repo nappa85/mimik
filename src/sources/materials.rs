@@ -1,4 +1,5 @@
 //! Owner-bound material operations; prototype/local authority is never inherited.
+use super::shapes::{self, Shape, ShapeInput};
 use super::{PageReview, PageSummary, PageView, ReviewEvent, UnitReview, UnitView, sanitized};
 use crate::{
     AppError, Store,
@@ -176,16 +177,18 @@ impl Store {
         .await
     }
 
-    /// The grid prefilled from the selected units: one column per unit in reading order, one row per
-    /// nonempty line (corrected text where the unit was corrected, the extraction otherwise).
+    /// The draft grid for the selected units, read as `shape` or, without one, as the best
+    /// fitting shape (corrected text where a unit was corrected, the extraction otherwise).
+    /// The draft is a suggestion for the editor; it records nothing.
     pub(crate) async fn material_table_prefill(
         &self,
         auth: RequestAuth,
         page: i64,
         units: Vec<i64>,
+        shape: Option<Shape>,
     ) -> Result<TablePrefill, AppError> {
         if units.is_empty()
-            || units.len() > super::tables::MAX_COLUMNS
+            || units.len() > super::tables::MAX_TABLE_SOURCES
             || units
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
@@ -193,7 +196,7 @@ impl Store {
                 != units.len()
         {
             return Err(AppError::Invalid(
-                "Choose 1-16 different units for a table.",
+                "Choose 1-200 different units for a table.",
             ));
         }
         self.run_bounded_auth(move |db| {
@@ -204,39 +207,73 @@ impl Store {
                 .optional()?
                 .ok_or(AppError::SourceNotFound)?;
             let sql = format!(
-                "{ORDERED_UNITS} SELECT position,revision,CASE WHEN state='corrected' THEN {} ELSE {} END FROM ordered WHERE id=?2",
+                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
                 text("correction", 65_536),
                 text("raw_text", 65_536)
             );
+            let geometry_sql = format!(
+                "{ORDERED_UNITS} SELECT id,polygon,state FROM ordered ORDER BY position LIMIT 2000"
+            );
             let mut rows = Vec::with_capacity(units.len());
+            let mut boxes = Vec::new();
             let mut total = 0_usize;
             super::review::read_with_deadline(&tx, "table", || {
-                for unit in &units {
-                    let (position, unit_revision, text): (i64, i64, String) = tx
-                        .query_row(&sql, params![page, unit], |r| {
-                            Ok((r.get(0)?, r.get(1)?, read_text(r, 2)?))
-                        })
-                        .optional()?
-                        .ok_or(AppError::SourceNotFound)?;
+                let mut query = tx.prepare(&sql)?;
+                let found = query.query_map(params![page, serde_json::to_string(&units)?], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?))
+                })?;
+                for item in found {
+                    let (position, unit, unit_revision, text) = item?;
                     total += text.len();
                     if total > super::tables::MAX_HTML_BYTES {
                         return Err(AppError::Invalid(
                             "The selected units hold more than 64 KiB of text; select fewer or shorter units.",
                         ));
                     }
-                    rows.push((position, *unit, unit_revision, text));
+                    rows.push((position, unit, unit_revision, text));
+                }
+                if rows.len() != units.len() {
+                    return Err(AppError::SourceNotFound);
+                }
+                let mut query = tx.prepare(&geometry_sql)?;
+                let all = query.query_map([page], |r| {
+                    Ok((r.get::<_, i64>(0)?, read_text(r, 1)?, read_text(r, 2)?))
+                })?;
+                for item in all {
+                    let (unit, polygon, state) = item?;
+                    boxes.push((unit, polygon, state));
                 }
                 Ok(())
             })?;
             rows.sort_unstable();
             auth.recheck_owner(&tx)?;
             tx.commit()?;
-            let columns: Vec<String> = rows.iter().map(|r| r.3.clone()).collect();
-            let grid = super::tables::columns_to_grid(&columns)?;
+            let texts: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
+            let input = ShapeInput::new(&texts);
+            let drafts = shapes::best(&input);
+            let scores: Vec<(Shape, u32)> = drafts
+                .iter()
+                .filter(|d| !d.rows.is_empty())
+                .map(|d| (d.shape, d.score))
+                .collect();
+            let chosen = match shape {
+                Some(shape) => shapes::read(&input, shape),
+                None => drafts
+                    .into_iter()
+                    .find(|d| !d.rows.is_empty())
+                    .unwrap_or_else(|| shapes::read(&input, Shape::Plain)),
+            };
+            let selected: std::collections::BTreeSet<i64> = units.iter().copied().collect();
             Ok(TablePrefill {
                 page_revision: revision,
                 units: rows.iter().map(|r| (r.1, r.2)).collect(),
-                grid: super::tables::format_grid(&grid),
+                grid: super::tables::format_grid(&chosen.rows),
+                header: chosen.header,
+                shape: chosen.shape,
+                caption: chosen.caption,
+                problems: chosen.problems.iter().map(ToString::to_string).collect(),
+                scores,
+                overlaps: overlapping_units(&boxes, &selected),
             })
         })
         .await
@@ -724,10 +761,73 @@ pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(
     Ok(())
 }
 
-/// What the create-table form needs: the tokens to submit back and the editable grid text.
+/// What the create-table form needs: the tokens to submit back, the draft grid text and what
+/// the shapes found.
 pub(crate) struct TablePrefill {
     pub page_revision: i64,
     /// Selected units in reading order with the revision the Owner saw.
     pub units: Vec<(i64, i64)>,
     pub grid: String,
+    /// The first row of the draft is a recognised header.
+    pub header: bool,
+    /// The shape the draft was read as.
+    pub shape: Shape,
+    /// A short first line kept apart from the cells when a header owns the first row.
+    pub caption: Option<String>,
+    pub problems: Vec<String>,
+    /// Every shape that fits, best first, with its score.
+    pub scores: Vec<(Shape, u32)>,
+    /// Unselected units whose boxes sit mostly inside the union of the selected units' boxes.
+    pub overlaps: Vec<i64>,
+}
+
+/// Unselected, not rejected units mostly inside the union box of the selected ones: a run across
+/// two page columns would swallow them in the table's box.
+fn overlapping_units(
+    units: &[(i64, String, String)],
+    selected: &std::collections::BTreeSet<i64>,
+) -> Vec<i64> {
+    fn bounds(polygon: &str) -> Option<[f64; 4]> {
+        let points: Vec<[f64; 2]> = serde_json::from_str(polygon).ok()?;
+        if points.is_empty()
+            || points.len() > 1024
+            || points.iter().flatten().any(|v| !v.is_finite())
+        {
+            return None;
+        }
+        Some(
+            points
+                .iter()
+                .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, [x, y]| {
+                    [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
+                }),
+        )
+    }
+    let union = units
+        .iter()
+        .filter(|(unit, _, _)| selected.contains(unit))
+        .filter_map(|(_, polygon, _)| bounds(polygon))
+        .reduce(|a, b| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        });
+    let Some(union) = union else {
+        return Vec::new();
+    };
+    units
+        .iter()
+        .filter(|(unit, _, state)| !selected.contains(unit) && state != "rejected")
+        .filter_map(|(unit, polygon, _)| Some((*unit, bounds(polygon)?)))
+        .filter(|(_, b)| {
+            let area = (b[2] - b[0]) * (b[3] - b[1]);
+            let overlap = (b[2].min(union[2]) - b[0].max(union[0])).max(0.0)
+                * (b[3].min(union[3]) - b[1].max(union[1])).max(0.0);
+            area > 0.0 && overlap * 2.0 > area
+        })
+        .map(|(unit, _)| unit)
+        .collect()
 }

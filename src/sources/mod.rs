@@ -18,6 +18,7 @@ pub(crate) mod materials;
 pub(crate) mod region;
 pub(crate) mod review;
 pub(crate) mod search;
+pub(crate) mod shapes;
 pub(crate) mod tables;
 pub use search::SEARCH_SCHEMA;
 mod store;

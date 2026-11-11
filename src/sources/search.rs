@@ -746,10 +746,13 @@ mod tests {
             search_text(marker).unwrap(),
             "Arma | Danno | Note\nSpada lunga | d8 & d6 | \nAscia | a una mano o due x y\n\nDopo\n"
         );
-        let owner = crate::sources::tables::html(&[
-            vec!["Spada".to_owned(), "d8".to_owned(), String::new()],
-            vec!["Ascia".to_owned(), "d6".to_owned(), "una mano".to_owned()],
-        ]);
+        let owner = crate::sources::tables::html(
+            &[
+                vec!["Spada".to_owned(), "d8".to_owned(), String::new()],
+                vec!["Ascia".to_owned(), "d6".to_owned(), "una mano".to_owned()],
+            ],
+            false,
+        );
         let text = search_text(&owner).unwrap();
         assert_eq!(
             text.trim_end(),
