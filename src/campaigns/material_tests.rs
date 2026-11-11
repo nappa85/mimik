@@ -4907,7 +4907,11 @@ async fn store_words(store: &Store, bytes: Vec<u8>) {
 #[tokio::test]
 async fn material_table_form_reads_stored_words_for_the_column_grid() {
     let _lock = crate::auth::test_resource_lock().await;
-    let (_dir, store, auth) = table_fixture().await;
+    // The units carry exactly the words' text, as the lossless check requires.
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Item Sword Axe' WHERE id=1; UPDATE source_units SET raw_text='Cost 10 8' WHERE id=2;",
+    )
+    .await;
     store_words(
         &store,
         crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
@@ -4930,6 +4934,29 @@ async fn material_table_form_reads_stored_words_for_the_column_grid() {
     );
     assert!(html.contains("Column grid (80)"), "{html}");
     assert!(!html.contains("table-words-note"), "{html}");
+}
+
+#[tokio::test]
+async fn material_table_form_ignores_words_that_do_not_carry_the_units_text() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // The fixture's own unit texts are not the words' text.
+    let (_dir, store, auth) = table_fixture().await;
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&unit=2&shape=column",
+        )
+        .await,
+    )
+    .await;
+    assert!(html.contains("do not carry the same text"), "{html}");
 }
 
 #[tokio::test]

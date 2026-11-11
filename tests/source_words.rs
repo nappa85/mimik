@@ -54,6 +54,7 @@ impl WordSource for Fake {
         }
         Fetched {
             rows: self.rows.clone(),
+            size_mismatch: Vec::new(),
             unavailable: self.unavailable.clone(),
         }
     }
@@ -258,4 +259,84 @@ async fn page_words_are_append_only_and_bounded() {
         [],
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn two_imports_of_the_same_source_at_once_leave_one_consistent_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture::fixture(dir.path()).unwrap();
+    let path = dir.path().join("race.sqlite3");
+    let store = Store::open(&path).unwrap();
+    let fake = || {
+        Arc::new(Fake {
+            rows: BTreeMap::from([(1, row("Sword", [10.0, 10.0, 40.0, 20.0]))]),
+            ..Fake::default()
+        })
+    };
+    let (a, b) = tokio::join!(
+        store.import_source_from(&bundle, &pdf, Some(fake())),
+        store.import_source_from(&bundle, &pdf, Some(fake())),
+    );
+    // Either both succeed on the same source (the second a no-op) or one is refused as busy;
+    // never two sources, two rows or a corrupt row.
+    assert!(a.is_ok() || b.is_ok());
+    for result in [&a, &b].into_iter().flatten() {
+        assert_eq!(result.0, 1);
+    }
+    let db = Connection::open(&path).unwrap();
+    let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT count(*) FROM sources"), 1);
+    assert_eq!(count("SELECT count(*) FROM source_page_words"), 1);
+    let integrity: String = db
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+}
+
+#[tokio::test]
+async fn invalid_or_foreign_rows_are_not_stored_and_count_as_unread() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture::fixture(dir.path()).unwrap();
+    let path = dir.path().join("invalid.sqlite3");
+    let store = Store::open(&path).unwrap();
+    // Version 1 but truncated: the CHECK would take it, the reader never would.
+    let fake = Arc::new(Fake {
+        rows: BTreeMap::from([(1, vec![1, 0, 0])]),
+        ..Fake::default()
+    });
+    let (_, report) = store
+        .import_source_from(&bundle, &pdf, Some(fake))
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.stored, report.missing, report.size_mismatch),
+        (0, 1, 0)
+    );
+    assert_eq!(words_rows(&path).len(), 0);
+}
+
+struct Sized;
+impl WordSource for Sized {
+    fn fetch(&self, _: &[u8], _: &str, _: &[WantedPage]) -> Fetched {
+        Fetched {
+            size_mismatch: vec![1],
+            ..Fetched::default()
+        }
+    }
+}
+
+#[tokio::test]
+async fn size_mismatched_pages_are_counted_apart_from_unread_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, pdf) = fixture::fixture(dir.path()).unwrap();
+    let path = dir.path().join("size.sqlite3");
+    let store = Store::open(&path).unwrap();
+    let (_, report) = store
+        .import_source_from(&bundle, &pdf, Some(Arc::new(Sized)))
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.stored, report.missing, report.size_mismatch),
+        (0, 0, 1)
+    );
 }

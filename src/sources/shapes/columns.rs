@@ -38,16 +38,18 @@ fn median(mut values: Vec<f32>) -> f32 {
     values.get(values.len() / 2).copied().unwrap_or(0.0)
 }
 
-/// Words grouped by baseline, each row left to right.
+/// Words grouped by baseline, each row left to right. Each row keeps running sums of its words'
+/// tops and bottoms, so grouping is linear in the number of words.
 fn rows_of(words: &[PageWord]) -> Vec<Vec<&PageWord>> {
     let mut order: Vec<&PageWord> = words.iter().collect();
     order.sort_by(|a, b| a.centre().1.total_cmp(&b.centre().1));
     let mut rows: Vec<Vec<&PageWord>> = Vec::new();
+    // (sum of tops, sum of bottoms) of the last row.
+    let mut sums = (0.0_f32, 0.0_f32);
     for word in order {
         let joined = rows.last().is_some_and(|row| {
             let n = count(row.len());
-            let top = row.iter().map(|w| w.bounds[1]).sum::<f32>() / n;
-            let bottom = row.iter().map(|w| w.bounds[3]).sum::<f32>() / n;
+            let (top, bottom) = (sums.0 / n, sums.1 / n);
             let overlap = bottom.min(word.bounds[3]) - top.max(word.bounds[1]);
             overlap > SAME_ROW * (bottom - top).min(word.bounds[3] - word.bounds[1])
         });
@@ -55,8 +57,11 @@ fn rows_of(words: &[PageWord]) -> Vec<Vec<&PageWord>> {
             if let Some(row) = rows.last_mut() {
                 row.push(word);
             }
+            sums.0 += word.bounds[1];
+            sums.1 += word.bounds[3];
         } else {
             rows.push(vec![word]);
+            sums = (word.bounds[1], word.bounds[3]);
         }
     }
     for row in &mut rows {

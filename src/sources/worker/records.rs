@@ -338,6 +338,7 @@ pub(crate) fn validate_words(words: &[Word], page: &Page) -> Result<(), Error> {
         let b = word.bounds;
         if word.text.is_empty()
             || word.text.len() > MAX_WORD_BYTES
+            || word.text.chars().any(char::is_control)
             || b.iter().any(|v| !v.is_finite())
             || b[0] < 0.0
             || b[1] < 0.0

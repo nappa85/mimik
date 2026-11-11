@@ -565,6 +565,39 @@ proptest! {
     }
 
     #[test]
+    fn no_word_of_the_units_leaves_a_draft_read_from_words(
+        units in proptest::collection::vec("[0-9a-zA-Z+ \n]{0,60}", 1..4),
+        extra in proptest::option::of("[a-z]{1,6}"),
+    ) {
+        let shape_input = ShapeInput::new(&units);
+        let tokens: Vec<String> = shape_input
+            .lines()
+            .iter()
+            .flat_map(|line| line.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_owned).collect::<Vec<_>>())
+            .collect();
+        // Words laid out as a grid: three tokens to a row, at 3 recurring columns.
+        let mut words: Vec<PageWord> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| boxed(t, 10.0 + f(i % 3) * 80.0, i / 3))
+            .collect();
+        // An invented token (any extra word changes the multiset) must never be used.
+        let invented = extra.is_some();
+        if let Some(extra) = extra {
+            words.push(boxed(&extra, 10.0, 99));
+        }
+        let shaped = ShapeInput::new(&units).with_words(Some(words), false);
+        let expected = invented.then_some(WordsRejected::Mismatch);
+        prop_assert_eq!(shaped.rejected(), expected);
+        for draft in best(&shaped).into_iter().filter(|d| !d.rows.is_empty()) {
+            let text = draft.rows.iter().flatten().cloned().collect::<Vec<_>>().join(" ");
+            for token in &tokens {
+                prop_assert!(text.contains(token.as_str()), "{:?} lost {token:?}: {:?}", draft.shape, draft.rows);
+            }
+        }
+    }
+
+    #[test]
     fn arbitrary_text_stays_within_bounds(units in proptest::collection::vec(".{0,200}", 0..4)) {
         for draft in best(&ShapeInput::new(&units)) {
             within_bounds(&draft);
@@ -640,8 +673,13 @@ fn left_aligned(rows: &[&[(&str, f32)]]) -> Vec<PageWord> {
     }
     words
 }
-fn grid(words: Vec<PageWord>) -> Draft {
-    read(&input(&[""]).with_words(Some(words)), Shape::Column)
+/// The units' text is exactly the words' text, as the lossless check requires.
+fn carrying(words: &[PageWord]) -> ShapeInput {
+    let text: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+    input(&[text.join(" ")]).with_words(Some(words.to_vec()), false)
+}
+fn grid(words: &[PageWord]) -> Draft {
+    read(&carrying(words), Shape::Column)
 }
 
 #[test]
@@ -652,7 +690,7 @@ fn column_grid_reads_words_by_baseline_and_recurring_columns() {
         &[("Giant rat", 10.0), ("2", 100.0), ("1", 160.0)],
         &[("Shield", 10.0), ("7", 100.0), ("6", 160.0)],
     ]);
-    let draft = grid(words);
+    let draft = grid(&words);
     assert_eq!(draft.shape, Shape::Column);
     assert_eq!(draft.rows.len(), 4);
     assert_eq!(draft.rows[0], ["Item", "Cost", "Weight"]);
@@ -665,7 +703,7 @@ fn column_grid_reads_words_by_baseline_and_recurring_columns() {
 
 #[test]
 fn column_grid_has_no_header_when_the_first_row_is_data() {
-    let draft = grid(left_aligned(&[
+    let draft = grid(&left_aligned(&[
         &[("Sword", 10.0), ("10", 100.0)],
         &[("Axe", 10.0), ("8", 100.0)],
         &[("Bow", 10.0), ("20", 100.0)],
@@ -673,7 +711,7 @@ fn column_grid_has_no_header_when_the_first_row_is_data() {
     assert!(!draft.header);
     assert_eq!(draft.rows[0], ["Sword", "10"]);
     // Text everywhere is no header either.
-    let text = grid(left_aligned(&[
+    let text = grid(&left_aligned(&[
         &[("Name", 10.0), ("Notes", 100.0)],
         &[("Sword", 10.0), ("sharp", 100.0)],
         &[("Axe", 10.0), ("heavy", 100.0)],
@@ -694,7 +732,7 @@ fn column_grid_right_aligned_numbers_share_a_column_by_their_right_edge() {
         let x0 = 200.0 - f(number.chars().count()) * 5.0;
         words.push(boxed(number, x0, row));
     }
-    let draft = grid(words);
+    let draft = grid(&words);
     assert_eq!(draft.rows[1], ["Sword", "5"]);
     assert_eq!(draft.rows[2], ["Axe", "120"]);
     assert_eq!(draft.rows[3], ["Bow", "30"]);
@@ -703,7 +741,7 @@ fn column_grid_right_aligned_numbers_share_a_column_by_their_right_edge() {
 
 #[test]
 fn column_grid_flags_ragged_rows_and_scores_them_lower() {
-    let draft = grid(left_aligned(&[
+    let draft = grid(&left_aligned(&[
         &[("Sword", 10.0), ("10", 100.0), ("5", 160.0)],
         &[("Axe", 10.0), ("8", 100.0), ("4", 160.0)],
         &[("Bow", 10.0), ("20", 100.0)],
@@ -728,10 +766,10 @@ fn column_grid_near_misses_lose_to_plain_columns() {
     // A single row is no table.
     let one_row = left_aligned(&[&[("a", 10.0), ("b", 100.0)]]);
     for words in [single, drift, one_row] {
-        let read_as_grid = grid(words.clone());
+        let read_as_grid = grid(&words);
         assert!(read_as_grid.rows.is_empty(), "{words:?}");
         assert_eq!(read_as_grid.score, 0);
-        let drafts = best(&input(&["x\ny"]).with_words(Some(words)));
+        let drafts = best(&carrying(&words));
         assert_eq!(drafts[0].shape, Shape::Plain);
     }
 }
@@ -747,7 +785,7 @@ fn column_grid_loses_to_a_roll_table_that_also_fits() {
         &[("5", 10.0), ("Bandits", 40.0)],
         &[("6", 10.0), ("A dragon", 40.0)],
     ]);
-    let both = input(&[texts]).with_words(Some(words));
+    let both = input(&[texts]).with_words(Some(words), false);
     assert!(read(&both, Shape::Column).score > 0);
     assert_eq!(best(&both)[0].shape, Shape::Roll);
 }
@@ -762,7 +800,10 @@ fn column_grid_without_word_boxes_splits_on_wide_gaps_and_scores_lower() {
     assert_eq!(draft.score, 60);
     assert!(draft.score < 80, "the text reading is weaker than words");
     // Words that are present but unusable (none inside the units) fall back the same way.
-    let empty = read(&input(&[text]).with_words(Some(Vec::new())), Shape::Column);
+    let empty = read(
+        &input(&[text]).with_words(Some(Vec::new()), false),
+        Shape::Column,
+    );
     assert_eq!(empty.rows, draft.rows);
     // Single spaces are no gaps.
     assert!(!fits(&["Sword 10 5\nShield 7 6\nAxe 8 4"], Shape::Column));
@@ -784,7 +825,7 @@ fn column_grid_words_win_over_the_text_reading() {
         &[("Bow", 10.0), ("20", 100.0)],
     ]);
     // The text has no wide gaps, so only the words can read the grid.
-    let with = input(&["Sword 10\nAxe 8\nBow 20"]).with_words(Some(words));
+    let with = input(&["Sword 10\nAxe 8\nBow 20"]).with_words(Some(words), false);
     assert_eq!(read(&with, Shape::Column).score, 80);
     assert!(!fits(&["Sword 10\nAxe 8\nBow 20"], Shape::Column));
 }
@@ -794,12 +835,49 @@ fn column_grid_stays_within_the_table_bounds() {
     // 300 rows is more than a table holds: refused with a problem, not offered.
     let rows: Vec<Vec<(&str, f32)>> = (0..300).map(|_| vec![("a", 10.0), ("1", 100.0)]).collect();
     let refs: Vec<&[(&str, f32)]> = rows.iter().map(Vec::as_slice).collect();
-    let draft = grid(left_aligned(&refs));
+    let draft = grid(&left_aligned(&refs));
     assert!(draft.rows.is_empty(), "{:?}", draft.rows);
     assert!(draft.problems.contains(&Problem::TooManyRows));
     // The page's full 20,000 words terminate quickly.
     let many: Vec<PageWord> = (0..20_000)
         .map(|i| boxed("w", f(i % 40) * 7.0, i / 40))
         .collect();
-    let _ = grid(many);
+    let _ = grid(&many);
+}
+
+#[test]
+fn column_grid_ignores_words_that_do_not_carry_the_units_text() {
+    let words = left_aligned(&[
+        &[("Sword", 10.0), ("10", 100.0)],
+        &[("Axe", 10.0), ("8", 100.0)],
+        &[("Bow", 10.0), ("20", 100.0)],
+    ]);
+    // The units' text has a token the words lack, and vice versa: never read the words.
+    for text in [
+        "Sword 10\nAxe 8\nBow",
+        "Sword 10\nAxe 8\nBow 20\nExtra    1",
+        "Sword 10 Axe 8 Bow 21",
+    ] {
+        let shaped = input(&[text]).with_words(Some(words.clone()), false);
+        assert_eq!(shaped.rejected(), Some(WordsRejected::Mismatch), "{text}");
+        assert!(shaped.words.is_none());
+    }
+    // A corrected unit's words are the page's own text, not the Owner's.
+    let exact = input(&["Sword 10\nAxe 8\nBow 20"]).with_words(Some(words.clone()), true);
+    assert_eq!(exact.rejected(), Some(WordsRejected::Corrected));
+    assert!(exact.words.is_none());
+    // Tokens compare as a multiset, ignoring decoration and order.
+    let ok = input(&["**Bow** 20\n* Axe 8\nSword 10"]).with_words(Some(words), false);
+    assert_eq!(ok.rejected(), None);
+    assert!(ok.words.is_some());
+}
+
+#[test]
+fn column_grid_with_a_single_row_of_twenty_thousand_words_is_fast() {
+    let words: Vec<PageWord> = (0..20_000)
+        .map(|i| boxed("w", f(i % 4000) * 7.0, 0))
+        .collect();
+    let started = std::time::Instant::now();
+    let _ = read(&carrying(&words), Shape::Column);
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
 }

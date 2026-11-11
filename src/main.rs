@@ -796,17 +796,33 @@ fn import_source_message(id: impl std::fmt::Display) -> String {
 
 /// What `import-source` says about the word boxes the table shapes read.
 fn import_words_message(words: &mimik::sources::WordsReport) -> String {
-    match (&words.unavailable, words.stored, words.missing) {
-        (Some(reason), _, _) => format!(
+    let mut message = match (&words.unavailable, words.stored) {
+        (Some(reason), 0) => format!(
             "Word boxes were not read ({reason}); {} page(s) have none. Tables still draft from each line's text; run import-source again where the worker is available to add them.",
             words.missing
         ),
-        (None, 0, 0) => "Word boxes: every page already has them.".to_owned(),
-        (None, stored, 0) => format!("Word boxes stored for {stored} page(s)."),
-        (None, stored, missing) => format!(
-            "Word boxes stored for {stored} page(s); {missing} page(s) have none (the worker could not read them). Run import-source again to retry."
+        (Some(reason), stored) => format!(
+            "Word boxes stored for {stored} page(s), then the worker became unavailable ({reason}); {} page(s) have none. Run import-source again to add them.",
+            words.missing
         ),
+        (None, 0) if words.missing == 0 && words.size_mismatch == 0 => {
+            "Word boxes: every page already has them.".to_owned()
+        }
+        (None, stored) if words.missing == 0 => format!("Word boxes stored for {stored} page(s)."),
+        (None, stored) => format!(
+            "Word boxes stored for {stored} page(s); {} page(s) have none (the worker could not read them). Run import-source again to retry.",
+            words.missing
+        ),
+    };
+    if words.size_mismatch > 0 {
+        use std::fmt::Write as _;
+        let _ = write!(
+            message,
+            " {} page(s) differ in size from the bundle, so they stay without words (running again will not help).",
+            words.size_mismatch
+        );
     }
+    message
 }
 
 #[cfg(test)]

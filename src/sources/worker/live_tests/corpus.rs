@@ -639,13 +639,13 @@ fn live_parent_killed_peak_rss_positive_control() {
 
 /// One page of known text: `Item Sword` at (50, 300) and `Cost` at (200, 300), PDF points from
 /// the bottom left of a 300 x 400 `MediaBox`.
-fn words_pdf(rotate: u16) -> Vec<u8> {
+fn words_pdf(extra: &str) -> Vec<u8> {
     let content = b"BT /F1 12 Tf 50 300 Td (Item Sword) Tj 150 0 Td (Cost) Tj ET";
     raw(
         &[
             b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
             b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
-            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Rotate {rotate} /Resources 5 0 R /Contents 4 0 R >>").into_bytes(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] {extra} /Resources 5 0 R /Contents 4 0 R >>").into_bytes(),
             stream("", content),
             b"<< /Font << /F1 6 0 R >> >>".to_vec(),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
@@ -655,10 +655,10 @@ fn words_pdf(rotate: u16) -> Vec<u8> {
     )
 }
 
-fn run_words(rotate: u16) -> (Page, Vec<records::Word>) {
+fn run_words(extra: &str) -> (Page, Vec<records::Word>) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("words.pdf");
-    std::fs::write(&path, words_pdf(rotate)).unwrap();
+    std::fs::write(&path, words_pdf(extra)).unwrap();
     let opts = production_options();
     let report = inspection(&path, &opts, &Cancel::default()).unwrap();
     let page = report.pages[0].clone();
@@ -687,7 +687,7 @@ fn live_words_land_inside_their_unit_polygons() {
     if !enabled() {
         return;
     }
-    let (page, words) = run_words(0);
+    let (page, words) = run_words("");
     assert_eq!((page.width, page.height), (300.0, 400.0));
     let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
     assert_eq!(texts, ["Item", "Sword", "Cost"]);
@@ -711,9 +711,47 @@ fn live_words_of_a_rotated_page_stay_inside_the_corrected_page() {
     if !enabled() {
         return;
     }
-    let (page, words) = run_words(90);
+    let (page, words) = run_words("/Rotate 90");
     assert_eq!((page.width, page.height), (400.0, 300.0));
     assert_eq!(words.len(), 3);
+    for word in &words {
+        assert!(word.bounds[2] <= page.width && word.bounds[3] <= page.height);
+    }
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_words_of_an_offset_crop_box_are_relative_to_the_visible_page() {
+    if !enabled() {
+        return;
+    }
+    // Visible area x 10..290, y 20..380 of the 300 x 400 MediaBox: the corrected page is
+    // 280 x 360 and `Item` (50, 300 from the bottom) sits at x 40, 80 from the top.
+    let (page, words) = run_words("/CropBox [10 20 290 380]");
+    assert_eq!((page.width, page.height), (280.0, 360.0));
+    let item = words.iter().find(|w| w.text == "Item").unwrap();
+    assert!((item.bounds[0] - 40.0).abs() < 1.0, "{:?}", item.bounds);
+    assert!(
+        item.bounds[1] > 62.0 && item.bounds[3] < 90.0,
+        "{:?}",
+        item.bounds
+    );
+    for word in &words {
+        assert!(word.bounds[2] <= page.width && word.bounds[3] <= page.height);
+    }
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER opt-in"]
+fn live_words_of_a_user_unit_page_are_scaled() {
+    if !enabled() {
+        return;
+    }
+    // UserUnit 2 doubles the page in points: 600 x 800, and `Item` moves to x 100.
+    let (page, words) = run_words("/UserUnit 2");
+    assert_eq!((page.width, page.height), (600.0, 800.0));
+    let item = words.iter().find(|w| w.text == "Item").unwrap();
+    assert!((item.bounds[0] - 100.0).abs() < 2.0, "{:?}", item.bounds);
     for word in &words {
         assert!(word.bounds[2] <= page.width && word.bounds[3] <= page.height);
     }

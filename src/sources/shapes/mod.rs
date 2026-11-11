@@ -211,6 +211,17 @@ pub(crate) struct ShapeInput {
     /// The stored words whose centres lie inside the selected units' polygons; `None` when the
     /// page has no usable word boxes (the Column grid then reads each line's wide gaps).
     words: Option<Vec<PageWord>>,
+    /// Why offered words were not used.
+    rejected: Option<WordsRejected>,
+}
+
+/// Why word boxes were not given to the Column grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WordsRejected {
+    /// A selected unit was corrected, so its text is no longer the page's own.
+    Corrected,
+    /// The words' alphanumeric tokens are not exactly the units' tokens.
+    Mismatch,
 }
 
 impl ShapeInput {
@@ -228,13 +239,36 @@ impl ShapeInput {
                 })
                 .collect(),
             words: None,
+            rejected: None,
         }
     }
 
-    /// Adds the selected units' word boxes for the Column grid.
-    pub(crate) fn with_words(mut self, words: Option<Vec<PageWord>>) -> ShapeInput {
-        self.words = words;
+    /// Offers the selected units' word boxes to the Column grid. They are kept only when they
+    /// carry exactly the units' alphanumeric tokens (as a multiset) and no unit was corrected, so
+    /// a draft read from them never loses or invents text; otherwise the grid reads the lines.
+    pub(crate) fn with_words(
+        mut self,
+        words: Option<Vec<PageWord>>,
+        corrected: bool,
+    ) -> ShapeInput {
+        self.words = None;
+        self.rejected = None;
+        let Some(words) = words else { return self };
+        if corrected {
+            self.rejected = Some(WordsRejected::Corrected);
+        } else if tokens(self.lines().iter().map(String::as_str))
+            == tokens(words.iter().map(|w| w.text.as_str()))
+        {
+            self.words = Some(words);
+        } else {
+            self.rejected = Some(WordsRejected::Mismatch);
+        }
         self
+    }
+
+    /// Why the offered words were not used, if they were not.
+    pub(crate) fn rejected(&self) -> Option<WordsRejected> {
+        self.rejected
     }
 
     /// The lines of all units in reading order with html2text's decoration removed.
@@ -306,6 +340,16 @@ fn split_gaps(text: &str) -> Vec<String> {
     }
     flush(&mut cell);
     cells
+}
+
+/// The alphanumeric tokens of some texts, sorted (a multiset).
+fn tokens<'a>(texts: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = texts
+        .flat_map(|text| text.split(|c: char| !c.is_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// A short excerpt of a line for a problem message.

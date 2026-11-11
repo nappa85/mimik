@@ -556,6 +556,7 @@ fn load_import(directory: &Path, pdf_path: &Path) -> Result<Import, AppError> {
 
 /// A page whose words are wanted: its PDF page number and the bundle's size in points.
 #[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
 pub struct WantedPage {
     pub pdf_page: u32,
     pub width: f64,
@@ -564,15 +565,19 @@ pub struct WantedPage {
 
 /// What a [`WordSource`] produced: the encoded, validated rows by PDF page, and why it stopped
 /// early when it could not run (the worker is missing, unconfined or failed).
+#[doc(hidden)]
 #[derive(Default)]
 pub struct Fetched {
     /// The encoded rows (`page_words`'s version 1 encoding) by PDF page number.
     pub rows: BTreeMap<u32, Vec<u8>>,
+    /// PDF pages the worker sees at another size than the bundle declares (run again will not help).
+    pub size_mismatch: Vec<u32>,
     pub unavailable: Option<String>,
 }
 
 /// Where the word boxes of the wanted pages come from at import. It runs outside the write
 /// transaction; the caller inserts what it returns.
+#[doc(hidden)]
 pub trait WordSource: Send + Sync {
     fn fetch(&self, pdf: &[u8], pdf_sha256: &str, pages: &[WantedPage]) -> Fetched;
 }
@@ -582,8 +587,10 @@ pub trait WordSource: Send + Sync {
 pub struct WordsReport {
     /// Pages whose words were stored by this run.
     pub stored: usize,
-    /// Pages that still have no words (the run could not read them).
+    /// Pages that still have no words because the run could not read them (run again to retry).
     pub missing: usize,
+    /// Pages the worker sees at another size than the bundle declares; running again cannot help.
+    pub size_mismatch: usize,
     /// Why the worker could not run, when it could not.
     pub unavailable: Option<String>,
 }
@@ -653,7 +660,7 @@ impl Store {
     }
 
     /// As [`Store::import_source`], and read the word boxes of the pages that have none with the
-    /// confined worker (the verified PDF goes through a private file in `data`'s staging area).
+    /// confined worker (the verified PDF goes through a private file in `data`'s `import-spool` folder).
     /// An existing matching source is filled in for its pages without words only. Without a
     /// usable worker the import still succeeds, and the report says why there are no words.
     ///
@@ -666,10 +673,11 @@ impl Store {
         pdf: &Path,
         data: &Path,
     ) -> Result<(i64, WordsReport), AppError> {
-        let source: std::sync::Arc<dyn WordSource> = match super::staging::Files::open(data) {
-            Ok(files) => std::sync::Arc::new(super::import_words::WorkerWords::new(files)),
-            Err(_) => std::sync::Arc::new(super::import_words::Unavailable("staging area")),
-        };
+        let source: std::sync::Arc<dyn WordSource> =
+            match super::import_words::WorkerWords::open(data) {
+                Ok(words) => std::sync::Arc::new(words),
+                Err(_) => std::sync::Arc::new(super::import_words::Unavailable("import spool")),
+            };
         self.import_source_from(directory, pdf, Some(source)).await
     }
 
@@ -677,6 +685,7 @@ impl Store {
     ///
     /// # Errors
     /// As [`Store::import_source`].
+    #[doc(hidden)]
     pub async fn import_source_from(
         &self,
         directory: &Path,
@@ -728,7 +737,16 @@ impl Store {
         wanted: Vec<WantedPage>,
         fetched: Fetched,
     ) -> Result<(i64, WordsReport), AppError> {
-        let Fetched { rows, unavailable } = fetched;
+        let Fetched {
+            rows,
+            size_mismatch,
+            unavailable,
+        } = fetched;
+        // Only rows the reader would accept are stored; the rest count as unread.
+        let rows: BTreeMap<u32, Vec<u8>> = rows
+            .into_iter()
+            .filter(|(_, bytes)| super::page_words::decode(bytes).is_ok())
+            .collect();
         self.run(move |db| {
             let tx = db.transaction()?;
             let resolved = crate::registry::source_identity(&tx, &data.bundle.system_id, &data.bundle.edition, data.bundle.stable_edition()?)?;
@@ -743,7 +761,7 @@ impl Store {
                 finalize(&tx, id, &data)?;
                 let stored = insert_words(&tx, id, &rows)?;
                 tx.commit()?;
-                return Ok((id, report(stored, &wanted, &rows, unavailable)));
+                return Ok((id, report(stored, &wanted, &rows, &size_mismatch, unavailable)));
             }
             let source = &data.bundle;
             tx.execute("INSERT INTO sources (bundle_hash, source_id, title, system_id, edition, language, pdf_hash, pdf, raw_json, prepared_json,total_pages) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![bundle_hash, source.source_id, source.title, source.system_id, source.edition, source.language, source.source_sha256, data.pdf, data.raw, data.prepared,data.total_pages])?;
@@ -763,7 +781,7 @@ impl Store {
             super::documents::register_import(&tx, id)?;
             let stored = insert_words(&tx, id, &rows)?;
             tx.commit()?;
-            Ok((id, report(stored, &wanted, &rows, unavailable)))
+            Ok((id, report(stored, &wanted, &rows, &size_mismatch, unavailable)))
         }).await
     }
 }
@@ -772,13 +790,20 @@ fn report(
     stored: usize,
     wanted: &[WantedPage],
     rows: &BTreeMap<u32, Vec<u8>>,
+    size_mismatch: &[u32],
     unavailable: Option<String>,
 ) -> WordsReport {
     WordsReport {
         stored,
         missing: wanted
             .iter()
-            .filter(|page| !rows.contains_key(&page.pdf_page))
+            .filter(|page| {
+                !rows.contains_key(&page.pdf_page) && !size_mismatch.contains(&page.pdf_page)
+            })
+            .count(),
+        size_mismatch: wanted
+            .iter()
+            .filter(|page| size_mismatch.contains(&page.pdf_page))
             .count(),
         unavailable,
     }

@@ -593,7 +593,7 @@ fn page_words(document: &PdfDocument, info: &Page) -> Result<PageWords, Error> {
                 } else {
                     ch.char().unwrap_or('\u{fffd}')
                 };
-                if value_char.is_whitespace() {
+                if value_char.is_whitespace() || value_char.is_control() {
                     push_word(&mut words, &mut value, &mut bounds, info, &correction)?;
                     continue;
                 }

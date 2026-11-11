@@ -15,7 +15,9 @@ pub mod worker;
 pub use documents::{
     OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision, parse_page_list,
 };
-pub use import::{Fetched, WantedPage, WordSource, WordsReport};
+pub use import::WordsReport;
+#[doc(hidden)]
+pub use import::{Fetched, WantedPage, WordSource};
 pub use reports::SuggestionReportSummary;
 pub use suggestions::{SourceSuggestion, SuggestionApplication, SuggestionTarget, SuggestionUnit};
 pub(crate) mod materials;

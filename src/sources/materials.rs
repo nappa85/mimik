@@ -207,7 +207,7 @@ impl Store {
                 .optional()?
                 .ok_or(AppError::SourceNotFound)?;
             let sql = format!(
-                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END,{} FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
+                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END,{},state='corrected' FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
                 text("correction", 65_536),
                 text("raw_text", 65_536),
                 text("polygon", 65_536)
@@ -219,16 +219,18 @@ impl Store {
             let mut rows = Vec::with_capacity(units.len());
             let mut boxes = Vec::new();
             let mut polygons = Vec::new();
+            let mut any_corrected = false;
             let mut stored = None;
             let mut total = 0_usize;
             super::review::read_with_deadline(&tx, "table", || {
                 let mut query = tx.prepare(&sql)?;
                 let found = query.query_map(params![page, serde_json::to_string(&units)?], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?, read_text(r, 4)?))
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?, read_text(r, 4)?, r.get::<_, bool>(5)?))
                 })?;
                 for item in found {
-                    let (position, unit, unit_revision, text, polygon) = item?;
+                    let (position, unit, unit_revision, text, polygon, corrected) = item?;
                     polygons.push(polygon);
+                    any_corrected |= corrected;
                     total += text.len();
                     if total > super::tables::MAX_HTML_BYTES {
                         return Err(AppError::Invalid(
@@ -266,8 +268,9 @@ impl Store {
             tx.commit()?;
             let texts: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
             let (words, words_state) = selected_words(stored.as_ref(), &polygons);
-            let (chosen, scores) = draft(&texts, words, shape);
-            let selected: std::collections::BTreeSet<i64> = units.iter().copied().collect();
+            let (chosen, scores, rejected) = draft(&texts, words, any_corrected, shape);
+            let words_state = super::table_words::WordsState::after(words_state, rejected);
+            let (overlap_checked, overlaps) = overlap_check(&boxes, &units);
             Ok(TablePrefill {
                 page_revision: revision,
                 units: rows.iter().map(|r| (r.1, r.2)).collect(),
@@ -277,13 +280,8 @@ impl Store {
                 problems: cap_problems(chosen.problems.iter().map(ToString::to_string).collect()),
                 scores,
                 words: words_state,
-                // A page with more units than the read bound is not checked, and says so.
-                overlap_checked: boxes.len() <= GEOMETRY_LIMIT,
-                overlaps: if boxes.len() <= GEOMETRY_LIMIT {
-                    overlapping_units(&boxes, &selected)
-                } else {
-                    Vec::new()
-                },
+                overlap_checked,
+                overlaps,
             })
         })
         .await
@@ -808,6 +806,16 @@ pub(crate) fn cap_problems(mut problems: Vec<String>) -> Vec<String> {
     problems
 }
 
+/// The unselected units the selection's box would cover. A page with more units than the read
+/// bound is not checked (the flag says so).
+fn overlap_check(boxes: &[(i64, String, String)], units: &[i64]) -> (bool, Vec<i64>) {
+    if boxes.len() > GEOMETRY_LIMIT {
+        return (false, Vec::new());
+    }
+    let selected: std::collections::BTreeSet<i64> = units.iter().copied().collect();
+    (true, overlapping_units(boxes, &selected))
+}
+
 /// The stored words inside the selected units' polygons. `stored` is `None` when the page has no
 /// row, and `Some(None)` for an oversized value (read as NULL), which is invalid like any bad row.
 fn selected_words(
@@ -826,9 +834,14 @@ fn selected_words(
 fn draft(
     texts: &[&str],
     words: Option<Vec<super::page_words::PageWord>>,
+    corrected: bool,
     shape: Option<Shape>,
-) -> (shapes::Draft, Vec<(Shape, u32)>) {
-    let input = ShapeInput::new(texts).with_words(words);
+) -> (
+    shapes::Draft,
+    Vec<(Shape, u32)>,
+    Option<shapes::WordsRejected>,
+) {
+    let input = ShapeInput::new(texts).with_words(words, corrected);
     let drafts = shapes::best(&input);
     let scores = drafts
         .iter()
@@ -842,7 +855,7 @@ fn draft(
             .find(|d| !d.rows.is_empty())
             .unwrap_or_else(|| shapes::read(&input, Shape::Plain)),
     };
-    (chosen, scores)
+    (chosen, scores, input.rejected())
 }
 
 /// Unselected, not rejected units mostly inside the union box of the selected ones: a run across

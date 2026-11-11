@@ -41,6 +41,7 @@ fn valid(word: &PageWord, edge: (f32, f32)) -> bool {
     let b = word.bounds;
     !word.text.is_empty()
         && word.text.len() <= MAX_WORD_BYTES
+        && !word.text.chars().any(char::is_control)
         && b.iter().all(|v| v.is_finite())
         && b[0] >= 0.0
         && b[1] >= 0.0
@@ -172,6 +173,9 @@ mod tests {
             word("a", [2.0, 1.0, 1.0, 2.0]),
             word("a", [-1.0, 1.0, 2.0, 2.0]),
             word("a", [1.0, 1.0, 2.0, 900.0]),
+            word("a\u{0}b", ok),
+            word("a\u{85}", ok),
+            word("tab\t", ok),
         ] {
             assert!(encode(&[bad], 595.0, 842.0).is_err());
         }

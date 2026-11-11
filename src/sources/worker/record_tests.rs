@@ -634,7 +634,7 @@ fn words_round_trip_in_requested_order() {
 #[test]
 fn hostile_word_values_are_refused() {
     let good = || word("w", [1.0, 1.0, 2.0, 2.0]);
-    for invalid in 0..10 {
+    for invalid in 0..12 {
         let mut w = good();
         let mut count = 1;
         match invalid {
@@ -647,6 +647,8 @@ fn hostile_word_values_are_refused() {
             6 => w.text = String::new(),
             7 => w.text = "a".repeat(257),
             8 => w.bounds[2] = f64::INFINITY,
+            9 => w.text = "a\u{0}".into(),
+            10 => w.text = "a\u{9c}b".into(),
             _ => count = MAX_WORDS + 1,
         }
         let mut wire = Vec::new();

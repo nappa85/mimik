@@ -14,9 +14,23 @@ pub(crate) enum WordsState {
     Invalid,
     /// The page has words, but none lies inside the selected units.
     Outside,
+    /// The words inside the units do not carry exactly the units' text (a different text layer
+    /// or reading), so reading them would lose or invent text.
+    Mismatch,
+    /// A selected unit was corrected by the Owner; the words are the uncorrected page text.
+    Corrected,
 }
 
 impl WordsState {
+    /// The state once the shapes have said whether they refused the words as not lossless.
+    pub(crate) fn after(self, rejected: Option<super::shapes::WordsRejected>) -> Self {
+        match rejected {
+            Some(super::shapes::WordsRejected::Corrected) => WordsState::Corrected,
+            Some(super::shapes::WordsRejected::Mismatch) => WordsState::Mismatch,
+            None => self,
+        }
+    }
+
     /// The sentence shown on the form when the Column grid could not use word boxes.
     pub(crate) fn note(self) -> &'static str {
         match self {
@@ -26,6 +40,12 @@ impl WordsState {
             }
             WordsState::Invalid => {
                 "The stored word boxes of this page could not be read and were ignored, so Column grid reads each line's runs of two or more spaces."
+            }
+            WordsState::Mismatch => {
+                "The stored word boxes of this page do not carry the same text as the selected units, so Column grid reads each line's runs of two or more spaces."
+            }
+            WordsState::Corrected => {
+                "A selected unit was corrected, and the stored word boxes hold the page's own text, so Column grid reads each line's runs of two or more spaces."
             }
             WordsState::Outside => {
                 "No stored word box of this page lies inside the selected units, so Column grid reads each line's runs of two or more spaces."
