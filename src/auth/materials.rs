@@ -380,6 +380,8 @@ struct Editor {
     notice_unit: i64,
     /// The unit whose refused decision is shown with its error (0: none).
     error_unit: i64,
+    /// Likely tables among the unreviewed units: `(label, link to the table form)`.
+    proposals: Vec<(String, String)>,
 }
 impl Editor {
     fn unit_link(&self, target: &(i64, i64)) -> String {
@@ -459,6 +461,7 @@ impl Editor {
             notice: saved_notice(c),
             notice_unit: if c.saved == Saved::None { 0 } else { c.to },
             error_unit: 0,
+            proposals: Vec::new(),
         }
     }
 }
@@ -520,14 +523,29 @@ async fn page(
         .sessions
         .store
         .material_screen(
-            auth,
+            auth.clone(),
             id,
             data.page.units.iter().map(|u| u.id).collect(),
             c.notes,
         )
         .await
         .map_err(|e| error(&e))?;
+    // Proposals are a hint: a failed read shows none and never fails the page. Only those that
+    // touch the cards shown are listed.
+    let proposals = state
+        .sessions
+        .store
+        .material_table_proposals(auth.clone(), id)
+        .await
+        .unwrap_or_default();
+    let shown: Vec<i64> = data.page.units.iter().map(|u| u.id).collect();
+    let proposals: Vec<(String, String)> = proposals
+        .iter()
+        .filter(|p| p.units.iter().any(|u| shown.contains(u)))
+        .map(|p| (p.label(), p.link(id)))
+        .collect();
     let mut editor = Editor::new(data, screen, csrf, c);
+    editor.proposals = proposals;
     if created > 0 {
         editor.notice = format!(
             "Created table unit {created}; the selected units are rejected. Check the new table against the original page before accepting it."

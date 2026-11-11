@@ -287,6 +287,93 @@ impl Store {
         .await
     }
 
+    /// Tables the page's unreviewed units seem to hold (see [`super::proposals`]). Read only:
+    /// nothing is stored and no worker job is started. Memoised per page revision. A failed or
+    /// timed-out read yields no proposals; it never fails the page.
+    pub(crate) async fn material_table_proposals(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+    ) -> Result<std::sync::Arc<Vec<super::proposals::Proposal>>, AppError> {
+        let cache = std::sync::Arc::clone(&self.2);
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let key = tx
+                .query_row(
+                    "SELECT p.revision,coalesce((SELECT length(words) FROM source_page_words w WHERE w.page_id=p.id),-1) FROM source_pages p WHERE p.id=?1",
+                    [page],
+                    |r| Ok((page, r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                )
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            if let Some(found) = cache.get(key) {
+                auth.recheck_owner(&tx)?;
+                tx.commit()?;
+                return Ok(found);
+            }
+            let read = super::review::read_with_deadline(&tx, "proposals", || {
+                let mut units = Vec::new();
+                let mut budget = super::tables::MAX_HTML_BYTES;
+                let mut query = tx.prepare(&format!(
+                    "{ORDERED_UNITS} SELECT id,{},state,origin,CASE WHEN state='unreviewed' AND origin='extracted' THEN {} END FROM ordered ORDER BY position LIMIT {}",
+                    text("polygon", 65_536),
+                    "CASE WHEN typeof(raw_text)='text' AND length(CAST(raw_text AS BLOB))<=65536 THEN raw_text END",
+                    super::proposals::MAX_UNITS + 1
+                ))?;
+                let rows = query.query_map([page], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (id, polygon, state, text) = row?;
+                    // Past the text budget a unit still has its box but no text, so it breaks
+                    // runs and is still checked for overlap.
+                    let text = text
+                        .filter(|t| !t.trim().is_empty() && t.len() <= budget)
+                        .inspect(|t| budget -= t.len());
+                    units.push(super::proposals::Candidate {
+                        id,
+                        polygon: polygon.unwrap_or_default(),
+                        rejected: state == "rejected",
+                        text,
+                    });
+                }
+                let stored = tx
+                    .query_row(
+                        &format!(
+                            "SELECT CASE WHEN length(words)<={} THEN words END FROM source_page_words WHERE page_id=?1",
+                            super::page_words::MAX_ROW_BYTES
+                        ),
+                        [page],
+                        |r| r.get::<_, Option<Vec<u8>>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                Ok((units, stored))
+            });
+            let proposals = match read {
+                Ok((units, stored)) => {
+                    let words = stored
+                        .as_deref()
+                        .and_then(|bytes| super::page_words::decode(bytes).ok());
+                    Some(super::proposals::propose(&units, words.as_deref()))
+                }
+                Err(AppError::Invalid(super::review::READ_TIMEOUT)) => None,
+                Err(e) => return Err(e),
+            };
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            // A timed-out read is not remembered, so the next view tries again.
+            Ok(proposals.map_or_else(Default::default, |found| cache.put(key, found)))
+        })
+        .await
+    }
+
     /// Create an owner table from selected units: one immediate transaction rechecks the Owner,
     /// CSRF, page revision and every unit revision, adds the table unit and rejects the originals.
     pub(crate) async fn material_create_table(
@@ -858,32 +945,43 @@ fn draft(
     (chosen, scores, input.rejected())
 }
 
+/// The bounding box of a stored polygon; `None` for an invalid or oversized one.
+pub(super) fn polygon_bounds(polygon: &str) -> Option<[f64; 4]> {
+    let points: Vec<[f64; 2]> = serde_json::from_str(polygon).ok()?;
+    if points.is_empty() || points.len() > 1024 || points.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some(
+        points
+            .iter()
+            .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, [x, y]| {
+                [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
+            }),
+    )
+}
+
 /// Unselected, not rejected units mostly inside the union box of the selected ones: a run across
 /// two page columns would swallow them in the table's box.
 fn overlapping_units(
     units: &[(i64, String, String)],
     selected: &std::collections::BTreeSet<i64>,
 ) -> Vec<i64> {
-    fn bounds(polygon: &str) -> Option<[f64; 4]> {
-        let points: Vec<[f64; 2]> = serde_json::from_str(polygon).ok()?;
-        if points.is_empty()
-            || points.len() > 1024
-            || points.iter().flatten().any(|v| !v.is_finite())
-        {
-            return None;
-        }
-        Some(
-            points
-                .iter()
-                .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, [x, y]| {
-                    [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
-                }),
-        )
-    }
+    let parsed: Vec<(i64, Option<[f64; 4]>, bool)> = units
+        .iter()
+        .map(|(unit, polygon, state)| (*unit, polygon_bounds(polygon), state == "rejected"))
+        .collect();
+    overlapping_parsed(&parsed, selected)
+}
+
+/// [`overlapping_units`] over boxes parsed once: `(unit, box, rejected)`.
+pub(super) fn overlapping_parsed(
+    units: &[(i64, Option<[f64; 4]>, bool)],
+    selected: &std::collections::BTreeSet<i64>,
+) -> Vec<i64> {
     let union = units
         .iter()
         .filter(|(unit, _, _)| selected.contains(unit))
-        .filter_map(|(_, polygon, _)| bounds(polygon))
+        .filter_map(|(_, bounds, _)| *bounds)
         .reduce(|a, b| {
             [
                 a[0].min(b[0]),
@@ -897,8 +995,8 @@ fn overlapping_units(
     };
     units
         .iter()
-        .filter(|(unit, _, state)| !selected.contains(unit) && state != "rejected")
-        .filter_map(|(unit, polygon, _)| Some((*unit, bounds(polygon)?)))
+        .filter(|(unit, _, rejected)| !selected.contains(unit) && !rejected)
+        .filter_map(|(unit, bounds, _)| Some((*unit, (*bounds)?)))
         .filter(|(_, b)| {
             let area = (b[2] - b[0]) * (b[3] - b[1]);
             let overlap = (b[2].min(union[2]) - b[0].max(union[0])).max(0.0)

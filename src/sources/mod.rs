@@ -4,6 +4,7 @@ mod import;
 #[cfg(target_os = "linux")]
 mod import_words;
 pub(crate) mod page_words;
+pub(crate) mod proposals;
 mod reports;
 #[cfg(target_os = "linux")]
 pub mod staging;

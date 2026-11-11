@@ -5993,3 +5993,203 @@ async fn material_table_problems_are_capped_and_kept_when_a_save_is_refused() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
 }
+
+/// Unit 1 and 2 as two stacked columns' worth of boxes are not needed: proposals fixtures use
+/// SQL to give units text and boxes. `ROLL_ROWS` units 1-3 are rows of one roll table.
+const PROPOSAL_ROLL: &str = "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>4; UPDATE source_units SET raw_text='1 Rat' WHERE id=1; UPDATE source_units SET raw_text='2 Crow' WHERE id=2; UPDATE source_units SET raw_text='3 Wolf' WHERE id=3; UPDATE source_units SET raw_text='4 Bear' WHERE id=4; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>4;";
+
+async fn proposals_of(
+    store: &Store,
+    auth: &RequestAuth,
+) -> Vec<crate::sources::proposals::Proposal> {
+    store
+        .material_table_proposals(auth.clone(), 1)
+        .await
+        .unwrap()
+        .as_ref()
+        .clone()
+}
+
+#[tokio::test]
+async fn material_table_proposals_find_a_roll_table_and_link_to_the_form() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(PROPOSAL_ROLL).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [1, 2, 3, 4]);
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let link = parsed
+        .select(&scraper::Selector::parse("#table-proposals a").unwrap())
+        .next()
+        .expect("proposal link");
+    assert_eq!(
+        link.text().collect::<String>(),
+        "Likely roll table: units 1-4"
+    );
+    assert_eq!(
+        link.value().attr("href"),
+        Some("/admin/materials/pages/1/tables/new?unit=1&unit=2&unit=3&unit=4&shape=roll")
+    );
+}
+
+#[tokio::test]
+async fn material_table_proposals_store_nothing_and_are_memoised_per_revision() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(PROPOSAL_ROLL).await;
+    let changes = |store: &Store| {
+        let store = store.clone();
+        async move { store.run(|db| Ok(db.total_changes())).await.unwrap() }
+    };
+    let before = changes(&store).await;
+    let first = proposals_of(&store, &auth[0]).await;
+    let second = proposals_of(&store, &auth[0]).await;
+    assert_eq!(first, second);
+    assert_eq!(store.2.computed(), 1, "second read is served from the memo");
+    // Reading proposals writes nothing (no decision, no worker job row).
+    assert_eq!(changes(&store).await, before);
+    // A page revision change invalidates the memo, and a reviewed unit is no longer proposed.
+    store
+        .run(|db| {
+            db.execute("UPDATE source_pages SET revision=revision+1 WHERE id=1", [])?;
+            db.execute(
+                "UPDATE source_units SET state='rejected',revision=revision+1 WHERE id=4",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let third = proposals_of(&store, &auth[0]).await;
+    assert_eq!(store.2.computed(), 2);
+    // Units 1-3 alone are only three rows: no roll table.
+    assert!(third.is_empty(), "{third:?}");
+}
+
+#[tokio::test]
+async fn material_table_proposals_skip_reviewed_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='1 Rat' WHERE id=1; UPDATE source_units SET raw_text='2 Crow' WHERE id=2; UPDATE source_units SET raw_text='3 Wolf' WHERE id=3; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id=2 OR id>3;",
+    )
+    .await;
+    assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+}
+
+/// Units 1-4 are rows of a roll table stacked in one column; unit 51 (accepted) sits at
+/// `foreign`, and every other unit is accepted.
+fn column_run_sql(foreign: &str) -> &'static str {
+    use std::fmt::Write;
+    let rows = [
+        (1, "1 Rat", 10),
+        (2, "2 Crow", 30),
+        (3, "3 Wolf", 50),
+        (4, "4 Bear", 70),
+    ];
+    let mut sql =
+        String::from("UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>4;");
+    for (id, text, top) in rows {
+        write!(sql,
+            "UPDATE source_units SET raw_text='{text}',polygon='[[10,{top}],[50,{top}],[50,{b}],[10,{b}]]' WHERE id={id};",
+            b = top + 10
+        )
+        .unwrap();
+    }
+    write!(
+        sql,
+        "UPDATE source_units SET polygon='{foreign}' WHERE id=51;"
+    )
+    .unwrap();
+    Box::leak(sql.into_boxed_str())
+}
+
+#[tokio::test]
+async fn material_table_proposals_refuse_a_run_across_page_columns() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Unit 51 lies inside the run's union box, so the run would swallow it: refused.
+    let inside = "[[10,35],[50,35],[50,45],[10,45]]";
+    let (_dir, store, auth) = table_fixture_with(column_run_sql(inside)).await;
+    assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+    // With the other unit elsewhere, the same four units are proposed.
+    let away = "[[300,35],[350,35],[350,45],[300,45]]";
+    let (_dir, store, auth) = table_fixture_with(column_run_sql(away)).await;
+    assert_eq!(proposals_of(&store, &auth[0]).await.len(), 1);
+}
+
+#[tokio::test]
+async fn material_table_proposals_propose_a_single_merged_paragraph_unit() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='1 Rat\n2 Crow\n3 Wolf\n4 Bear\n5 Cat\n6 Dog' WHERE id=1; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>1;",
+    )
+    .await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].units, [1]);
+}
+
+#[tokio::test]
+async fn material_table_proposals_are_capped_and_bounded() {
+    use std::fmt::Write;
+    let _lock = crate::auth::test_resource_lock().await;
+    // Ten roll tables of one merged unit each, separated by accepted units: at most 8 listed.
+    let mut sql = String::new();
+    for table in 0..10 {
+        let id = 1 + table * 2;
+        write!(sql,
+            "UPDATE source_units SET raw_text='1 Rat\n2 Crow\n3 Wolf\n4 Bear' WHERE id={id}; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id={};",
+            id + 1
+        )
+        .unwrap();
+    }
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    store
+        .run(|db| {
+            db.execute(
+                "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>20",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), crate::sources::proposals::MAX_PROPOSALS);
+}
+
+#[tokio::test]
+async fn material_table_proposals_use_stored_words_for_a_column_grid_without_a_worker() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Item Sword Axe' WHERE id=1; UPDATE source_units SET raw_text='Cost 10 8' WHERE id=2; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>2;",
+    )
+    .await;
+    // No stored words: the units are plain columns, nothing proposed (and no worker is asked for).
+    assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
+    )
+    .await;
+    // Storing the words changes the memo key, so the next read sees them.
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].shape, crate::sources::shapes::Shape::Column);
+}
+
+#[tokio::test]
+async fn material_table_proposals_list_only_runs_touching_the_cards_shown() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Unit 51 is the 51st card: outside the first 50-card window.
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<51; UPDATE source_units SET raw_text='1 Rat\n2 Crow\n3 Wolf\n4 Bear' WHERE id=51;",
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let first = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(!first.contains("table-proposals"), "{first}");
+    let later = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=50").await).await;
+    assert!(later.contains("Likely roll table: unit 51"), "{later}");
+}

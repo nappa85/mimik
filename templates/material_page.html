@@ -27,7 +27,8 @@
 </svg>{% endif %}</div></div>
 </aside>
 <section id="review-list" aria-label="Unit review cards">
-<form id="table-select" method="get" action="/admin/materials/pages/{{ page.id }}/tables/new" class="panel"><p>Tick "Select unit N for a table" on 1 to 200 units among the cards shown (50 per window), in any order, then open the table form. Ticking only selects: it records no decision.</p><button data-no-script-table>Create table from selected units</button>
+{% if !proposals.is_empty() %}<div class="panel" id="table-proposals"><p>These unreviewed units may form a table. Each link opens the table form with them selected and a draft to check; nothing is decided or saved until you save the form.</p><ul>{% for proposal in proposals %}<li><a href="{{ proposal.1 }}">{{ proposal.0 }}</a></li>{% endfor %}</ul></div>
+{% endif %}<form id="table-select" method="get" action="/admin/materials/pages/{{ page.id }}/tables/new" class="panel"><p>Tick "Select unit N for a table" on 1 to 200 units among the cards shown (50 per window), in any order, then open the table form. Ticking only selects: it records no decision.</p><button data-no-script-table>Create table from selected units</button>
 <div id="table-bar" class="table-bar" role="region" aria-label="Selected units" hidden><span data-selected-count></span><button type="submit">Create table</button><button type="button" data-clear-selection>Clear</button></div><p class="sr-only" role="status" aria-live="polite" data-selected-announce></p></form>
 {% for unit in page.units %}
 <article class="panel" id="unit-{{ unit.id }}" data-unit="{{ unit.id }}" tabindex="0">

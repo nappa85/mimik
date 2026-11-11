@@ -43,7 +43,11 @@ const MIGRATIONS: [&str; 29] = [
 ];
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>, Arc<std::sync::OnceLock<NoteHook>>);
+pub struct Store(
+    Arc<Mutex<Connection>>,
+    Arc<std::sync::OnceLock<NoteHook>>,
+    pub(crate) Arc<crate::sources::proposals::ProposalCache>,
+);
 
 /// Called after every committed sheet save that wrote change notes: the sheet, the new
 /// revision and the noted addresses (the assistant's post-commit hook, plan §1.4).
@@ -126,6 +130,7 @@ impl Store {
         Ok(Self(
             Arc::new(Mutex::new(connection)),
             Arc::new(std::sync::OnceLock::new()),
+            Arc::default(),
         ))
     }
 

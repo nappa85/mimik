@@ -103,6 +103,21 @@ impl Region {
     }
 }
 
+/// The words whose centres lie inside any of `polygons`, in the given order.
+pub(crate) fn words_among(words: &[PageWord], polygons: &[&str]) -> Vec<PageWord> {
+    let regions: Vec<Region> = polygons.iter().filter_map(|p| Region::parse(p)).collect();
+    words
+        .iter()
+        .filter(|word| {
+            let (x, y) = word.centre();
+            regions
+                .iter()
+                .any(|region| region.contains(f64::from(x), f64::from(y)))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The words of a stored row whose centres lie inside any of `polygons` (each a JSON point
 /// list), in the row's order, and the state for the form. `stored` is `None` when the page has
 /// no row.
@@ -116,16 +131,7 @@ pub(crate) fn words_in(
     let Ok(words) = page_words::decode(bytes) else {
         return (None, WordsState::Invalid);
     };
-    let regions: Vec<Region> = polygons.iter().filter_map(|p| Region::parse(p)).collect();
-    let inside: Vec<PageWord> = words
-        .into_iter()
-        .filter(|word| {
-            let (x, y) = word.centre();
-            regions
-                .iter()
-                .any(|region| region.contains(f64::from(x), f64::from(y)))
-        })
-        .collect();
+    let inside = words_among(&words, polygons);
     if inside.is_empty() {
         (None, WordsState::Outside)
     } else {
