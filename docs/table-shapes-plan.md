@@ -20,25 +20,31 @@ gains `Column`, and `best` takes it into account.
   20,000 words per page, word text at most 256 bytes, boxes finite and inside the page (validated
   by the parent like `validate_lines`); a new `WORDS_LIMIT` on the frame. Same sandbox, deadline
   and cancel as render; a hostile-corpus test and record tests like `TextLine`'s.
-- Words are stored at import (owner decision 2026-11-11: no release yet, existing local sources
-  may be re-imported; no backfill job, no compatibility path). A migration (the next free
-  number; `docs/source-limits-plan.md` claims 029/030 and renumbers after whichever lands first)
-  adds
-  `source_page_words(page_id PRIMARY KEY REFERENCES source_pages, words BLOB NOT NULL)`: a compact
-  bounded encoding of the page's words (text and box), append-only (insert once, no update or
-  delete, like the other import artefacts; the source-limits plan's content-addressed PDF store
-  changes only where the import reads the PDF from), never evidence, never shown as text of its own, not
-  indexed for search. The source-limits plan's migrations renumber after it.
-- `mimik import-source` (prepared bundles) streams the stored PDF with rusqlite `blob_open` to a
-  private 0600 file in the data directory's staging area (never `std::env::temp_dir()`: `/tmp`
-  may be RAM), with the uploads' disk reservation, runs `Words` for the imported PDF page
-  indexes in one worker run, validates them, keeps for each page the words whose centre lies in
-  the page, and inserts the rows in the import's transaction (or a follow-up transaction when the
-  import's own bounds require it). When the worker is unavailable (platform, missing sandbox) the
-  import still succeeds without words and says so; a page without words falls back to the text
-  shapes, and the form says why. The upload path (route A, plan step 4) will carry the words from
-  its own render run into the same table when uploads become sources; until then it is out of
-  scope here.
+- Words are stored at import (owner decision 2026-11-11: no release yet; no compatibility path
+  beyond the one below). A migration (the next free number; `docs/source-limits-plan.md` claims
+  029/030 and its pre-step's hard-coded "version >= 3 and < 30, just before 030" moves with it)
+  adds `source_page_words(page_id INTEGER PRIMARY KEY REFERENCES source_pages, words BLOB NOT
+  NULL)`, append-only through `BEFORE UPDATE`/`BEFORE DELETE` triggers like the other import
+  artefacts; never evidence, never shown as text of its own, not indexed for search.
+- Encoding: a version byte (1), then per word: four little-endian `f32` box values in PDF points
+  and a `u16`-length-prefixed UTF-8 text of 1-256 bytes; at most 20,000 words and a hard cap of
+  20,000 × (256 + 18) + 1 bytes per row. Validated again when read (version, lengths, UTF-8,
+  finite boxes inside the page); an invalid row is treated as absent and reported, never trusted.
+- `mimik import-source`: after `load_import` has the hash-verified PDF bytes (`Import.pdf`), the
+  `spawn_blocking` stage writes them to a private 0600 file in the data directory's staging
+  area (never `std::env::temp_dir()`: `/tmp` may be RAM), re-checks the hash, and runs `Words`
+  for the bundle's PDF page indexes in batches of at most 8 pages (like render's batches), each
+  with its own deadline; the file is removed afterwards. The worker never runs inside the write
+  transaction; the validated rows are inserted in the existing import transaction. When the
+  content-addressed PDF store lands (source-limits decision 9), the input comes from it instead.
+- Existing sources: `import-source` on an existing, matching source (`verify_existing`) inserts
+  rows only for its pages that have none (insert-once, idempotent, so re-running the same import
+  fills in words without touching review history). This is the narrow backfill the owner's
+  re-import needs; tested.
+- When the worker is unavailable (platform, missing sandbox) the import still succeeds without
+  words and says so; a page without words falls back to the text shapes, and the form says why.
+  The upload path (route A, plan step 4) will carry the words from its own render run into the
+  same table when uploads become sources; out of scope here.
 - The table form reads the selected units' words (centre inside one of their polygons) from the
   stored row: no worker launch, cache, semaphore or busy state on the review screens.
 - **Column grid**: rows from words grouped by baseline (y overlap > 50 %), columns from
@@ -46,10 +52,10 @@ gains `Column`, and `best` takes it into account.
   character width; left edges for text, right edges for numeric cells, centres as the fallback); a cell is the words between two column starts. A first row with non-numeric
   cells over mostly numeric rows is the header. Without word boxes the shape falls back to
   splitting each line on runs of two or more spaces, scored lower.
-- Coordinates: unit polygons and words share PDF points. Bundle import refuses rotated pages
-  (`src/sources/import.rs:161`), but the worker handles `/Rotate`
-  (`src/sources/worker/operations.rs:118`): `Words` uses the same corrected space as render's
-  lines, and a rotated-page test checks the words land inside the matching boxes.
+- Coordinates: unit polygons and words share PDF points; bundle import refuses rotated pages and
+  CropBoxes off the origin (`src/sources/import.rs:160`), so a fixture test checks that a word's
+  centre falls inside its unit polygon on an imported synthetic page. Rotation is the upload
+  path's concern (step 4).
 
 ## Slice 4: proposals on the page
 
@@ -67,8 +73,11 @@ gains `Column`, and `best` takes it into account.
 
 ## Tests and docs
 
-- Slice 3: route tests for busy/unavailable words (the text shapes still work); worker: record
-  validation, hostile corpus, one live words test like render's; a rotated-page words test; unit
+- Slice 3: route tests for a page with no stored words and an import without a worker (the text
+  shapes still work, the form says why); the existing-source import filling words once; the
+  encoding's round trip and its refusal of malformed rows; the append-only triggers; worker:
+  record validation, hostile corpus, one live words test like render's; a word-centre-in-polygon
+  fixture test; unit
   tests for Column grid (clean fit, ragged rows, header, numeric right edges, the no-words
   fallback, a near-miss that loses to Plain columns).
 - Slice 4: tests that proposals never start a worker job, are memoised per (page id, revision),
