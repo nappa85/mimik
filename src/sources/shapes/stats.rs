@@ -68,20 +68,39 @@ fn colon_pairs(line: &str) -> Option<Pairs> {
     unique(&pairs).then_some(pairs)
 }
 
+/// Either a line of pairs or text that is no stat line (kept in the cells where it stood).
+enum Entry {
+    Stats(Pairs),
+    Text(String),
+}
+
 pub(super) fn read(lines: &[String]) -> Draft {
-    let mut stat_lines: Vec<Pairs> = Vec::new();
-    let mut caption = None;
-    let mut unplaced = Vec::new();
+    let mut entries = Vec::new();
+    let mut caption = false;
+    let mut problems = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if let Some(pairs) = spaced_pairs(line).or_else(|| colon_pairs(line)) {
-            stat_lines.push(pairs);
-        } else if index == 0 && caption_candidate(line) {
-            caption = Some(line.clone());
+            entries.push(Entry::Stats(pairs));
         } else {
-            unplaced.push(excerpt(line));
+            if index == 0 && caption_candidate(line) {
+                caption = true;
+            } else {
+                problems.push(Problem::Unplaced(excerpt(line)));
+            }
+            entries.push(Entry::Text(line.clone()));
         }
     }
-    let body = lines.len() - usize::from(caption.is_some());
+    let stat_lines: Vec<&Pairs> = entries
+        .iter()
+        .filter_map(|e| {
+            if let Entry::Stats(p) = e {
+                Some(p)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let body = lines.len() - usize::from(caption);
     if stat_lines.is_empty() || stat_lines.len() * 2 < body {
         return Draft::none(Shape::Stat, Vec::new());
     }
@@ -91,30 +110,33 @@ pub(super) fn read(lines: &[String]) -> Draft {
                 .map(|(k, _)| k)
                 .eq(stat_lines[0].iter().map(|(k, _)| k))
         });
-    let (rows, header): (Vec<Vec<String>>, bool) = if same_keys {
-        let mut rows = vec![stat_lines[0].iter().map(|(k, _)| k.clone()).collect()];
-        rows.extend(
-            stat_lines
-                .iter()
-                .map(|line| line.iter().map(|(_, v)| v.clone()).collect()),
-        );
-        (rows, true)
-    } else {
-        let rows = stat_lines
-            .iter()
-            .flatten()
-            .map(|(k, v)| vec![k.clone(), v.clone()])
-            .collect();
-        (rows, false)
-    };
-    let consumed = stat_lines.len() + usize::from(caption.is_some());
+    let lead: Vec<String> = entries
+        .iter()
+        .take_while(|e| matches!(e, Entry::Text(_)))
+        .filter_map(|e| {
+            if let Entry::Text(t) = e {
+                Some(t.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    if same_keys {
+        rows.push(stat_lines[0].iter().map(|(k, _)| k.clone()).collect());
+    }
+    for entry in entries.iter().skip(lead.len()) {
+        match entry {
+            Entry::Stats(pairs) if same_keys => {
+                rows.push(pairs.iter().map(|(_, v)| v.clone()).collect());
+            }
+            Entry::Stats(pairs) => {
+                rows.extend(pairs.iter().map(|(k, v)| vec![k.clone(), v.clone()]));
+            }
+            Entry::Text(text) => rows.push(vec![text.clone()]),
+        }
+    }
+    let consumed = stat_lines.len() + usize::from(caption);
     let score = u32::try_from(STAT_CAP * consumed / lines.len()).unwrap_or(0);
-    Draft::build(
-        Shape::Stat,
-        rows,
-        header,
-        caption,
-        score,
-        unplaced.into_iter().map(Problem::Unplaced).collect(),
-    )
+    Draft::build(Shape::Stat, lead, rows, same_keys, score, problems)
 }

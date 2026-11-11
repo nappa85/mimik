@@ -1250,10 +1250,12 @@ struct TableEditor {
     header: bool,
     /// "Read as" choices; scores only after a draft was computed.
     shapes: Vec<ShapeChoice>,
-    /// Draft notes: a caption kept apart, problems found, units the table's box would cover.
-    caption: String,
+    /// Draft notes: problems found, units the table's box would cover, the overlap check's state.
     problems: Vec<String>,
     overlaps: String,
+    overlap_unchecked: bool,
+    /// The shape the draft was read as (a hidden field, so a refused save can show the notes).
+    shape_key: String,
     rationale: String,
     message: String,
 }
@@ -1266,6 +1268,24 @@ struct ShapeChoice {
 }
 
 impl TableEditor {
+    fn new(page: i64, csrf: String) -> Self {
+        Self {
+            page,
+            csrf,
+            revision: 0,
+            units: Vec::new(),
+            grid: String::new(),
+            header: false,
+            shapes: Vec::new(),
+            problems: Vec::new(),
+            overlaps: String::new(),
+            overlap_unchecked: false,
+            shape_key: String::new(),
+            rationale: String::new(),
+            message: String::new(),
+        }
+    }
+
     /// The plain unit ids (no revisions) the "Read as" form submits back.
     fn unit_ids(&self) -> Vec<&str> {
         self.units
@@ -1312,20 +1332,7 @@ async fn table_form(
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
     let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
-    let mut editor = TableEditor {
-        page,
-        csrf,
-        revision: 0,
-        units: Vec::new(),
-        grid: String::new(),
-        header: false,
-        shapes: Vec::new(),
-        caption: String::new(),
-        problems: Vec::new(),
-        overlaps: String::new(),
-        rationale: String::new(),
-        message: String::new(),
-    };
+    let mut editor = TableEditor::new(page, csrf);
     // `unit` (repeated) and at most one `shape`; nothing else is read from the URL.
     let mut shape = None;
     let mut ids = Vec::new();
@@ -1364,9 +1371,10 @@ async fn table_form(
             editor.grid = prefill.grid;
             editor.header = prefill.header;
             editor.shapes = shape_choices(Some(prefill.shape), &prefill.scores, editor.units.len());
-            editor.caption = prefill.caption.unwrap_or_default();
             editor.problems = prefill.problems;
             editor.overlaps = overlap_note(&prefill.overlaps);
+            editor.overlap_unchecked = !prefill.overlap_checked;
+            prefill.shape.key().clone_into(&mut editor.shape_key);
             html(&editor)
         }
         Err(e @ AppError::Invalid(_)) => {
@@ -1391,6 +1399,33 @@ fn overlap_note(units: &[i64]) -> String {
     };
     format!("unit {}{tail}", named.join(", unit "))
 }
+/// A refused save re-renders with the draft notes recomputed for the same units and shape; the
+/// cells, header and rationale stay as the Owner typed them.
+async fn refresh_table_notes(
+    state: &AuthState,
+    auth: crate::auth::RequestAuth,
+    page: i64,
+    editor: &mut TableEditor,
+    shape: Option<Shape>,
+) {
+    let ids: Vec<i64> = editor
+        .units
+        .iter()
+        .filter_map(|u| u.split_once(':')?.0.parse().ok())
+        .collect();
+    if let Ok(prefill) = state
+        .sessions
+        .store
+        .material_table_prefill(auth, page, ids, shape)
+        .await
+    {
+        editor.shapes = shape_choices(Some(prefill.shape), &prefill.scores, editor.units.len());
+        editor.problems = prefill.problems;
+        editor.overlaps = overlap_note(&prefill.overlaps);
+        editor.overlap_unchecked = !prefill.overlap_checked;
+        prefill.shape.key().clone_into(&mut editor.shape_key);
+    }
+}
 async fn create_table(
     State(state): State<AuthState>,
     session: Session,
@@ -1401,6 +1436,7 @@ async fn create_table(
     let (mut csrf_token, mut revision, mut cells, mut rationale) =
         (None, None, None, None::<String>);
     let mut header = None::<bool>;
+    let mut shape = None::<Shape>;
     let mut units = Vec::new();
     let mut malformed = false;
     for (key, value) in fields {
@@ -1411,6 +1447,10 @@ async fn create_table(
             "cells" if cells.is_none() => cells = Some(value),
             "rationale" if rationale.is_none() => rationale = Some(value),
             "header" if header.is_none() && value == "1" => header = Some(true),
+            "shape" if shape.is_none() => match Shape::from_key(&value) {
+                Some(s) => shape = Some(s),
+                None => malformed = true,
+            },
             "unit" => units.push(value),
             _ => malformed = true,
         }
@@ -1418,18 +1458,12 @@ async fn create_table(
     let csrf_token = csrf_token.ok_or(StatusCode::FORBIDDEN)?;
     let csrf = csrf_admission(&session, &csrf_token).await?;
     let mut editor = TableEditor {
-        page,
-        csrf: csrf_token,
         revision: revision.unwrap_or(0),
         units,
         grid: cells.unwrap_or_default(),
         header: header.unwrap_or(false),
-        shapes: Vec::new(),
-        caption: String::new(),
-        problems: Vec::new(),
-        overlaps: String::new(),
         rationale: rationale.unwrap_or_default(),
-        message: String::new(),
+        ..TableEditor::new(page, csrf_token)
     };
     editor.shapes = shape_choices(None, &[], editor.units.len());
     let sources = editor
@@ -1487,6 +1521,7 @@ async fn create_table(
         }
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
             editor.message = e.to_string();
+            refresh_table_notes(&state, auth, page, &mut editor, shape).await;
             table_editor_response(&editor, error(&e))
         }
         Err(e) => Err(error(&e)),

@@ -86,7 +86,7 @@ fn roll_continuation_lines_join_the_last_cell() {
 }
 
 #[test]
-fn roll_caption_is_a_plain_first_row_unless_a_header_owns_the_first_row() {
+fn roll_caption_is_a_single_cell_row_before_a_header_row() {
     let plain = read(&input(&[&format!("Random encounters\n{D6}")]), Shape::Roll);
     assert!(!plain.header);
     assert_eq!(plain.rows[0], ["Random encounters", ""]);
@@ -95,10 +95,11 @@ fn roll_caption_is_a_plain_first_row_unless_a_header_owns_the_first_row() {
         &input(&[&format!("Random encounters\nd6 Result\n{D6}")]),
         Shape::Roll,
     );
-    assert!(headed.header);
-    assert_eq!(headed.caption.as_deref(), Some("Random encounters"));
-    assert_eq!(headed.rows[0], ["d6", "Result"]);
-    assert_eq!(headed.rows.len(), 7);
+    // The caption keeps its place in the cells, so the header is no longer the first row.
+    assert!(!headed.header);
+    assert_eq!(headed.rows[0], ["Random encounters", ""]);
+    assert_eq!(headed.rows[1], ["d6", "Result"]);
+    assert_eq!(headed.rows.len(), 8);
 }
 
 #[test]
@@ -304,10 +305,13 @@ fn stat_line_reads_pairs_dice_and_colon_sequences() {
         &input(&["Goblin\nStr 12 Dex 14\nStr 8 Dex 10\nStr 9 Dex 11"]),
         Shape::Stat,
     );
-    assert!(many.header);
-    assert_eq!(many.rows[0], ["Str", "Dex"]);
-    assert_eq!(many.rows[2], ["8", "10"]);
-    assert_eq!(many.caption.as_deref(), Some("Goblin"));
+    assert!(!many.header, "the caption row comes first");
+    assert_eq!(many.rows[0], ["Goblin", ""]);
+    assert_eq!(many.rows[1], ["Str", "Dex"]);
+    assert_eq!(many.rows[3], ["8", "10"]);
+    let headed = read(&input(&["Str 12 Dex 14\nStr 8 Dex 10"]), Shape::Stat);
+    assert!(headed.header);
+    assert_eq!(headed.rows[0], ["Str", "Dex"]);
     let colon = read(&input(&["Morale: 7, HP: 4; Attack: 1d6"]), Shape::Stat);
     assert_eq!(
         colon.rows,
@@ -408,9 +412,12 @@ fn plain_columns_is_one_column_per_unit_and_not_offered_above_sixteen_units() {
     );
     assert_eq!(read(&input(&["a", "b"]), Shape::Plain).score, PLAIN_SCORE);
     let many: Vec<&str> = vec!["x"; 17];
+    // Above 16 units: one column, one row per line, never an empty editor.
     let draft = read(&input(&many), Shape::Plain);
-    assert_eq!(draft.rows.len(), 0);
-    assert_eq!(draft.problems, [Problem::TooManyColumns]);
+    assert_eq!(draft.rows.len(), 17);
+    assert_eq!(draft.rows[0], ["x"]);
+    assert_eq!(draft.problems, [Problem::OneColumn]);
+    assert_eq!(best(&input(&many))[0].rows.len(), 17);
     // 200 units of one line each: Plain is refused, Roll still reads them.
     let units: Vec<String> = (1..=20).map(|n| format!("{n} Result {n}")).collect();
     let draft = read(&input(&units), Shape::Roll);
@@ -510,7 +517,10 @@ fn adversarial_inputs_terminate_within_bounds() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(500))]
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        ..ProptestConfig::with_cases(500)
+    })]
 
     #[test]
     fn every_recogniser_terminates_within_bounds(
@@ -531,9 +541,76 @@ proptest! {
     }
 
     #[test]
+    fn no_word_of_the_units_leaves_the_cells(
+        units in proptest::collection::vec("[0-9dD+\u{2013}.:)(*#a-zA-Z\\- \t\n,;\u{b0}\u{2026}]{0,200}", 0..5),
+    ) {
+        let shape_input = ShapeInput::new(&units);
+        let words: Vec<String> = shape_input
+            .units
+            .iter()
+            .flatten()
+            .flat_map(|line| {
+                line.split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for draft in best(&shape_input).into_iter().filter(|d| !d.rows.is_empty()) {
+            let text = draft.rows.iter().flatten().cloned().collect::<Vec<_>>().join(" ");
+            for word in &words {
+                prop_assert!(text.contains(word.as_str()), "{:?} lost {word:?}: {:?}", draft.shape, draft.rows);
+            }
+        }
+    }
+
+    #[test]
     fn arbitrary_text_stays_within_bounds(units in proptest::collection::vec(".{0,200}", 0..4)) {
         for draft in best(&ShapeInput::new(&units)) {
             within_bounds(&draft);
         }
     }
+}
+
+#[test]
+fn lines_that_fit_no_row_stay_in_the_cells() {
+    // Unplaced lines and roll rows before the cover starts are kept in full.
+    let roll = read(
+        &input(&["Page 12 of the book, a long unrelated sentence\n12 stray\n1 a\n2 b\n3 c\n4 d"]),
+        Shape::Roll,
+    );
+    let text: String = roll
+        .rows
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        text.contains("a long unrelated sentence") && text.contains("12 stray"),
+        "{text}"
+    );
+    assert!(!roll.header);
+    assert_eq!(roll.problems.len(), 1);
+    let stat = read(
+        &input(&["Str 12 Dex 14\nsome prose in the middle\nStr 8 Dex 10"]),
+        Shape::Stat,
+    );
+    assert_eq!(stat.rows[2], ["some prose in the middle", ""]);
+    let label = read(&input(&["A: 1\nB: 2\nC: 3"]), Shape::Label);
+    assert_eq!(label.rows.len(), 3);
+}
+
+#[test]
+fn prose_steps_and_title_lines_are_near_misses() {
+    let steps = "Step 1) Open the door 2) Walk in 3) Close it 4) Leave";
+    assert!(!fits(&[steps], Shape::Roll));
+    assert_ne!(best(&input(&[steps]))[0].shape, Shape::Roll);
+    let title = read(
+        &input(&["Table 3 Fighter\n1st +0 +2\n2nd +1 +3\n3rd +2 +3"]),
+        Shape::Progression,
+    );
+    assert!(!title.header, "a line with a number is not a header");
+    assert_eq!(title.rows[0], ["Table 3 Fighter", "", ""]);
+    assert_eq!(title.rows.len(), 4);
 }

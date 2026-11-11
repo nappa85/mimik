@@ -212,7 +212,8 @@ impl Store {
                 text("raw_text", 65_536)
             );
             let geometry_sql = format!(
-                "{ORDERED_UNITS} SELECT id,polygon,state FROM ordered ORDER BY position LIMIT 2000"
+                "{ORDERED_UNITS} SELECT id,polygon,state FROM ordered ORDER BY position LIMIT {}",
+                GEOMETRY_LIMIT + 1
             );
             let mut rows = Vec::with_capacity(units.len());
             let mut boxes = Vec::new();
@@ -270,10 +271,15 @@ impl Store {
                 grid: super::tables::format_grid(&chosen.rows),
                 header: chosen.header,
                 shape: chosen.shape,
-                caption: chosen.caption,
-                problems: chosen.problems.iter().map(ToString::to_string).collect(),
+                problems: cap_problems(chosen.problems.iter().map(ToString::to_string).collect()),
                 scores,
-                overlaps: overlapping_units(&boxes, &selected),
+                // A page with more units than the read bound is not checked, and says so.
+                overlap_checked: boxes.len() <= GEOMETRY_LIMIT,
+                overlaps: if boxes.len() <= GEOMETRY_LIMIT {
+                    overlapping_units(&boxes, &selected)
+                } else {
+                    Vec::new()
+                },
             })
         })
         .await
@@ -772,13 +778,28 @@ pub(crate) struct TablePrefill {
     pub header: bool,
     /// The shape the draft was read as.
     pub shape: Shape,
-    /// A short first line kept apart from the cells when a header owns the first row.
-    pub caption: Option<String>,
+    /// At most [`MAX_PROBLEMS_SHOWN`] problems, then "and N more".
     pub problems: Vec<String>,
     /// Every shape that fits, best first, with its score.
     pub scores: Vec<(Shape, u32)>,
     /// Unselected units whose boxes sit mostly inside the union of the selected units' boxes.
     pub overlaps: Vec<i64>,
+    /// False when the page has too many units for the overlap check; it was not done.
+    pub overlap_checked: bool,
+}
+
+/// Units of one page read for the overlap check.
+const GEOMETRY_LIMIT: usize = 2000;
+/// Problems listed on the form before "and N more".
+pub(crate) const MAX_PROBLEMS_SHOWN: usize = 20;
+
+pub(crate) fn cap_problems(mut problems: Vec<String>) -> Vec<String> {
+    if problems.len() > MAX_PROBLEMS_SHOWN {
+        let more = problems.len() - MAX_PROBLEMS_SHOWN;
+        problems.truncate(MAX_PROBLEMS_SHOWN);
+        problems.push(format!("and {more} more"));
+    }
+    problems
 }
 
 /// Unselected, not rejected units mostly inside the union box of the selected ones: a run across

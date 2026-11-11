@@ -4,10 +4,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{
-    Draft, PROBLEM_PENALTY, Problem, Shape, caption_candidate, excerpt, is_value, ragged,
-    split_gaps,
-};
+use super::{Draft, PROBLEM_PENALTY, Problem, Shape, excerpt, is_value, ragged, split_gaps};
 
 /// A progression needs at least this many level rows.
 const MIN_LEVELS: usize = 3;
@@ -105,10 +102,10 @@ pub(super) fn read(lines: &[String]) -> Draft {
     let (modal, ragged_rows) = ragged(&rows);
     problems.extend(ragged_rows);
 
-    // The line just before the first level is a header when it splits into as many cells; the
-    // first line overall can be a caption.
+    // The line just before the first level is a header when it splits into as many cells and
+    // has no numbers; every other earlier line stays as a single-cell row in front.
     let mut header = false;
-    let mut caption = None;
+    let mut lead = Vec::new();
     let before = &lines[..first];
     for (index, line) in before.iter().enumerate() {
         let cells = split_gaps(line);
@@ -117,16 +114,18 @@ pub(super) fn read(lines: &[String]) -> Draft {
         } else {
             line.split_whitespace().map(str::to_owned).collect()
         };
-        if index + 1 == before.len() && cells.len() == modal && modal >= 2 {
+        if index + 1 == before.len()
+            && cells.len() == modal
+            && modal >= 2
+            && !cells.iter().any(|c| c.split_whitespace().any(is_value))
+        {
             rows.insert(0, cells);
             header = true;
-            consumed += 1;
-        } else if index == 0 && caption_candidate(line) {
-            caption = Some(line.clone());
-            consumed += 1;
         } else {
             unplaced.push(excerpt(line));
+            lead.push(line.clone());
         }
+        consumed += 1;
     }
     let penalty = u32::try_from(problems.len())
         .unwrap_or(u32::MAX)
@@ -135,9 +134,9 @@ pub(super) fn read(lines: &[String]) -> Draft {
     problems.extend(unplaced.into_iter().map(Problem::Unplaced));
     Draft::build(
         Shape::Progression,
+        lead,
         rows,
         header,
-        caption,
         base.saturating_sub(penalty),
         problems,
     )

@@ -37,7 +37,7 @@ fn split_label(line: &str) -> Option<(&str, &str)> {
 pub(super) fn read(lines: &[String]) -> Draft {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut caption = None;
-    let mut unplaced = Vec::new();
+    let mut unplaced: Vec<String> = Vec::new();
     let mut continuations = 0_usize;
     for (index, line) in lines.iter().enumerate() {
         if let Some((label, value)) = split_label(line) {
@@ -49,7 +49,7 @@ pub(super) fn read(lines: &[String]) -> Draft {
         } else if index == 0 && caption_candidate(line) {
             caption = Some(line.clone());
         } else {
-            unplaced.push(excerpt(line));
+            unplaced.push(line.clone());
         }
     }
     let body = lines.len() - usize::from(caption.is_some());
@@ -58,12 +58,10 @@ pub(super) fn read(lines: &[String]) -> Draft {
     }
     let consumed = rows.len() + continuations + usize::from(caption.is_some());
     let score = u32::try_from(LABEL_CAP * consumed / lines.len()).unwrap_or(0);
-    Draft::build(
-        Shape::Label,
-        rows,
-        false,
-        caption,
-        score,
-        unplaced.into_iter().map(Problem::Unplaced).collect(),
-    )
+    let problems = unplaced
+        .iter()
+        .map(|l| Problem::Unplaced(excerpt(l)))
+        .collect();
+    let lead = caption.into_iter().chain(unplaced).collect();
+    Draft::build(Shape::Label, lead, rows, false, score, problems)
 }

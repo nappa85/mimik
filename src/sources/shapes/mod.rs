@@ -70,7 +70,7 @@ impl Shape {
 }
 
 /// What a shape could not place or had to flag. Shown as text on the form; never auto-fixed.
-/// Row numbers are 1-based among the recognised rows (header and caption not counted).
+/// Row numbers are 1-based among the recognised rows (header and lead lines not counted).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Problem {
     /// A value is missing before this row.
@@ -83,8 +83,10 @@ pub(crate) enum Problem {
     Interleaved(usize),
     /// The table stops before the top of its die (last value, top).
     Incomplete(u32, u32),
-    /// A line that fits no row (an excerpt).
+    /// A line that fits no row (an excerpt; the line itself is kept in the cells).
     Unplaced(String),
+    /// More than 16 units: one column, one row per line.
+    OneColumn,
     /// A row with a different number of cells from most rows.
     Ragged(usize),
     TooManyRows,
@@ -111,6 +113,10 @@ impl fmt::Display for Problem {
             }
             Problem::Unplaced(line) => write!(f, "This line fits no row: \u{201c}{line}\u{201d}."),
             Problem::Ragged(row) => write!(f, "Row {row} has a different number of cells."),
+            Problem::OneColumn => write!(
+                f,
+                "More than {MAX_COLUMNS} units: read as one column, one row per line."
+            ),
             Problem::TooManyRows => write!(f, "More than {MAX_ROWS} rows."),
             Problem::TooManyColumns => write!(f, "More than {MAX_COLUMNS} columns."),
             Problem::CellTooLong => write!(f, "A cell has more than {MAX_CELL_CHARS} characters."),
@@ -126,9 +132,6 @@ pub(crate) struct Draft {
     pub rows: Vec<Vec<String>>,
     /// The first row of `rows` is a recognised header (`d6 Result`, a column-name line).
     pub header: bool,
-    /// A short first line that fits no row, kept apart from `rows` when a header owns the first
-    /// row; otherwise it is already the plain first row.
-    pub caption: Option<String>,
     /// 0..=100: the share of lines consumed minus the problem penalties; never an acceptance.
     pub score: u32,
     pub problems: Vec<Problem>,
@@ -140,26 +143,25 @@ impl Draft {
             shape,
             rows: Vec::new(),
             header: false,
-            caption: None,
             score: 0,
             problems,
         }
     }
 
-    /// Pads rows, places a caption, and enforces the table bounds (a draft that cannot be saved
-    /// is no draft).
+    /// Pads rows, puts the `lead` lines (a caption, lines that fit no row) in front as
+    /// single-cell rows so no text of the units is lost, and enforces the table bounds (a draft
+    /// that cannot be saved is no draft). The header flag only holds when no lead row precedes
+    /// the header row.
     fn build(
         shape: Shape,
+        lead: Vec<String>,
         mut rows: Vec<Vec<String>>,
         header: bool,
-        caption: Option<String>,
         score: u32,
         mut problems: Vec<Problem>,
     ) -> Draft {
-        let mut caption = caption;
-        if !header && let Some(text) = caption.take() {
-            rows.insert(0, vec![text]);
-        }
+        let header = header && lead.is_empty();
+        rows.splice(0..0, lead.into_iter().map(|text| vec![text]));
         let width = rows.iter().map(Vec::len).max().unwrap_or(0);
         for row in &mut rows {
             row.resize(width, String::new());
@@ -190,7 +192,6 @@ impl Draft {
             shape,
             rows,
             header,
-            caption,
             score: score.min(100),
             problems,
         }
@@ -342,7 +343,20 @@ fn ragged(rows: &[Vec<String>]) -> (usize, Vec<Problem>) {
 /// One column per selected unit, one row per nonempty line, short columns padded with empty cells.
 fn plain(input: &ShapeInput) -> Draft {
     if input.units.len() > MAX_COLUMNS {
-        return Draft::none(Shape::Plain, vec![Problem::TooManyColumns]);
+        let rows = input
+            .units
+            .iter()
+            .flatten()
+            .map(|line| vec![line.clone()])
+            .collect();
+        return Draft::build(
+            Shape::Plain,
+            Vec::new(),
+            rows,
+            false,
+            PLAIN_SCORE,
+            vec![Problem::OneColumn],
+        );
     }
     let height = input.units.iter().map(Vec::len).max().unwrap_or(0);
     let rows = (0..height)
@@ -354,7 +368,14 @@ fn plain(input: &ShapeInput) -> Draft {
                 .collect()
         })
         .collect();
-    Draft::build(Shape::Plain, rows, false, None, PLAIN_SCORE, Vec::new())
+    Draft::build(
+        Shape::Plain,
+        Vec::new(),
+        rows,
+        false,
+        PLAIN_SCORE,
+        Vec::new(),
+    )
 }
 
 /// The draft of one shape (a shape that does not fit has no rows and score 0).

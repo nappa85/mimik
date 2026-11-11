@@ -50,11 +50,6 @@ impl Marker {
     fn weak(&self) -> bool {
         self.punct == Some('.') && !self.range && !self.plus
     }
-
-    /// Evidence beyond a bare number.
-    fn strong(&self) -> bool {
-        self.range || self.plus || self.punct.is_some()
-    }
 }
 
 struct RollRow {
@@ -223,7 +218,7 @@ fn scan_lines(pre: &[String], body: &[String], die: Option<Die>) -> Scan {
         if caption_candidate(first) && parse_marker(first).is_none() {
             scan.caption = Some(first.clone());
         } else {
-            scan.unplaced.push(excerpt(first));
+            scan.unplaced.push(first.clone());
         }
     }
     let mut first_line = pre.is_empty();
@@ -241,7 +236,7 @@ fn scan_lines(pre: &[String], body: &[String], die: Option<Die>) -> Scan {
         } else if first_line && caption_candidate(line) {
             scan.caption = Some(line.clone());
         } else {
-            scan.unplaced.push(excerpt(line));
+            scan.unplaced.push(line.clone());
         }
         first_line = false;
     }
@@ -262,7 +257,7 @@ fn scan_lines(pre: &[String], body: &[String], die: Option<Die>) -> Scan {
     if let Some(start) = start.filter(|s| *s > 0) {
         for row in scan.rows.drain(..start) {
             scan.unplaced
-                .push(excerpt(&format!("{} {}", row.marker.text, row.outcome)));
+                .push(format!("{} {}", row.marker.text, row.outcome));
         }
     }
     scan
@@ -275,7 +270,7 @@ fn scan_tokens(pre: &[String], body: &[String], start: u32, d66: bool) -> Scan {
         if caption_candidate(first) && parse_marker(first).is_none() {
             scan.caption = Some(first.clone());
         } else {
-            scan.unplaced.push(excerpt(first));
+            scan.unplaced.push(first.clone());
         }
     }
     let mut next = start;
@@ -306,7 +301,7 @@ fn scan_tokens(pre: &[String], body: &[String], start: u32, d66: bool) -> Scan {
         if scan.caption.is_none() && pre.is_empty() && caption_candidate(&text) {
             scan.caption = Some(text);
         } else {
-            scan.unplaced.push(excerpt(&text));
+            scan.unplaced.push(text);
         }
     }
     scan
@@ -323,8 +318,7 @@ fn assemble(mut scan: Scan, ctx: &Context<'_>) -> Draft {
     let unplaced: Vec<Problem> = scan
         .unplaced
         .iter()
-        .cloned()
-        .map(Problem::Unplaced)
+        .map(|line| Problem::Unplaced(excerpt(line)))
         .collect();
     let rows = &mut scan.rows;
     if rows.len() < 2 {
@@ -346,7 +340,7 @@ fn assemble(mut scan: Scan, ctx: &Context<'_>) -> Draft {
     if ctx.inline
         && ctx.header.is_none()
         && rows.len() < 6
-        && !rows.iter().any(|r| r.marker.strong())
+        && !rows.iter().any(|r| r.marker.range || r.marker.plus)
     {
         return none(unplaced);
     }
@@ -413,7 +407,8 @@ fn assemble(mut scan: Scan, ctx: &Context<'_>) -> Draft {
     }
     let mut all = problems;
     all.extend(unplaced);
-    Draft::build(Shape::Roll, cells, header, scan.caption, score, all)
+    let lead = scan.caption.into_iter().chain(scan.unplaced).collect();
+    Draft::build(Shape::Roll, lead, cells, header, score, all)
 }
 
 pub(super) fn read(lines: &[String]) -> Draft {

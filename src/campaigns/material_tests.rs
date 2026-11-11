@@ -4894,7 +4894,7 @@ async fn material_table_prefill_reads_two_hundred_units_and_refuses_plain_above_
         !html.contains("Plain columns"),
         "plain columns is not offered above 16 units"
     );
-    // Asking for plain columns above 16 units says why there is no draft.
+    // Plain columns above 16 units is one column, one row per line, and says so.
     let seventeen: Vec<String> = (1..=17).map(|u| format!("unit={u}")).collect();
     let plain = body(
         router_get(
@@ -4908,8 +4908,14 @@ async fn material_table_prefill_reads_two_hundred_units_and_refuses_plain_above_
         .await,
     )
     .await;
-    assert!(plain.contains("More than 16 columns"), "{plain}");
-    assert_eq!(field_value(&plain, "textarea[name=cells]").trim(), "");
+    assert!(plain.contains("read as one column"), "{plain}");
+    assert_eq!(
+        field_value(&plain, "textarea[name=cells]")
+            .trim()
+            .lines()
+            .count(),
+        17
+    );
 }
 
 #[tokio::test]
@@ -5754,4 +5760,83 @@ async fn material_review_list_after_a_read_deadline_shows_counts_and_the_next_li
     // The next request is complete again.
     let html = body(router_get(&app, &auth[0], "/admin/materials/sources/1/review").await).await;
     assert!(!html.contains("Read deadline reached") && html.contains("data-review-page"));
+}
+
+#[tokio::test]
+async fn material_table_above_sixteen_units_with_no_fitting_shape_is_one_column() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let query: Vec<String> = (1..=20).map(|u| format!("unit={u}")).collect();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new?{}", query.join("&")),
+        )
+        .await,
+    )
+    .await;
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(cells.trim().lines().count(), 20, "never an empty editor");
+    assert!(cells.trim().lines().all(|l| l == "| Fixture |"));
+}
+
+fn gap_units(count: usize) -> &'static str {
+    // Unit 1: a d100 whose markers 1, 4, 8, ... leave a gap before every row; unit 3 lies inside
+    // the union of units 1 and 2.
+    let text: Vec<String> = std::iter::once("1 a".to_owned())
+        .chain((1..=count).map(|k| format!("{} r", k * 4)))
+        .collect();
+    let sql = format!(
+        "UPDATE source_units SET raw_text='{}' WHERE id=1; UPDATE source_units SET polygon='[[55,30],[58,30],[58,40],[55,40]]' WHERE id=3;",
+        text.join("'||char(10)||'")
+    );
+    Box::leak(sql.into_boxed_str())
+}
+
+#[tokio::test]
+async fn material_table_problems_are_capped_and_kept_when_a_save_is_refused() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(gap_units(25)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&unit=2&shape=roll",
+        )
+        .await,
+    )
+    .await;
+    let parsed = scraper::Html::parse_document(&html);
+    let items = scraper::Selector::parse("#table-problems li").unwrap();
+    let texts: Vec<String> = parsed
+        .select(&items)
+        .map(|li| li.text().collect())
+        .collect();
+    assert_eq!(texts.len(), 21, "{texts:?}");
+    assert_eq!(texts[0], "A value is missing before row 2.");
+    assert_eq!(texts[20], "and 5 more");
+    // A refused save (no rationale) re-renders with the same notes and the Owner's cells.
+    let mut fields = table_fields(&["1:1", "2:1"], "a | b", "");
+    fields.push(("shape".into(), "roll".into()));
+    let refused = table_post(&app, &auth[0], fields).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
+    let parsed = scraper::Html::parse_document(&html);
+    assert_eq!(parsed.select(&items).count(), 21, "{html}");
+    assert!(
+        html.contains("id=\"table-overlap\"") && html.contains("unit 3"),
+        "{html}"
+    );
+    assert!(html.contains("Roll table"), "the Read as choices stay");
+    // An unknown shape in the POST is a malformed form.
+    let mut bad = table_fields(&["1:1"], "a", "r");
+    bad.push(("shape".into(), "nope".into()));
+    assert_eq!(
+        table_post(&app, &auth[0], bad).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
 }
