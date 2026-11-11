@@ -138,6 +138,8 @@ pub(crate) struct Draft {
     pub rows: Vec<Vec<String>>,
     /// The first row of `rows` is a recognised header (`d6 Result`, a column-name line).
     pub header: bool,
+    /// Single-cell rows put in front (a caption, lines that fit no row); not counted as body.
+    pub lead: usize,
     /// 0..=100: the share of lines consumed minus the problem penalties; never an acceptance.
     pub score: u32,
     pub problems: Vec<Problem>,
@@ -149,6 +151,7 @@ impl Draft {
             shape,
             rows: Vec::new(),
             header: false,
+            lead: 0,
             score: 0,
             problems,
         }
@@ -167,6 +170,7 @@ impl Draft {
         mut problems: Vec<Problem>,
     ) -> Draft {
         let header = header && lead.is_empty();
+        let lead_rows = lead.len();
         rows.splice(0..0, lead.into_iter().map(|text| vec![text]));
         let width = rows.iter().map(Vec::len).max().unwrap_or(0);
         for row in &mut rows {
@@ -198,6 +202,7 @@ impl Draft {
             shape,
             rows,
             header,
+            lead: lead_rows,
             score: score.min(100),
             problems,
         }
@@ -436,6 +441,28 @@ fn plain(input: &ShapeInput) -> Draft {
         PLAIN_SCORE,
         Vec::new(),
     )
+}
+
+impl Draft {
+    /// The rows that carry the table's data: not the header, not the lead lines.
+    pub(crate) fn body_rows(&self) -> usize {
+        self.rows
+            .len()
+            .saturating_sub(self.lead + usize::from(self.header))
+    }
+}
+
+/// Whether a line of a unit begins a row of `shape` (the proposals trim a run to such lines).
+/// Column grid is positional and plain columns have no rows: neither starts rows by line.
+pub(crate) fn starts_row(shape: Shape, line: &str) -> bool {
+    let line = normalise(line);
+    match shape {
+        Shape::Roll => roll::starts_row(&line),
+        Shape::Progression => progression::starts_row(&line),
+        Shape::Stat => stats::starts_row(&line),
+        Shape::Label => labels::starts_row(&line),
+        Shape::Column | Shape::Plain => false,
+    }
 }
 
 /// The draft of one shape (a shape that does not fit has no rows and score 0).

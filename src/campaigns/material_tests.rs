@@ -5996,7 +5996,7 @@ async fn material_table_problems_are_capped_and_kept_when_a_save_is_refused() {
 
 /// Unit 1 and 2 as two stacked columns' worth of boxes are not needed: proposals fixtures use
 /// SQL to give units text and boxes. `ROLL_ROWS` units 1-3 are rows of one roll table.
-const PROPOSAL_ROLL: &str = "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>4; UPDATE source_units SET raw_text='1 Rat' WHERE id=1; UPDATE source_units SET raw_text='2 Crow' WHERE id=2; UPDATE source_units SET raw_text='3 Wolf' WHERE id=3; UPDATE source_units SET raw_text='4 Bear' WHERE id=4; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>4;";
+const PROPOSAL_ROLL: &str = "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<3 OR id>6; UPDATE source_units SET raw_text='1 Rat' WHERE id=3; UPDATE source_units SET raw_text='2 Crow' WHERE id=4; UPDATE source_units SET raw_text='3 Wolf' WHERE id=5; UPDATE source_units SET raw_text='4 Bear' WHERE id=6;";
 
 async fn proposals_of(
     store: &Store,
@@ -6016,7 +6016,7 @@ async fn material_table_proposals_find_a_roll_table_and_link_to_the_form() {
     let (_dir, store, auth) = table_fixture_with(PROPOSAL_ROLL).await;
     let found = proposals_of(&store, &auth[0]).await;
     assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0].units, [1, 2, 3, 4]);
+    assert_eq!(found[0].units, [3, 4, 5, 6]);
     let app = crate::auth::app(store.clone()).await.unwrap();
     let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
     let parsed = scraper::Html::parse_document(&html);
@@ -6026,11 +6026,11 @@ async fn material_table_proposals_find_a_roll_table_and_link_to_the_form() {
         .expect("proposal link");
     assert_eq!(
         link.text().collect::<String>(),
-        "Likely roll table: units 1-4"
+        "Likely roll table: units 3-6"
     );
     assert_eq!(
         link.value().attr("href"),
-        Some("/admin/materials/pages/1/tables/new?unit=1&unit=2&unit=3&unit=4&shape=roll")
+        Some("/admin/materials/pages/1/tables/new?unit=3&unit=4&unit=5&unit=6&shape=roll")
     );
 }
 
@@ -6071,7 +6071,7 @@ async fn material_table_proposals_store_nothing_and_are_memoised_per_revision() 
 async fn material_table_proposals_skip_reviewed_units() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth) = table_fixture_with(
-        "UPDATE source_units SET raw_text='1 Rat' WHERE id=1; UPDATE source_units SET raw_text='2 Crow' WHERE id=2; UPDATE source_units SET raw_text='3 Wolf' WHERE id=3; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id=2 OR id>3;",
+        "UPDATE source_units SET raw_text='1 Rat' WHERE id=3; UPDATE source_units SET raw_text='2 Crow' WHERE id=4; UPDATE source_units SET raw_text='3 Wolf' WHERE id=5; UPDATE source_units SET raw_text='4 Bear' WHERE id=6; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id=4 OR id<3 OR id>6;",
     )
     .await;
     assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
@@ -6082,16 +6082,17 @@ async fn material_table_proposals_skip_reviewed_units() {
 fn column_run_sql(foreign: &str) -> &'static str {
     use std::fmt::Write;
     let rows = [
-        (1, "1 Rat", 10),
-        (2, "2 Crow", 30),
-        (3, "3 Wolf", 50),
-        (4, "4 Bear", 70),
+        (3, "1 Rat", 100),
+        (4, "2 Crow", 130),
+        (5, "3 Wolf", 160),
+        (6, "4 Bear", 190),
     ];
-    let mut sql =
-        String::from("UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>4;");
+    let mut sql = String::from(
+        "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<3 OR id>6;",
+    );
     for (id, text, top) in rows {
         write!(sql,
-            "UPDATE source_units SET raw_text='{text}',polygon='[[10,{top}],[50,{top}],[50,{b}],[10,{b}]]' WHERE id={id};",
+            "UPDATE source_units SET raw_text='{text}',polygon='[[130,{top}],[170,{top}],[170,{b}],[130,{b}]]' WHERE id={id};",
             b = top + 10
         )
         .unwrap();
@@ -6108,7 +6109,7 @@ fn column_run_sql(foreign: &str) -> &'static str {
 async fn material_table_proposals_refuse_a_run_across_page_columns() {
     let _lock = crate::auth::test_resource_lock().await;
     // Unit 51 lies inside the run's union box, so the run would swallow it: refused.
-    let inside = "[[10,35],[50,35],[50,45],[10,45]]";
+    let inside = "[[130,145],[170,145],[170,155],[130,155]]";
     let (_dir, store, auth) = table_fixture_with(column_run_sql(inside)).await;
     assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
     // With the other unit elsewhere, the same four units are proposed.
@@ -6156,21 +6157,39 @@ async fn material_table_proposals_are_capped_and_bounded() {
         .await
         .unwrap();
     let found = proposals_of(&store, &auth[0]).await;
-    assert_eq!(found.len(), crate::sources::proposals::MAX_PROPOSALS);
+    // The store keeps all ten; a page lists at most eight.
+    assert_eq!(found.len(), 10);
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let listed = scraper::Html::parse_document(&html)
+        .select(&scraper::Selector::parse("#table-proposals a").unwrap())
+        .count();
+    assert_eq!(listed, crate::sources::proposals::MAX_PROPOSALS);
 }
 
 #[tokio::test]
 async fn material_table_proposals_use_stored_words_for_a_column_grid_without_a_worker() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth) = table_fixture_with(
-        "UPDATE source_units SET raw_text='Item Sword Axe' WHERE id=1; UPDATE source_units SET raw_text='Cost 10 8' WHERE id=2; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>2;",
+        "UPDATE source_units SET raw_text='Item Sword Axe Bow Dagger' WHERE id=1; UPDATE source_units SET raw_text='Cost 10 8 20 5' WHERE id=2; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>2;",
     )
     .await;
     // No stored words: the units are plain columns, nothing proposed (and no worker is asked for).
     assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+    let mut words = grid_words();
+    for (row, (a, b)) in [("Bow", "20"), ("Dagger", "5")].into_iter().enumerate() {
+        let top = 62.0 + 14.0 * f32::from(u8::try_from(row).unwrap());
+        for (text, x0) in [(a, 15.0_f32), (b, 70.0)] {
+            let width = 5.0 * f32::from(u8::try_from(text.len()).unwrap());
+            words.push(crate::sources::page_words::PageWord {
+                text: text.into(),
+                bounds: [x0, top, x0 + width, top + 10.0],
+            });
+        }
+    }
     store_words(
         &store,
-        crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
+        crate::sources::page_words::encode(&words, 200.0, 300.0).unwrap(),
     )
     .await;
     // Storing the words changes the memo key, so the next read sees them.
@@ -6192,4 +6211,78 @@ async fn material_table_proposals_list_only_runs_touching_the_cards_shown() {
     assert!(!first.contains("table-proposals"), "{first}");
     let later = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=50").await).await;
     assert!(later.contains("Likely roll table: unit 51"), "{later}");
+}
+
+/// SQL placing `texts` on units `first..` (consecutive ids) with boxes in one column at x
+/// `left..left+40`, 10 points apart from `top` (below the fixture's boxes of units 1 and 2).
+fn column_sql(first: i64, texts: &[&str], left: i64, top: i64) -> String {
+    use std::fmt::Write;
+    let mut sql = String::new();
+    for (i, text) in texts.iter().enumerate() {
+        let id = first + i64::try_from(i).unwrap();
+        let y = top + 10 * i64::try_from(i).unwrap();
+        write!(
+            sql,
+            "UPDATE source_units SET raw_text='{text}',polygon='[[{left},{y}],[{r},{y}],[{r},{b}],[{left},{b}]]' WHERE id={id};",
+            r = left + 40,
+            b = y + 8
+        )
+        .unwrap();
+    }
+    sql
+}
+
+const ACCEPT_OUTSIDE: &str =
+    "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<3 OR id>32;";
+
+#[tokio::test]
+async fn material_fresh_page_proposes_only_the_table_among_two_columns_of_prose() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Left column: a title, a four-row roll table, ten prose units; right column: fifteen
+    // prose units. Every unit is unreviewed.
+    let mut left = vec!["Wandering Monsters", "1 Rat", "2 Crow", "3 Wolf", "4 Bear"];
+    left.extend(["Some prose here."; 10]);
+    let mut sql = column_sql(3, &left, 100, 100);
+    sql.push_str(&column_sql(18, &["Other prose here."; 15], 150, 100));
+    sql.push_str(ACCEPT_OUTSIDE);
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [3, 4, 5, 6, 7]);
+    assert_eq!(found[0].shape, crate::sources::shapes::Shape::Roll);
+}
+
+#[tokio::test]
+async fn material_fresh_page_finds_a_table_after_prose() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let mut texts = vec!["Some prose here."; 10];
+    texts.extend(["1 Rat", "2 Crow", "3 Wolf", "4 Bear"]);
+    let mut sql = column_sql(3, &texts, 100, 100);
+    sql.push_str(ACCEPT_OUTSIDE);
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [13, 14, 15, 16]);
+}
+
+#[tokio::test]
+async fn material_fresh_page_trims_a_label_list_from_the_prose_after_it() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let mut texts = vec![
+        "Hit points: sixteen",
+        "Armor: light leather",
+        "Weapon: rusty axe",
+        "Morale: steady",
+    ];
+    texts.extend(["Some prose here."; 8]);
+    let mut sql = column_sql(3, &texts, 100, 100);
+    sql.push_str(ACCEPT_OUTSIDE);
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [3, 4, 5, 6]);
+    assert_eq!(found[0].shape, crate::sources::shapes::Shape::Label);
 }

@@ -5,24 +5,28 @@
 //! is ever started), stores nothing, and is never a decision: the Owner still reads the draft,
 //! edits it and saves it with a rationale. Pure functions plus a small memo cache.
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::materials::overlapping_parsed;
 use super::page_words::PageWord;
 use super::shapes::{self, Shape, ShapeInput};
 use super::table_words;
-use super::tables::{MAX_HTML_BYTES, MAX_TABLE_SOURCES};
+use super::tables::MAX_TABLE_SOURCES;
 
 /// A non-plain shape must score at least this much to be proposed.
 const MIN_SCORE: u32 = 80;
 /// ... and read at least this many rows.
 const MIN_ROWS: usize = 3;
-/// Proposals shown on a page.
+/// Proposals listed on a page.
 pub(crate) const MAX_PROPOSALS: usize = 8;
 /// Pages with more units than this get no proposals (the same bound as the overlap check).
 pub(super) const MAX_UNITS: usize = 2000;
 /// Page entries kept in the memo cache.
 const CACHE_ENTRIES: usize = 32;
+/// At most this many units that start no row may lie between two units that do, in one table.
+const GAP: usize = 2;
+/// A caption before a table is a single short line without sentence punctuation.
+const CAPTION_CHARS: usize = 60;
 /// Id ranges named in a label before "...".
 const LABEL_RANGES: usize = 6;
 
@@ -88,42 +92,131 @@ impl Proposal {
     }
 }
 
-/// The shape a run reads as, when it is worth proposing.
-fn read(texts: &[&str], polygons: &[&str], words: Option<&[PageWord]>) -> Option<Shape> {
-    let inside = words
-        .map(|all| table_words::words_among(all, polygons))
-        .filter(|inside| !inside.is_empty());
-    let input = ShapeInput::new(texts).with_words(inside, false);
-    let draft = shapes::best(&input)
-        .into_iter()
-        .find(|draft| !draft.rows.is_empty())?;
-    (draft.shape != Shape::Plain && draft.score >= MIN_SCORE && draft.rows.len() >= MIN_ROWS)
-        .then_some(draft.shape)
+/// The trimmed nonempty lines of a unit's text.
+fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty())
 }
 
-/// Proposals over the page's units in reading order: each maximal run of consecutive unreviewed
-/// extracted units (split at 200 units), and, when a run as a whole is no table, each of its
-/// units alone (a merged paragraph). A run whose union box covers an unselected unit is refused,
-/// so a run never crosses page columns. At most 64 KiB of text is read per page, and at most
-/// [`MAX_PROPOSALS`] are returned.
+/// A draft worth proposing: a non-plain shape with a high score and enough body rows (not
+/// counting a header or lead lines).
+fn worth(draft: &shapes::Draft) -> bool {
+    draft.shape != Shape::Plain
+        && draft.score >= MIN_SCORE
+        && draft.body_rows() >= MIN_ROWS
+        && !draft.rows.is_empty()
+}
+
+/// A candidate proposal: the units `[start, end)` of the page and the shape that reads them.
+struct Found {
+    start: usize,
+    end: usize,
+    shape: Shape,
+    score: u32,
+}
+
+fn texts_of(group: &[Candidate]) -> Vec<&str> {
+    group.iter().filter_map(|u| u.text.as_deref()).collect()
+}
+
+/// Whether unit `i` starts below-and-beside or above the previous one: a layout break (another
+/// page column, a box that does not line up). Units without a usable box never break.
+fn layout_break(bounds: &[Option<[f64; 4]>], i: usize) -> bool {
+    match (bounds[i - 1], bounds[i]) {
+        (Some(previous), Some(this)) => {
+            this[0] >= previous[2] || this[2] <= previous[0] || this[1] < previous[1]
+        }
+        _ => false,
+    }
+}
+
+fn caption(line: &str) -> bool {
+    line.chars().count() <= CAPTION_CHARS && !line.ends_with(['.', '!', '?', ';', ','])
+}
+
+/// Text-shape candidates over one layout run `[from, to)`: for each shape, the clusters of
+/// units that start rows of that shape (at most [`GAP`] other units between two starters), each
+/// trimmed from the first starting unit (with a short single-line caption before it) to the
+/// last one, so prose before or after a table is left out.
+fn clusters(units: &[Candidate], from: usize, to: usize, out: &mut Vec<Found>) {
+    for shape in [Shape::Roll, Shape::Progression, Shape::Stat, Shape::Label] {
+        let starts: Vec<bool> = units[from..to]
+            .iter()
+            .map(|u| {
+                u.text
+                    .as_deref()
+                    .is_some_and(|t| lines(t).any(|line| shapes::starts_row(shape, line)))
+            })
+            .collect();
+        let mut i = 0;
+        while i < starts.len() {
+            if !starts[i] {
+                i += 1;
+                continue;
+            }
+            let first = i;
+            let mut last = i;
+            let mut j = i + 1;
+            while j < starts.len() && j - last <= GAP + 1 {
+                if starts[j] {
+                    last = j;
+                }
+                j += 1;
+            }
+            i = last + 1;
+            let mut start = first;
+            if start > 0
+                && !starts[start - 1]
+                && units[from + start - 1].text.as_deref().is_some_and(|t| {
+                    let mut it = lines(t);
+                    it.next().is_some_and(caption) && it.next().is_none()
+                })
+            {
+                start -= 1;
+            }
+            let group = &units[from + start..=from + last];
+            let input = ShapeInput::new(&texts_of(group));
+            let draft = shapes::read(&input, shape);
+            if worth(&draft) {
+                out.push(Found {
+                    start: from + start,
+                    end: from + last + 1,
+                    shape,
+                    score: draft.score,
+                });
+            }
+        }
+    }
+}
+
+/// Proposals over the page's units in reading order. Per maximal run of consecutive unreviewed
+/// extracted units with text:
+/// - the text shapes read clusters of units that start rows, within runs split at layout
+///   breaks (another page column, a box that starts above the previous one), trimmed to the
+///   recognised rows;
+/// - Column grid reads the whole run (split at 200 units) from the stored words, since a
+///   table's columns are units side by side;
+/// - each unit alone is read by every shape (a table merged into one paragraph).
+///
+/// Candidates are ranked by score and kept when they do not overlap a better one and their
+/// union box covers no unselected unit (a run never swallows another column's units). The text
+/// read is bounded by the caller at 64 KiB per page, so the work is linear in it. The result
+/// is in reading order and uncapped; the caller takes what it shows.
 pub(super) fn propose(units: &[Candidate], words: Option<&[PageWord]>) -> Vec<Proposal> {
     if units.len() > MAX_UNITS {
         return Vec::new();
     }
+    let bounds: Vec<Option<[f64; 4]>> = units
+        .iter()
+        .map(|u| super::materials::polygon_bounds(&u.polygon))
+        .collect();
     let boxes: Vec<(i64, Option<[f64; 4]>, bool)> = units
         .iter()
-        .map(|u| {
-            (
-                u.id,
-                super::materials::polygon_bounds(&u.polygon),
-                u.rejected,
-            )
-        })
+        .zip(&bounds)
+        .map(|(u, b)| (u.id, *b, u.rejected))
         .collect();
-    let mut out = Vec::new();
-    let mut budget = MAX_HTML_BYTES;
+    let mut found: Vec<Found> = Vec::new();
     let mut start = 0;
-    while start < units.len() && out.len() < MAX_PROPOSALS {
+    while start < units.len() {
         if units[start].text.is_none() {
             start += 1;
             continue;
@@ -132,35 +225,82 @@ pub(super) fn propose(units: &[Candidate], words: Option<&[PageWord]>) -> Vec<Pr
         while end < units.len() && end - start < MAX_TABLE_SOURCES && units[end].text.is_some() {
             end += 1;
         }
-        let run = &units[start..end];
-        let mut try_run = |group: &[Candidate]| -> Option<Proposal> {
-            let texts: Vec<&str> = group.iter().filter_map(|u| u.text.as_deref()).collect();
-            let bytes: usize = texts.iter().map(|t| t.len()).sum();
-            if bytes > budget {
-                return None;
+        // Text shapes, per layout run.
+        let mut from = start;
+        for i in start + 1..=end {
+            if i == end || layout_break(&bounds, i) {
+                clusters(units, from, i, &mut found);
+                from = i;
             }
-            budget -= bytes;
+        }
+        // Column grid over the whole run, from stored words.
+        if let Some(all) = words {
+            let group = &units[start..end];
             let polygons: Vec<&str> = group.iter().map(|u| u.polygon.as_str()).collect();
-            let shape = read(&texts, &polygons, words)?;
-            let ids: Vec<i64> = group.iter().map(|u| u.id).collect();
-            let selected: BTreeSet<i64> = ids.iter().copied().collect();
-            overlapping_parsed(&boxes, &selected)
-                .is_empty()
-                .then_some(Proposal { units: ids, shape })
-        };
-        if let Some(proposal) = try_run(run) {
-            out.push(proposal);
-        } else if run.len() > 1 {
-            for unit in run {
-                if out.len() == MAX_PROPOSALS {
-                    break;
+            let inside = table_words::words_among(all, &polygons);
+            if !inside.is_empty() {
+                let input = ShapeInput::new(&texts_of(group)).with_words(Some(inside), false);
+                let draft = shapes::read(&input, Shape::Column);
+                if worth(&draft) {
+                    found.push(Found {
+                        start,
+                        end,
+                        shape: Shape::Column,
+                        score: draft.score,
+                    });
                 }
-                out.extend(try_run(std::slice::from_ref(unit)));
+            }
+        }
+        // Each unit alone (a table merged into one paragraph).
+        for (offset, unit) in units[start..end].iter().enumerate() {
+            let input = ShapeInput::new(&texts_of(std::slice::from_ref(unit)));
+            let drafts = shapes::best(&input);
+            if let Some(draft) = drafts.iter().find(|d| !d.rows.is_empty())
+                && worth(draft)
+            {
+                found.push(Found {
+                    start: start + offset,
+                    end: start + offset + 1,
+                    shape: draft.shape,
+                    score: draft.score,
+                });
             }
         }
         start = end;
     }
-    out
+    // Best first (ties: longer, then earlier, then the fixed shape order), keeping those that
+    // do not overlap a kept one and cover no unselected unit.
+    found.sort_by_key(|c| {
+        (
+            std::cmp::Reverse(c.score),
+            std::cmp::Reverse(c.end - c.start),
+            c.start,
+            Shape::ALL.iter().position(|s| *s == c.shape),
+        )
+    });
+    let mut kept: Vec<Found> = Vec::new();
+    for candidate in found {
+        if kept
+            .iter()
+            .any(|k| candidate.start < k.end && k.start < candidate.end)
+        {
+            continue;
+        }
+        let ids: BTreeSet<i64> = units[candidate.start..candidate.end]
+            .iter()
+            .map(|u| u.id)
+            .collect();
+        if overlapping_parsed(&boxes, &ids).is_empty() {
+            kept.push(candidate);
+        }
+    }
+    kept.sort_by_key(|c| c.start);
+    kept.into_iter()
+        .map(|c| Proposal {
+            units: units[c.start..c.end].iter().map(|u| u.id).collect(),
+            shape: c.shape,
+        })
+        .collect()
 }
 
 /// Page id, page revision and stored-words size.
@@ -177,7 +317,7 @@ pub(crate) struct ProposalCache {
 
 impl ProposalCache {
     pub(super) fn get(&self, key: CacheKey) -> Option<Arc<Vec<Proposal>>> {
-        let entries = self.entries.lock().ok()?;
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries
             .iter()
             .find(|(k, _)| *k == key)
@@ -189,14 +329,14 @@ impl ProposalCache {
         #[cfg(test)]
         self.computed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Ok(mut entries) = self.entries.lock() {
-            // A new revision of a page replaces the old one.
-            entries.retain(|(k, _)| k.0 != key.0);
-            if entries.len() >= CACHE_ENTRIES {
-                entries.remove(0);
-            }
-            entries.push((key, Arc::clone(&value)));
+        // A poisoned lock only means another request panicked; the entries stay usable.
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        // A new revision of a page replaces the old one.
+        entries.retain(|(k, _)| k.0 != key.0);
+        if entries.len() >= CACHE_ENTRIES {
+            entries.remove(0);
         }
+        entries.push((key, Arc::clone(&value)));
         value
     }
 
@@ -258,6 +398,47 @@ mod tests {
                 .iter()
                 .all(|p| p.units.windows(2).all(|w| w[1] == w[0] + 1))
         );
+    }
+
+    #[test]
+    fn the_minimum_counts_body_rows_not_a_caption() {
+        let units = [
+            unit(1, "[]", "Bestiary"),
+            unit(2, "[]", "Hit points: sixteen"),
+            unit(3, "[]", "Armor: light leather"),
+        ];
+        // Three rows with the caption, two body rows: not enough.
+        assert_eq!(propose(&units, None), Vec::new());
+        let more = [
+            unit(1, "[]", "Bestiary"),
+            unit(2, "[]", "Hit points: sixteen"),
+            unit(3, "[]", "Armor: light leather"),
+            unit(4, "[]", "Weapon: rusty axe"),
+        ];
+        let found = propose(&more, None);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].units, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_table_is_trimmed_from_the_prose_around_it() {
+        let mut units = vec![
+            unit(1, "[]", "Some prose here."),
+            unit(2, "[]", "More prose."),
+        ];
+        for (i, row) in ["1 Rat", "2 Crow", "3 Wolf", "4 Bear"]
+            .into_iter()
+            .enumerate()
+        {
+            units.push(unit(3 + i64::try_from(i).unwrap(), "[]", row));
+        }
+        units.push(unit(7, "[]", "Trailing prose."));
+        units.push(unit(8, "[]", "More trailing prose."));
+        units.push(unit(9, "[]", "And more."));
+        units.push(unit(10, "[]", "Still more."));
+        let found = propose(&units, None);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].units, [3, 4, 5, 6]);
     }
 
     #[test]

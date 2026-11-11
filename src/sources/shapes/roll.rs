@@ -161,6 +161,11 @@ fn parse_header(line: &str) -> Option<(Die, Vec<String>)> {
     Some((die, cells))
 }
 
+/// Whether a (normalised) line begins a row or is the die header.
+pub(super) fn starts_row(line: &str) -> bool {
+    parse_marker(line).is_some() || parse_header(line).is_some()
+}
+
 /// The next expected value after `hi`.
 fn next_after(hi: u32, d66: bool) -> u32 {
     if d66 && hi % 10 == 6 {

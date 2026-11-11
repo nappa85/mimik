@@ -39,6 +39,11 @@ fn leading(line: &str) -> Option<(u32, String, &str)> {
     None
 }
 
+/// Whether a (normalised) line begins a level row.
+pub(super) fn starts_row(line: &str) -> bool {
+    leading(line).is_some()
+}
+
 /// Split on runs of two or more spaces or tabs; without any, on single spaces between numeric
 /// tokens (`+2`, `1d8`, a dash), keeping a run of words together as one cell.
 fn split_cells(text: &str) -> Vec<String> {

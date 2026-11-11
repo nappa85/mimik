@@ -34,6 +34,11 @@ fn split_label(line: &str) -> Option<(&str, &str)> {
         .then_some((label, value))
 }
 
+/// Whether a (normalised) line is a label and a value.
+pub(super) fn starts_row(line: &str) -> bool {
+    split_label(line).is_some()
+}
+
 pub(super) fn read(lines: &[String]) -> Draft {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut caption = None;

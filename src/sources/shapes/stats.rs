@@ -68,6 +68,11 @@ fn colon_pairs(line: &str) -> Option<Pairs> {
     unique(&pairs).then_some(pairs)
 }
 
+/// Whether a (normalised) line is a line of pairs.
+pub(super) fn starts_row(line: &str) -> bool {
+    spaced_pairs(line).is_some() || colon_pairs(line).is_some()
+}
+
 /// Either a line of pairs or text that is no stat line (kept in the cells where it stood).
 enum Entry {
     Stats(Pairs),

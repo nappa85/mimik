@@ -530,18 +530,28 @@ async fn page(
         )
         .await
         .map_err(|e| error(&e))?;
-    // Proposals are a hint: a failed read shows none and never fails the page. Only those that
-    // touch the cards shown are listed.
-    let proposals = state
+    // Proposals are a hint: a failed read shows none and never fails the page. The first few
+    // that touch the cards shown are listed.
+    let proposals = match state
         .sessions
         .store
         .material_table_proposals(auth.clone(), id)
         .await
-        .unwrap_or_default();
+    {
+        Ok(found) => found,
+        Err(
+            AppError::Invalid(crate::sources::review::READ_TIMEOUT) | AppError::AuthStorageBusy,
+        ) => std::sync::Arc::default(),
+        Err(e) => {
+            eprintln!("Mimik: table proposals for page {id} failed: {e}");
+            std::sync::Arc::default()
+        }
+    };
     let shown: Vec<i64> = data.page.units.iter().map(|u| u.id).collect();
     let proposals: Vec<(String, String)> = proposals
         .iter()
         .filter(|p| p.units.iter().any(|u| shown.contains(u)))
+        .take(crate::sources::proposals::MAX_PROPOSALS)
         .map(|p| (p.label(), p.link(id)))
         .collect();
     let mut editor = Editor::new(data, screen, csrf, c);
