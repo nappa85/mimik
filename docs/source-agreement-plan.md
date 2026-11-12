@@ -153,16 +153,106 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
      that differ are counted too. Each number is reported with its count; a zero on a few
      hundred units from one manual is weak evidence, and the report says so.
    - **Yield:** reported, no bar: the share of unreviewed prose units that agree, per manual
-     and kind. The Owner decides from it whether slices 3 and 4 go ahead and revisits D1.
+     and kind. The Owner decides from it whether slices 3b and 4 go ahead (3a, the layout, does not depend on it) and revisits D1.
    Conclusions (aggregates only) go to `docs/results.md`.
-3. **Review screen.** On the page: a summary ("41 units match, 6 differ, 3 have no second
-   reading, 4 are excluded, 12 text-layer words are in no unit"), each card's verdict or
-   exclusion reason, each `Differs` card showing the difference (unit text against "PDF text
-   layer"), and a filter "only units that need attention" that hides agreeing and reviewed
-   cards. Computed in `spawn_blocking` per page view like the proposals and memoised with them
-   (page revision, words size, rule version); a page over the 2,000-unit bound shows no
-   agreement and says so.
-4. **Batch accept.** A form under the page image, "Accept the N matching units", listing their
+3. **Review screen** (owner 2026-11-12: the "work queue" layout), in two reviewed changes. Every
+   decision stays an explicit owner action through the existing POST routes; everything works
+   without JavaScript (script only enhances); the existing bounds (50-card windows and their
+   position cursors, the read deadline and its reduced screen, omitted forms past the text
+   budget, the 2 MB response budget) keep their behaviour and messages. The owner decision
+   supersedes the decided single decision dropdown: the tests asserting one
+   `select[name=state]` per card, its pre-selected option and the script that hides fields by
+   the dropdown (`material_tests.rs`, `source-review.js`) are replaced by the three-form tests
+   below; every other test keeps its intent, and the markers the budget tests split on
+   (`<section id="review-list"`, `<section class="panel" id="add-text"`) are kept.
+
+   **3a. Layout** (independent of the agreement; may land first).
+   - **Header:** title and printed label, a progress line ("12 of 31 units reviewed", page
+     complete or not; omitted in the reduced screen), previous/next page and the existing
+     next-unit links on one line.
+   - **Compact cards:** one header line (unit number, kind, state, a short "Table" tick whose
+     explanation appears once in the table toolbar); then the extracted text; open suggestions
+     (advice) stay visible. Three forms, each with its own CSRF, revision and a fixed hidden
+     `state`: "Accept as extracted" (a button; it sends empty `correction` and `rationale`, so
+     `Draft` deserialises unchanged), and "Correct…" and "Reject…" as `<details>` holding their
+     forms. The Correct form is prefilled with the stored correction for a corrected unit and
+     with `raw_text` otherwise; the prefill's escaped bytes are reserved in the card budget, and
+     past it only the Correct form is omitted (Accept and Reject stay, with the existing "open
+     the full decision form" link). A correction identical to the extracted text is refused
+     with "Nothing was changed: use Accept". Labels name the decision and the unit (two
+     rationale fields per card).
+   - **Error card:** after a refused save all three forms of that card carry the submitted
+     revision (so a stale page cannot be decided without reloading, as today), only the
+     submitted decision's disclosure is opened and refilled with `aria-invalid` on its fields,
+     and an invalid or forged `state` shows its error at card level, outside any disclosure.
+   - **Details** disclosure per card: the crop image (lazy; the image retry observer sees it
+     once opened), extraction identifier and coordinates, stored revision, lookup text. The
+     "not evidence yet" lookup line for unreviewed units is dropped.
+   - **Page tasks** below the cards, each a `<details>`: page notes and missing-text
+     suggestions, add missing text, primary reading, page completeness (open when every unit is
+     reviewed), lookup text of the page, review history. "Add missing text" stays inside the
+     `[data-region-editor]` root. The region editor finds its selection checkbox through a
+     scoped `[data-region-selected]` hook instead of the first checkbox in the root (today it
+     picks the first card's table tick, which hides a drawn box): a regression test on the
+     script text and the browser check cover it.
+   - **Keyboard:** j/k still move between cards; `a` focuses the current card's Accept button
+     (never submits); suggestion accept forms keep their rationale field reachable by Tab; the
+     help text says so.
+   - In the reduced screen "only the first unit decision form" means the first card's three
+     forms.
+   Tests: each form posts without script (hidden fields, CSRF), the error card's revision on all
+   three forms, the forged-state message at card level, the refused no-change correction, the
+   prefill budget and omission, the scoped region hook, the reduced screen, the keyboard help.
+
+   **3b. Agreement on the screen** (after slice 2; built on 3a).
+   - **Agreement bar** at the top of the review column: the summary ("18 match, 6 differ, 3
+     have no second reading, 4 are excluded, 9 text-layer words are in no unit"), the comparison
+     kind label, or why there is none (no words, not independent, over the bound, timed out);
+     slice 4's batch form sits here.
+   - **Filter tabs**, GET parameter `show` = `attention` (unreviewed units that do not agree:
+     differs, no words, excluded), `matching` (unreviewed units that agree), `reviewed`, `all`;
+     an unknown value is treated as the default. The default is `attention` only when the batch
+     form is offered (an independent page with a result, from slice 4 on), else `all`; a request
+     with `units=` but no `show` is `all`. Each tab shows its count (omitted in the reduced
+     screen). When no agreement result exists, `attention` and `matching` fall back to `all`
+     with a notice.
+   - **Filtered window:** the agreement result is computed before the card window is read, and
+     the window query keeps its position keyset with the tab's unit ids added
+     (`id IN (SELECT value FROM json_each(?))`), so cursors still page through the filtered list.
+   - **Direct links:** a server-visible `unit=N` parameter is emitted by every unit-link builder
+     (the source "units to review" list and its next link, advice back links, suggestion target
+     and "back to unit" links, the overlay's unit and region links, "read this unit first" and
+     "open the full decision form"); when `unit` or a save's `to` names a unit the tab would
+     hide, the screen shows `all` around it. `show` travels on the tab, window and
+     unit-decision links and through the decision POST (a `show` field added to `Draft` and
+     `PageCursor`, both `deny_unknown_fields`); the notes, history, completeness, owner-unit,
+     primary, table and suggestion routes fall back to the default.
+   - **Next unit per tab:** after a decision the redirect goes to the next unit of the same tab
+     (the POST handler reads the memoised result, recomputing on a miss), and the header's next
+     link is per tab, so the queue survives a save.
+   - **Matching tab:** a compact list (unit number, kind, first line, link to its card with
+     `unit=`) under the batch form, only when the batch form is offered; otherwise full cards.
+     The rows carry no table tick and no `data-unit` (j/k skip them); the list says to use `all`
+     to build a table from matching units.
+   - **Cards:** the verdict or exclusion reason in the header line; for `Differs` the bounded,
+     escaped difference (unit text against "PDF text layer") or "a text-layer word next to this
+     unit is in no unit".
+   - **Page image:** orphan words outlined in their own style with a legend entry, at most 2,000
+     drawn with "N not drawn" past that.
+   - **Memo:** only the exclusion-free pass (words, tokens, verdicts before step 2's caller
+     exclusions) is memoised with the proposals (page revision, words size, rule version); the
+     open suggestions and the source's exclusion boxes (with their `exclusion_revision`) are read
+     and applied on every view, so dismissing a suggestion or confirming a box shows at once.
+     Slice 4's handler never uses the memo.
+   - **Error render:** a refused save renders with `show=all`, so the draft binding and its
+     link stay valid; its agreement bar is computed like any view.
+   Tests: tab membership and counts, the default rule (independent with batch vs other kinds),
+   an invalid `show`, the filtered window and its cursors, `unit=` and `to` overriding a hiding
+   tab, `show` round-tripping through a save to the next unit of the tab, the escaped and
+   bounded difference, the orphan overlay bound, a same-layer page with full cards in
+   `matching`, the memo seeing a dismissed suggestion and a confirmed box at once.
+   An owner browser check closes each of 3a and 3b.
+4. **Batch accept.** A form in the agreement bar, "Accept the N matching units", listing their
    numbers, with the D2 rationale. It is offered only for the kinds D1 allows. The POST carries
    the page id and revision, the word row's size, and the unit ids with their revisions (at
    most 1,024, the atomic bound; a larger set is accepted in parts). The handler recomputes the
