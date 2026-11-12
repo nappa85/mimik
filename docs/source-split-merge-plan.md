@@ -33,53 +33,22 @@ drafts never decide anything (SRC-6).
 - Owner units enter `unreviewed` at revision 1 (trigger `source_unit_origin_insert`); a decision
   is a separate review event. Events of one operation must be consecutive with one actor and
   rationale (024); nothing limits owner units or corrections per operation.
-- Reading order (`ORDERED_UNITS`, one `row_number()` over a per-row key) places a
-  merge-suggestion owner unit by the smallest target unit id; every other owner unit, owner tables
-  included, sorts to the end of the page.
+- Reading order (`ORDERED_UNITS`, `unit_sort_key!`) places owner tables at their first unit and
+  merge-suggestion units at their first target (below).
 
 ## Design
 
-### Schema (migration 030) and reading order
+### Reading order (done, migration 030)
 
-`source_owner_replacements(unit_id PRIMARY KEY → source_units, operation_id, kind IN
-('table','merge','split'), anchor_unit_id → source_units, part INTEGER ≥ 1, order_key TEXT)`,
-`UNIQUE(operation_id, part)`, append-only (update and delete triggers abort). The insert
-trigger checks:
+`source_owner_replacements` links each table, merge or split unit to its anchor (the first
+replaced unit in reading order, or the split unit) with a stored TEXT `order_key`: the anchor's
+key plus `'.'||printf('%04d', part)`. `record_replacement` writes it (kind `merge` with part 1,
+`split` with parts 1..n) after the owner unit's `corrected` event and the anchor's rejection in
+the same operation; `first_in_reading_order` gives the merge anchor. The trigger refuses
+anything else. See `docs/sources-and-retrieval.md` for the order.
 
-- the unit is an owner unit on the anchor's page and is not the anchor;
-- the operation has a `rejected` event for the anchor;
-- `table` only for a `Table` unit and with `part = 1`; `merge` only for `Text` with `part = 1`;
-  `split` only for `Text`;
-- for `merge` and `split`, a `corrected` event on the unit with this operation id and
-  `previous_revision = 1` (so an unrelated owner unit cannot be linked to move it);
-- `order_key` equals the key computed from the anchor (below).
-
-**Order key**, stored at write time so `ORDERED_UNITS` needs no recursion. Every unit's sort key
-is TEXT in every branch (SQLite sorts all integers before all text, so mixing them would put
-integer-keyed units first):
-
-- an extracted unit: `printf('%020d', id)`;
-- an owner unit with a replacement row: its `order_key`;
-- a merge-suggestion owner unit: `printf('%020d', min target id)` (today's rule, as text);
-- any other owner unit (missing text, `add-owner`): `'~'`, after every digit key.
-
-A replacement row's `order_key` is its anchor's sort key (as above) followed by
-`'.' || printf('%04d', part)`; when the anchor's key is `'~'` the row stores NULL and the unit
-sorts at the end. The trigger recomputes the key and compares with `IS`. The anchor is the
-first replaced unit **in reading order** for table and merge (computed in the transaction, not
-the submitted order; `add_owner_table` changes from `events[0]` to that), the split unit for
-split. `ORDERED_UNITS` orders by that key, then origin and id as now. Owner tables write a
-`table` row as well as their `source_owner_tables` link, which stays with its consumers
-unchanged; the migration backfills `table` rows for existing tables in `unit_id` order (so a
-table built from an earlier table finds that table's row), anchored at the batch's first
-rejection's unit (submitted order; acceptable for pre-release data).
-
-After a merge, split or table, later units' positions shift: `?units=` cursors opened earlier,
-overlay cursors and table proposal runs change, like after any reordering; each read recomputes
-them. `docs/sources-and-retrieval.md` (owner units last, merge units at first target) is updated.
-
-The source-limits plan's migrations 030 and 031 become 031 and 032, including its pre-step
-condition ("version >= 3 and < 31, just before 031" becomes "< 32 … 032").
+After a merge or split, later units' positions shift: `?units=` cursors opened earlier, overlay
+cursors and table proposal runs change, like after any reordering; each read recomputes them.
 
 ### Shared rules for both writes
 
@@ -154,17 +123,6 @@ condition ("version >= 3 and < 31, just before 031" becomes "< 32 … 032").
 
 ## Slices
 
-1. **Migration 030 and ordering.** Replacement table, triggers, backfill, `ORDERED_UNITS`, owner
-   tables writing their row, test schema rewinds (`documents.rs`, `material_tests.rs`,
-   `upload_tests.rs`), `agreement_measure` run against the new schema. Tests: each trigger
-   refusal (wrong kind, foreign page, unit equal to anchor, no rejection of the anchor, no
-   `corrected` event in the operation, duplicate part, wrong order key, update, delete);
-   ordering of table, merge and split units at their anchors, including a split of a split part,
-   a merge of parts of two different splits, a table from split parts, a split of a
-   merge-suggestion unit (inline) and of a missing-text unit (end); one page holding extracted
-   units, a merge-suggestion unit, a missing-text unit and a split, checked in full order;
-   merge-suggestion units unchanged; a table anchored at its first unit in reading order when
-   submitted out of order; backfilled tables in order.
 2. **Merge.** Form, route rename, save, buttons, tick label, history line, redirect. Tests: happy
    path (events, operation, states, union area, order, history), stale page or unit revision, a
    rejected or foreign unit, one unit, 201 units, text over the bounds, prefill over 64 KiB, a
@@ -178,7 +136,7 @@ condition ("version >= 3 and < 31, just before 031" becomes "< 32 … 032").
    page or empty refused, an original `---` line warned, CRLF markers, empty parts, 21 parts, a
    part over 20,000 characters, a preview whose revisions went stale before saving, history
    line.
-4. **Docs.** `docs/sources-and-retrieval.md` (ordering, merge, split), SRC-22 in
+4. **Docs.** `docs/sources-and-retrieval.md` (merge, split), SRC-22 in
    `docs/decisions.md`, limitations (bands are approximate when the words path does not apply; a
    part boundary mid-line shares the line; a merge across columns covers neighbours' words),
    owner browser check of one merge and one split.
