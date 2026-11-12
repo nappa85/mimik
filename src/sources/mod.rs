@@ -1,6 +1,8 @@
 //! Local, source-bound review evidence. Models cannot approve these records.
 #[expect(dead_code, reason = "used by the review screen in a later slice")]
 pub(crate) mod agreement;
+#[cfg(test)]
+mod agreement_measure;
 pub(crate) mod documents;
 mod import;
 #[cfg(target_os = "linux")]

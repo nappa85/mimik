@@ -5,6 +5,34 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Agreement rule on the owner's IT source (agreement-v1, slice 2, 2026-11-12)
+
+Ignored test `sources::agreement_measure` (release build) on a read-only copy of the owner's
+database: one source, MÖRK BORG IT pages 22–39 (18 pages, all with stored words), extracted by
+Marker 2.0.0 with forced OCR, so the comparison is independent. Units: 74 accepted, 9 corrected,
+9 rejected and 83 unreviewed extracted; 7 owner units. No open suggestions, no exclusion boxes.
+
+- **Safety bar (held, weak evidence).** Every extracted unit re-read as unreviewed with its
+  original text (an upper bound: no proposal, shape or suggestion exclusions): 0 of the 9
+  corrected units agree (5 differ, 2 had no text, 2 share a word with a neighbour). Of the 9
+  rejected, 4 agree; 6 rejections came from building owner tables (text correct, re-shaped) and
+  3 of those are among the 4. Of the 74 accepted unchanged, 48 agree, 18 differ, 8 are excluded;
+  the 18 are not yet examined (the review screen of slice 3 shows them). Nine corrections from
+  one manual is a small denominator: a zero here does not establish the rule.
+- **Yield.** Of the 83 unreviewed extracted units as they stand: 49 agree (59%), 19 differ (one
+  of them only by an orphan word beside it), 6 are in a table proposal, 8 share a word with a
+  neighbour, 1 has no text. Section headers: 5 of 7 compared agree; body text 44 of 61.
+- **Orphan words.** 104 text-layer words in no unit on 17 of 18 pages (missed text, page
+  furniture or art lettering; not broken down).
+- **Raised text proxy.** In agreeing units, 12 of 1,174 words are separate words under 0.7 of
+  the unit's median height (10 units); a raised digit merged into one word is not visible to
+  this count.
+- **Cost.** Slowest page: proposals 2.6 ms, shape scoring 0.35 ms, each evaluation 0.56 ms,
+  decode 0.08 ms.
+
+Same-layer pages were not measured (no such source in the database), so D1 stays as decided
+(independent readings only).
+
 ## Synthetic PDF worker corpus and memory (2026-10-31)
 
 The generated set contains 24 hostile and six valid difficult cases. Each declares an

@@ -393,7 +393,7 @@ fn strip_emphasis(tokens: &mut [String]) {
 
 /// The unit's tokens and how many list markers were removed: html2text's own markup removed
 /// on the unit side only, NFC, folds, split.
-fn unit_tokens(text: &str) -> (Vec<String>, usize) {
+pub(super) fn unit_tokens(text: &str) -> (Vec<String>, usize) {
     let mut markers = 0;
     let lines: Vec<&str> = text
         .lines()
