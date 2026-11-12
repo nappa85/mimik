@@ -10,6 +10,11 @@ use std::io::{BufReader, Read, Write};
 pub const HEADER_LIMIT: usize = 4096;
 pub const IMAGE_LIMIT: usize = 12 * 1024 * 1024;
 pub const TEXT_LIMIT: usize = 8 * 1024 * 1024;
+/// One page's words frame (JSON), like the text frame's bound.
+pub const WORDS_LIMIT: usize = 8 * 1024 * 1024;
+/// Words per page and bytes per word, shared with the stored encoding.
+pub const MAX_WORDS: usize = 20_000;
+pub const MAX_WORD_BYTES: usize = 256;
 pub const INSPECT_LIMIT: usize = 9 * 1024 * 1024;
 const SMALL_LIMIT: usize = 4096;
 // Even JSON's worst-case six-byte escapes fit a complete 4 KiB stats frame.
@@ -20,6 +25,7 @@ pub(super) const FONT_LIMIT: usize = 8;
 pub enum Operation {
     Inspect,
     Render,
+    Words,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,6 +71,20 @@ pub struct TextLine {
     pub text: String,
     #[serde(rename = "box")]
     pub bounds: [f64; 4],
+}
+
+/// A word of the corrected page text with its box, in the same page space as [`TextLine`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Word {
+    #[serde(deserialize_with = "word_text")]
+    pub text: String,
+    #[serde(rename = "box")]
+    pub bounds: [f64; 4],
+}
+
+fn word_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    bounded_string::<D, MAX_WORD_BYTES>(d)
 }
 
 fn line_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -148,6 +168,7 @@ pub struct Counts {
     pub image: u32,
     pub stats: u32,
     pub text: u32,
+    pub words: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -180,6 +201,10 @@ enum Header {
         n: u32,
         length: usize,
     },
+    Words {
+        n: u32,
+        length: usize,
+    },
     Done {
         length: usize,
     },
@@ -195,6 +220,7 @@ impl Header {
             | Self::Image { length, .. }
             | Self::Stats { length }
             | Self::Text { length, .. }
+            | Self::Words { length, .. }
             | Self::Done { length }
             | Self::Error { length } => length,
         }
@@ -203,6 +229,7 @@ impl Header {
         match self {
             Self::Image { .. } => IMAGE_LIMIT,
             Self::Text { .. } => TEXT_LIMIT,
+            Self::Words { .. } => WORDS_LIMIT,
             _ => SMALL_LIMIT,
         }
     }
@@ -212,6 +239,13 @@ impl Header {
 pub struct Inspection {
     pub document: Document,
     pub pages: Vec<Page>,
+}
+
+/// The validated words of one page.
+#[derive(Debug)]
+pub struct PageWords {
+    pub n: u32,
+    pub words: Vec<Word>,
 }
 
 #[derive(Debug)]
@@ -296,6 +330,29 @@ pub(crate) fn validate_lines(lines: &[TextLine], page: &Page) -> Result<(), Erro
     Ok(())
 }
 
+pub(crate) fn validate_words(words: &[Word], page: &Page) -> Result<(), Error> {
+    if words.len() > MAX_WORDS {
+        return Err(Error::TooLarge);
+    }
+    for word in words {
+        let b = word.bounds;
+        if word.text.is_empty()
+            || word.text.len() > MAX_WORD_BYTES
+            || word.text.chars().any(char::is_control)
+            || b.iter().any(|v| !v.is_finite())
+            || b[0] < 0.0
+            || b[1] < 0.0
+            || b[2] > page.width
+            || b[3] > page.height
+            || b[0] >= b[2]
+            || b[1] >= b[3]
+        {
+            return Err(Error::Unreadable);
+        }
+    }
+    Ok(())
+}
+
 fn validate_png(bytes: &[u8], page: &Page, dimensions: (u32, u32)) -> Result<(), Error> {
     let actual = super::super::import::validate_png(bytes, page.width, page.height, true)
         .map_err(|_| Error::Unreadable)?;
@@ -309,6 +366,12 @@ fn validate_png(bytes: &[u8], page: &Page, dimensions: (u32, u32)) -> Result<(),
 #[must_use]
 pub fn render_budget(pages: usize) -> usize {
     (IMAGE_LIMIT + TEXT_LIMIT + 16 * 1024) * pages + SMALL_LIMIT
+}
+
+/// Wire byte budget of a words run, including all headers and newlines.
+#[must_use]
+pub fn words_budget(pages: usize) -> usize {
+    (WORDS_LIMIT + 16 * 1024) * pages + SMALL_LIMIT
 }
 
 struct Frames<R> {
@@ -547,6 +610,81 @@ impl<R: Read> RenderReader<R> {
     }
 }
 
+/// Parent reader for a words run: one validated frame per requested page, then `done`.
+/// Discard the reader after any error.
+pub struct WordsReader<R> {
+    frames: Frames<BufReader<R>>,
+    pages: Vec<Page>,
+    index: usize,
+    failed: bool,
+}
+impl<R: Read> WordsReader<R> {
+    /// # Errors
+    /// Refuses empty, oversized or duplicate page requests and invalid geometry.
+    pub fn new(input: R, pages: Vec<Page>) -> Result<Self, Error> {
+        if pages.is_empty() || pages.len() > 8 {
+            return Err(Error::Unsupported);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for p in &pages {
+            geometry::validate_page(p)?;
+            if !seen.insert(p.n) {
+                return Err(Error::Unsupported);
+            }
+        }
+        Ok(Self {
+            frames: Frames {
+                input: BufReader::new(input),
+                remaining: words_budget(pages.len()),
+                terminal: None,
+            },
+            pages,
+            index: 0,
+            failed: false,
+        })
+    }
+    /// # Errors
+    /// Refuses any framing, ordering, completeness or word violation.
+    pub fn next_page(&mut self) -> Result<Option<PageWords>, Error> {
+        if self.failed {
+            return Err(Error::Unreadable);
+        }
+        self.failed = true;
+        let result = self.read_page();
+        if result.is_ok() {
+            self.failed = false;
+        }
+        result
+    }
+    pub(super) fn terminal_error(&self) -> Option<Error> {
+        self.frames.terminal
+    }
+    fn read_page(&mut self) -> Result<Option<PageWords>, Error> {
+        let Some(page) = self.pages.get(self.index) else {
+            return Ok(None);
+        };
+        let (header, bytes) = self.frames.read()?;
+        if !matches!(header, Header::Words { n, .. } if n == page.n) {
+            return Err(Error::Unreadable);
+        }
+        let words = parse::<BoundedVec<Word, MAX_WORDS>>(&bytes)?.0;
+        validate_words(&words, page)?;
+        let n = page.n;
+        self.index += 1;
+        if self.index == self.pages.len() {
+            let count = u32::try_from(self.index).map_err(|_| Error::TooLarge)?;
+            self.frames.done(
+                Operation::Words,
+                Counts {
+                    words: count,
+                    ..Counts::default()
+                },
+            )?;
+        }
+        Ok(Some(PageWords { n, words }))
+    }
+}
+
 /// Worker-side framed writer. The operation controls record order; the parent rechecks it.
 pub(super) struct RecordWriter<W> {
     output: W,
@@ -571,10 +709,10 @@ impl<W: Write> RecordWriter<W> {
             output,
             operation,
             counts: Counts::default(),
-            remaining: if operation == Operation::Inspect {
-                INSPECT_LIMIT
-            } else {
-                render_budget(pages.min(8))
+            remaining: match operation {
+                Operation::Inspect => INSPECT_LIMIT,
+                Operation::Render => render_budget(pages.min(8)),
+                Operation::Words => words_budget(pages.min(8)),
             },
         }
     }
@@ -650,6 +788,20 @@ impl<W: Write> RecordWriter<W> {
             &bytes,
         )?;
         self.counts.text += 1;
+        Ok(())
+    }
+    /// # Errors
+    /// Refuses a record over a wire budget or an output failure.
+    pub fn words(&mut self, page: &PageWords) -> Result<(), Error> {
+        let bytes = json(&page.words)?;
+        self.frame(
+            Header::Words {
+                n: page.n,
+                length: bytes.len(),
+            },
+            &bytes,
+        )?;
+        self.counts.words += 1;
         Ok(())
     }
     /// # Errors

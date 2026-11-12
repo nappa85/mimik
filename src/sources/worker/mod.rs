@@ -8,7 +8,7 @@ pub(crate) use launch::stderr_fixture;
 mod live_tests;
 #[cfg(test)]
 pub(crate) use launch::RenderHook;
-pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render};
+pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render, words};
 mod entry;
 mod filter;
 mod geometry;
@@ -18,7 +18,7 @@ pub mod records;
 pub use entry::{RenderSettings, Spec, run_entry};
 pub use geometry::pixel_size;
 use operations::Input;
-pub use records::{Inspection, Page, RenderedPage};
+pub use records::{Inspection, Page, PageWords, RenderedPage, Word};
 
 /// Versions of the pinned renderer, retained with staged page provenance.
 pub const CRATE_VERSION: &str = "0.8.0";

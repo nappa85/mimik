@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 28;
+pub const SCHEMA_VERSION: i64 = 29;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 28] = [
+const MIGRATIONS: [&str; 29] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -39,10 +39,15 @@ const MIGRATIONS: [&str; 28] = [
     include_str!("../migrations/026_source_uploads.sql"),
     include_str!("../migrations/027_upload_fingerprint_key.sql"),
     include_str!("../migrations/028_owner_table_units.sql"),
+    include_str!("../migrations/029_source_page_words.sql"),
 ];
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>, Arc<std::sync::OnceLock<NoteHook>>);
+pub struct Store(
+    Arc<Mutex<Connection>>,
+    Arc<std::sync::OnceLock<NoteHook>>,
+    pub(crate) Arc<crate::sources::proposals::ProposalCache>,
+);
 
 /// Called after every committed sheet save that wrote change notes: the sheet, the new
 /// revision and the noted addresses (the assistant's post-commit hook, plan §1.4).
@@ -125,6 +130,7 @@ impl Store {
         Ok(Self(
             Arc::new(Mutex::new(connection)),
             Arc::new(std::sync::OnceLock::new()),
+            Arc::default(),
         ))
     }
 

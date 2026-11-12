@@ -1,4 +1,5 @@
 //! Owner-bound material operations; prototype/local authority is never inherited.
+use super::shapes::{self, Shape, ShapeInput};
 use super::{PageReview, PageSummary, PageView, ReviewEvent, UnitReview, UnitView, sanitized};
 use crate::{
     AppError, Store,
@@ -176,16 +177,18 @@ impl Store {
         .await
     }
 
-    /// The grid prefilled from the selected units: one column per unit in reading order, one row per
-    /// nonempty line (corrected text where the unit was corrected, the extraction otherwise).
+    /// The draft grid for the selected units, read as `shape` or, without one, as the best
+    /// fitting shape (corrected text where a unit was corrected, the extraction otherwise).
+    /// The draft is a suggestion for the editor; it records nothing.
     pub(crate) async fn material_table_prefill(
         &self,
         auth: RequestAuth,
         page: i64,
         units: Vec<i64>,
+        shape: Option<Shape>,
     ) -> Result<TablePrefill, AppError> {
         if units.is_empty()
-            || units.len() > super::tables::MAX_COLUMNS
+            || units.len() > super::tables::MAX_TABLE_SOURCES
             || units
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
@@ -193,7 +196,7 @@ impl Store {
                 != units.len()
         {
             return Err(AppError::Invalid(
-                "Choose 1-16 different units for a table.",
+                "Choose 1-200 different units for a table.",
             ));
         }
         self.run_bounded_auth(move |db| {
@@ -204,42 +207,192 @@ impl Store {
                 .optional()?
                 .ok_or(AppError::SourceNotFound)?;
             let sql = format!(
-                "{ORDERED_UNITS} SELECT position,revision,CASE WHEN state='corrected' THEN {} ELSE {} END FROM ordered WHERE id=?2",
+                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END,{},state='corrected' FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
                 text("correction", 65_536),
-                text("raw_text", 65_536)
+                text("raw_text", 65_536),
+                text("polygon", 65_536)
+            );
+            let geometry_sql = format!(
+                "{ORDERED_UNITS} SELECT id,polygon,state FROM ordered ORDER BY position LIMIT {}",
+                GEOMETRY_LIMIT + 1
             );
             let mut rows = Vec::with_capacity(units.len());
+            let mut boxes = Vec::new();
+            let mut polygons = Vec::new();
+            let mut any_corrected = false;
+            let mut stored = None;
             let mut total = 0_usize;
             super::review::read_with_deadline(&tx, "table", || {
-                for unit in &units {
-                    let (position, unit_revision, text): (i64, i64, String) = tx
-                        .query_row(&sql, params![page, unit], |r| {
-                            Ok((r.get(0)?, r.get(1)?, read_text(r, 2)?))
-                        })
-                        .optional()?
-                        .ok_or(AppError::SourceNotFound)?;
+                let mut query = tx.prepare(&sql)?;
+                let found = query.query_map(params![page, serde_json::to_string(&units)?], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?, read_text(r, 4)?, r.get::<_, bool>(5)?))
+                })?;
+                for item in found {
+                    let (position, unit, unit_revision, text, polygon, corrected) = item?;
+                    polygons.push(polygon);
+                    any_corrected |= corrected;
                     total += text.len();
                     if total > super::tables::MAX_HTML_BYTES {
                         return Err(AppError::Invalid(
                             "The selected units hold more than 64 KiB of text; select fewer or shorter units.",
                         ));
                     }
-                    rows.push((position, *unit, unit_revision, text));
+                    rows.push((position, unit, unit_revision, text));
+                }
+                if rows.len() != units.len() {
+                    return Err(AppError::SourceNotFound);
+                }
+                // The page's stored words; an oversized value reads as NULL and counts as invalid.
+                stored = tx
+                    .query_row(
+                        &format!(
+                            "SELECT CASE WHEN length(words)<={} THEN words END FROM source_page_words WHERE page_id=?1",
+                            super::page_words::MAX_ROW_BYTES
+                        ),
+                        [page],
+                        |r| r.get::<_, Option<Vec<u8>>>(0),
+                    )
+                    .optional()?;
+                let mut query = tx.prepare(&geometry_sql)?;
+                let all = query.query_map([page], |r| {
+                    Ok((r.get::<_, i64>(0)?, read_text(r, 1)?, read_text(r, 2)?))
+                })?;
+                for item in all {
+                    let (unit, polygon, state) = item?;
+                    boxes.push((unit, polygon, state));
                 }
                 Ok(())
             })?;
             rows.sort_unstable();
             auth.recheck_owner(&tx)?;
             tx.commit()?;
-            let columns: Vec<String> = rows.iter().map(|r| r.3.clone()).collect();
-            let grid = super::tables::columns_to_grid(&columns)?;
+            let texts: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
+            let (words, words_state) = selected_words(stored.as_ref(), &polygons);
+            let (chosen, scores, rejected) = draft(&texts, words, any_corrected, shape);
+            let words_state = super::table_words::WordsState::after(words_state, rejected);
+            let (overlap_checked, overlaps) = overlap_check(&boxes, &units);
             Ok(TablePrefill {
                 page_revision: revision,
                 units: rows.iter().map(|r| (r.1, r.2)).collect(),
-                grid: super::tables::format_grid(&grid),
+                grid: super::tables::format_grid(&chosen.rows),
+                header: chosen.header,
+                shape: chosen.shape,
+                problems: cap_problems(chosen.problems.iter().map(ToString::to_string).collect()),
+                scores,
+                words: words_state,
+                overlap_checked,
+                overlaps,
             })
         })
         .await
+    }
+
+    /// Tables the page's unreviewed units seem to hold (see [`super::proposals`]), uncapped in
+    /// reading order. Read only: nothing is stored and no worker job is started. Computed on
+    /// every page view unless memoised for this page revision. A timed-out read yields no
+    /// proposals (and is not remembered).
+    pub(crate) async fn material_table_proposals(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+    ) -> Result<std::sync::Arc<Vec<super::proposals::Proposal>>, AppError> {
+        let cache = std::sync::Arc::clone(&self.2);
+        let key = self
+            .run_bounded_auth({
+                let auth = auth.clone();
+                move |db| {
+                    let tx = db.transaction()?;
+                    auth.recheck_owner(&tx)?;
+                    let key = tx
+                        .query_row(
+                            "SELECT p.revision,coalesce((SELECT length(words) FROM source_page_words w WHERE w.page_id=p.id),-1) FROM source_pages p WHERE p.id=?1",
+                            [page],
+                            |r| Ok((page, r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                        )
+                        .optional()?
+                        .ok_or(AppError::SourceNotFound)?;
+                    auth.recheck_owner(&tx)?;
+                    tx.commit()?;
+                    Ok(key)
+                }
+            })
+            .await?;
+        if let Some(found) = cache.get(key) {
+            return Ok(found);
+        }
+        // The read: the units' boxes and (within a text budget) their text, and the stored words.
+        let read = self
+            .run_bounded_auth(move |db| {
+                let tx = db.transaction()?;
+                auth.recheck_owner(&tx)?;
+                let read = super::review::read_with_deadline(&tx, "proposals", || {
+                    let mut units = Vec::new();
+                    let mut budget = super::tables::MAX_HTML_BYTES;
+                    let mut query = tx.prepare(&format!(
+                        "{ORDERED_UNITS} SELECT id,{},state,origin,CASE WHEN state='unreviewed' AND origin='extracted' THEN {} END FROM ordered ORDER BY position LIMIT {}",
+                        text("polygon", 65_536),
+                        "CASE WHEN typeof(raw_text)='text' AND length(CAST(raw_text AS BLOB))<=65536 THEN raw_text END",
+                        super::proposals::MAX_UNITS + 1
+                    ))?;
+                    let rows = query.query_map([page], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Option<String>>(4)?,
+                        ))
+                    })?;
+                    for row in rows {
+                        let (id, polygon, state, text) = row?;
+                        // Past the text budget a unit still has its box but no text, so it
+                        // breaks runs and is still checked for overlap.
+                        let text = text
+                            .filter(|t| !t.trim().is_empty() && t.len() <= budget)
+                            .inspect(|t| budget -= t.len());
+                        units.push(super::proposals::Candidate {
+                            id,
+                            polygon: polygon.unwrap_or_default(),
+                            rejected: state == "rejected",
+                            text,
+                        });
+                    }
+                    let stored = tx
+                        .query_row(
+                            &format!(
+                                "SELECT CASE WHEN length(words)<={} THEN words END FROM source_page_words WHERE page_id=?1",
+                                super::page_words::MAX_ROW_BYTES
+                            ),
+                            [page],
+                            |r| r.get::<_, Option<Vec<u8>>>(0),
+                        )
+                        .optional()?
+                        .flatten();
+                    Ok((units, stored))
+                });
+                let read = match read {
+                    Ok(read) => Some(read),
+                    Err(AppError::Invalid(super::review::READ_TIMEOUT)) => None,
+                    Err(e) => return Err(e),
+                };
+                auth.recheck_owner(&tx)?;
+                tx.commit()?;
+                Ok(read)
+            })
+            .await?;
+        let Some((units, stored)) = read else {
+            // A timed-out read is not remembered, so the next view tries again.
+            return Ok(std::sync::Arc::default());
+        };
+        // The recognisers run outside the database closure.
+        let found = tokio::task::spawn_blocking(move || {
+            let words = stored
+                .as_deref()
+                .and_then(|bytes| super::page_words::decode(bytes).ok());
+            super::proposals::propose(&units, words.as_deref())
+        })
+        .await
+        .map_err(|_| AppError::Worker)?;
+        Ok(cache.put(key, found))
     }
 
     /// Create an owner table from selected units: one immediate transaction rechecks the Owner,
@@ -724,10 +877,153 @@ pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(
     Ok(())
 }
 
-/// What the create-table form needs: the tokens to submit back and the editable grid text.
+/// What the create-table form needs: the tokens to submit back, the draft grid text and what
+/// the shapes found.
 pub(crate) struct TablePrefill {
     pub page_revision: i64,
     /// Selected units in reading order with the revision the Owner saw.
     pub units: Vec<(i64, i64)>,
     pub grid: String,
+    /// The first row of the draft is a recognised header.
+    pub header: bool,
+    /// The shape the draft was read as.
+    pub shape: Shape,
+    /// At most [`MAX_PROBLEMS_SHOWN`] problems, then "and N more".
+    pub problems: Vec<String>,
+    /// Every shape that fits, best first, with its score.
+    pub scores: Vec<(Shape, u32)>,
+    /// Whether the Column grid had word boxes to read (and why not).
+    pub words: super::table_words::WordsState,
+    /// Unselected units whose boxes sit mostly inside the union of the selected units' boxes.
+    pub overlaps: Vec<i64>,
+    /// False when the page has too many units for the overlap check; it was not done.
+    pub overlap_checked: bool,
+}
+
+/// Units of one page read for the overlap check.
+const GEOMETRY_LIMIT: usize = 2000;
+/// Problems listed on the form before "and N more".
+pub(crate) const MAX_PROBLEMS_SHOWN: usize = 20;
+
+pub(crate) fn cap_problems(mut problems: Vec<String>) -> Vec<String> {
+    if problems.len() > MAX_PROBLEMS_SHOWN {
+        let more = problems.len() - MAX_PROBLEMS_SHOWN;
+        problems.truncate(MAX_PROBLEMS_SHOWN);
+        problems.push(format!("and {more} more"));
+    }
+    problems
+}
+
+/// The unselected units the selection's box would cover. A page with more units than the read
+/// bound is not checked (the flag says so).
+fn overlap_check(boxes: &[(i64, String, String)], units: &[i64]) -> (bool, Vec<i64>) {
+    if boxes.len() > GEOMETRY_LIMIT {
+        return (false, Vec::new());
+    }
+    let selected: std::collections::BTreeSet<i64> = units.iter().copied().collect();
+    (true, overlapping_units(boxes, &selected))
+}
+
+/// The stored words inside the selected units' polygons. `stored` is `None` when the page has no
+/// row, and `Some(None)` for an oversized value (read as NULL), which is invalid like any bad row.
+fn selected_words(
+    stored: Option<&Option<Vec<u8>>>,
+    polygons: &[String],
+) -> (
+    Option<Vec<super::page_words::PageWord>>,
+    super::table_words::WordsState,
+) {
+    let polygons: Vec<&str> = polygons.iter().map(String::as_str).collect();
+    let row = stored.map(|value| value.as_deref().unwrap_or_default());
+    super::table_words::words_in(row, &polygons)
+}
+
+/// The draft read as `shape` (or the best fitting one) and every shape that fits with its score.
+fn draft(
+    texts: &[&str],
+    words: Option<Vec<super::page_words::PageWord>>,
+    corrected: bool,
+    shape: Option<Shape>,
+) -> (
+    shapes::Draft,
+    Vec<(Shape, u32)>,
+    Option<shapes::WordsRejected>,
+) {
+    let input = ShapeInput::new(texts).with_words(words, corrected);
+    let drafts = shapes::best(&input);
+    let scores = drafts
+        .iter()
+        .filter(|d| !d.rows.is_empty())
+        .map(|d| (d.shape, d.score))
+        .collect();
+    let chosen = match shape {
+        Some(shape) => shapes::read(&input, shape),
+        None => drafts
+            .into_iter()
+            .find(|d| !d.rows.is_empty())
+            .unwrap_or_else(|| shapes::read(&input, Shape::Plain)),
+    };
+    (chosen, scores, input.rejected())
+}
+
+/// The bounding box of a stored polygon; `None` for an invalid or oversized one.
+pub(super) fn polygon_bounds(polygon: &str) -> Option<[f64; 4]> {
+    let points: Vec<[f64; 2]> = serde_json::from_str(polygon).ok()?;
+    if points.is_empty() || points.len() > 1024 || points.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some(
+        points
+            .iter()
+            .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, [x, y]| {
+                [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]
+            }),
+    )
+}
+
+/// Unselected, not rejected units mostly inside the union box of the selected ones: a run across
+/// two page columns would swallow them in the table's box.
+fn overlapping_units(
+    units: &[(i64, String, String)],
+    selected: &std::collections::BTreeSet<i64>,
+) -> Vec<i64> {
+    let parsed: Vec<(i64, Option<[f64; 4]>, bool)> = units
+        .iter()
+        .map(|(unit, polygon, state)| (*unit, polygon_bounds(polygon), state == "rejected"))
+        .collect();
+    overlapping_parsed(&parsed, selected)
+}
+
+/// [`overlapping_units`] over boxes parsed once: `(unit, box, rejected)`.
+pub(super) fn overlapping_parsed(
+    units: &[(i64, Option<[f64; 4]>, bool)],
+    selected: &std::collections::BTreeSet<i64>,
+) -> Vec<i64> {
+    let union = units
+        .iter()
+        .filter(|(unit, _, _)| selected.contains(unit))
+        .filter_map(|(_, bounds, _)| *bounds)
+        .reduce(|a, b| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        });
+    let Some(union) = union else {
+        return Vec::new();
+    };
+    units
+        .iter()
+        .filter(|(unit, _, rejected)| !selected.contains(unit) && !rejected)
+        .filter_map(|(unit, bounds, _)| Some((*unit, (*bounds)?)))
+        .filter(|(_, b)| {
+            let area = (b[2] - b[0]) * (b[3] - b[1]);
+            let overlap = (b[2].min(union[2]) - b[0].max(union[0])).max(0.0)
+                * (b[3].min(union[3]) - b[1].max(union[1])).max(0.0);
+            area > 0.0 && overlap * 2.0 > area
+        })
+        .map(|(unit, _)| unit)
+        .collect()
 }

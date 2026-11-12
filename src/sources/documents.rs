@@ -8,7 +8,8 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     // Callers may already have selected an older migration fixture version.
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     db.execute_batch(
-        "DROP TABLE IF EXISTS source_owner_tables;
+        "DROP TABLE IF EXISTS source_page_words;
+         DROP TABLE IF EXISTS source_owner_tables;
          DROP VIEW IF EXISTS source_upload_invalid_exclusion;
          DROP VIEW IF EXISTS source_upload_invalid_inspection;
          DROP TABLE IF EXISTS source_upload_exclusions;
@@ -475,14 +476,16 @@ pub struct OwnerTable {
     pub revision: i64,
     pub sources: Vec<TableSource>,
     pub cells: Vec<Vec<String>>,
+    /// The first row of `cells` is the header (`<thead><th>`).
+    pub header: bool,
     pub actor: String,
     pub rationale: String,
 }
 
 pub(super) fn validate_table(table: &OwnerTable) -> Result<(), AppError> {
-    super::tables::check(&table.cells)?;
-    if table.sources.is_empty() || table.sources.len() > super::tables::MAX_COLUMNS {
-        return Err(AppError::Invalid("Choose 1-16 units for a table."));
+    super::tables::check(&table.cells, table.header)?;
+    if table.sources.is_empty() || table.sources.len() > super::tables::MAX_TABLE_SOURCES {
+        return Err(AppError::Invalid("Choose 1-200 units for a table."));
     }
     validate_batch(&table_decisions(0, table), &table.rationale)?;
     review_identity(&table.actor, &table.rationale)
@@ -547,7 +550,7 @@ pub(super) fn add_owner_table(
         }
     }
     let polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-    let html = super::tables::html(&table.cells);
+    let html = super::tables::html(&table.cells, table.header);
     let operation = new_operation_id();
     let owner = OwnerRow {
         kind: "Table",

@@ -1,6 +1,10 @@
 //! Local, source-bound review evidence. Models cannot approve these records.
 pub(crate) mod documents;
 mod import;
+#[cfg(target_os = "linux")]
+mod import_words;
+pub(crate) mod page_words;
+pub(crate) mod proposals;
 mod reports;
 #[cfg(target_os = "linux")]
 pub mod staging;
@@ -12,12 +16,17 @@ pub mod worker;
 pub use documents::{
     OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision, parse_page_list,
 };
+pub use import::WordsReport;
+#[doc(hidden)]
+pub use import::{Fetched, WantedPage, WordSource};
 pub use reports::SuggestionReportSummary;
 pub use suggestions::{SourceSuggestion, SuggestionApplication, SuggestionTarget, SuggestionUnit};
 pub(crate) mod materials;
 pub(crate) mod region;
 pub(crate) mod review;
 pub(crate) mod search;
+pub(crate) mod shapes;
+pub(crate) mod table_words;
 pub(crate) mod tables;
 pub use search::SEARCH_SCHEMA;
 mod store;

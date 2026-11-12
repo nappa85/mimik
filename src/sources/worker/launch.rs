@@ -1,5 +1,7 @@
 //! Synchronous, streaming parent API. The watchdog owns and reaps the process tree.
-use super::{Error, Inspection, Page, RenderSettings, RenderedPage, Spec, profile, records};
+use super::{
+    Error, Inspection, Page, PageWords, RenderSettings, RenderedPage, Spec, profile, records,
+};
 use crate::sandbox::{
     self,
     process::{self, Watched},
@@ -129,6 +131,37 @@ pub fn render(
             std::io::Cursor::new(first).chain(pipe)
         };
         let mut reader = match records::RenderReader::new(pipe, pages) {
+            Ok(reader) => reader,
+            Err(error) => return (Err(error), None),
+        };
+        let result = (|| {
+            while let Some(value) = reader.next_page()? {
+                page(value)?;
+            }
+            Ok(())
+        })();
+        (result, reader.terminal_error())
+    })
+}
+
+/// Yield the validated words of one to eight pages, each with its box in the corrected page
+/// space. Same sandbox, wall deadline (30 s a page) and cancellation as [`render`].
+/// # Errors
+/// Invalid requests, malformed worker output, setup failures, cancellation or deadlines.
+pub fn words(
+    path: &Path,
+    pages: Vec<Page>,
+    cancel: &Cancel,
+    mut page: impl FnMut(PageWords) -> Result<(), Error> + Send,
+) -> Result<(), Reason> {
+    records::WordsReader::new(std::io::empty(), pages.clone())?;
+    super::availability::require()?;
+    let spec = spec(
+        records::Operation::Words,
+        pages.iter().map(|p| p.n).collect(),
+    );
+    execute(path, &spec, cancel, &Options::production()?, |pipe| {
+        let mut reader = match records::WordsReader::new(pipe, pages) {
             Ok(reader) => reader,
             Err(error) => return (Err(error), None),
         };

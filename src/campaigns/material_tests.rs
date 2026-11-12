@@ -4241,6 +4241,7 @@ fn table_of(units: &[(i64, i64)], cells: Vec<Vec<String>>) -> crate::sources::Ow
             })
             .collect(),
         cells,
+        header: false,
         actor: "forged".into(),
         rationale: "Columns split by the extractor".into(),
     }
@@ -4524,7 +4525,7 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                "DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;
@@ -4576,7 +4577,8 @@ async fn material_table_form_prefills_columns_and_saves_through_the_router() {
         field_value(&html, "textarea[name=cells]"),
         "| Name | Damage \\| a\\\\b |\n| Sword | d6 |\n| Bow |  |"
     );
-    let hidden = scraper::Selector::parse("input[type=hidden][name=unit]").unwrap();
+    let hidden =
+        scraper::Selector::parse("form[data-form=table] input[type=hidden][name=unit]").unwrap();
     let units: Vec<_> = scraper::Html::parse_document(&html)
         .select(&hidden)
         .map(|e| e.value().attr("value").unwrap().to_owned())
@@ -4653,6 +4655,446 @@ async fn material_table_refused_save_shows_error_then_saves_and_renders_the_tabl
     // The page renders the new table inside its card.
     let page = body(router_get(&app, &auth[0], &location).await).await;
     assert!(page.contains("<table>") && page.contains("<td>c</td>"));
+}
+
+const SHAPE_UNITS: &str = "UPDATE source_units SET raw_text='d6 Result'||char(10)||'1 Rats'||char(10)||'2 Goblins'||char(10)||'3 Ogres' WHERE id=1; UPDATE source_units SET raw_text='4 Wolves'||char(10)||'5 Bandits'||char(10)||'6 A dragon' WHERE id=2; UPDATE source_units SET polygon='[[55,30],[58,30],[58,40],[55,40]]' WHERE id=3; UPDATE source_units SET polygon='[[150,150],[160,150],[160,160],[150,160]]' WHERE id=4;";
+
+async fn table_post(
+    app: &axum::Router,
+    auth: &RequestAuth,
+    fields: Vec<(String, String)>,
+) -> axum::response::Response {
+    document_at(app, auth, "/admin/materials/pages/1/tables", fields).await
+}
+
+fn table_fields(units: &[&str], cells: &str, rationale: &str) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("csrf".to_owned(), "a".repeat(64)),
+        ("revision".to_owned(), "1".to_owned()),
+    ];
+    fields.extend(units.iter().map(|u| ("unit".to_owned(), (*u).to_owned())));
+    fields.push(("cells".to_owned(), cells.to_owned()));
+    fields.push(("rationale".to_owned(), rationale.to_owned()));
+    fields
+}
+
+#[tokio::test]
+async fn material_table_form_reads_shapes_and_the_header_round_trips_to_search() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(SHAPE_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let get = |query: &'static str| {
+        let (app, auth) = (app.clone(), auth[0].clone());
+        async move {
+            router_get(
+                &app,
+                &auth,
+                &format!("/admin/materials/pages/1/tables/new?{query}"),
+            )
+            .await
+        }
+    };
+    let response = get("unit=2&unit=1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), HEADED_CELLS);
+    let parsed = scraper::Html::parse_document(&html);
+    let count = |css: &str| {
+        parsed
+            .select(&scraper::Selector::parse(css).unwrap())
+            .count()
+    };
+    assert_eq!(
+        count("input[type=checkbox][name=header][value='1'][checked]"),
+        1
+    );
+    assert_eq!(count("#table-problems"), 0);
+    // The "Read as" form is a separate GET form with only the unit ids and the shape buttons.
+    assert_eq!(count("form#table-read-as[method=get]"), 1);
+    assert_eq!(count("form#table-read-as input[type=hidden][name=unit]"), 2);
+    assert_eq!(
+        count(
+            "form#table-read-as input[name=csrf], form#table-read-as textarea, form#table-read-as input[name=cells]"
+        ),
+        0
+    );
+    assert!(count("form#table-read-as button[name=shape]") >= 2);
+    assert_eq!(
+        count("form#table-read-as button[name=shape][value=roll][aria-pressed=true]"),
+        1
+    );
+    assert!(html.contains("Roll table (100)"), "{html}");
+    // The units whose boxes lie inside the union of the selected boxes are named (unit 3),
+    // others are not (unit 4).
+    assert!(html.contains("id=\"table-overlap\""), "{html}");
+    assert!(
+        html.contains("unit 3") && !html.contains("unit 4,") && !html.contains("unit 4 "),
+        "{html}"
+    );
+    // The same units read as plain columns: one column per unit, no header.
+    let plain = body(get("unit=1&unit=2&shape=plain").await).await;
+    assert_eq!(
+        field_value(&plain, "textarea[name=cells]")
+            .lines()
+            .next()
+            .unwrap(),
+        "| d6 Result | 4 Wolves |"
+    );
+    assert!(
+        scraper::Html::parse_document(&plain)
+            .select(&scraper::Selector::parse("input[name=header][checked]").unwrap())
+            .next()
+            .is_none()
+    );
+    // Unknown, repeated or extra parameters are refused.
+    for bad in [
+        "unit=1&shape=nope",
+        "unit=1&shape=roll&shape=plain",
+        "unit=1&csrf=x",
+        "unit=1&cells=x",
+    ] {
+        assert_eq!(
+            get(bad).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{bad}"
+        );
+    }
+}
+
+const HEADED_CELLS: &str = "| d6 | Result |\n| 1 | Rats |\n| 2 | Goblins |\n| 3 | Ogres |\n| 4 | Wolves |\n| 5 | Bandits |\n| 6 | A dragon |";
+
+#[tokio::test]
+async fn material_table_header_saves_thead_and_round_trips_through_sanitiser_and_search() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // Saving with the header ticked stores thead/th; the sanitiser keeps them and the search text
+    // and the stored plain text have the same one-line-per-row form.
+    let saved = table_post(&app, &auth[0], {
+        let mut fields = table_fields(&["1:1", "2:1"], HEADED_CELLS, "checked");
+        fields.push(("header".into(), "1".into()));
+        fields
+    })
+    .await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let location = saved.headers()["location"].to_str().unwrap().to_owned();
+    let (html, raw_text, search): (String, String, String) = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT u.raw_html,u.raw_text,t.search_text FROM source_units u JOIN source_search_text t ON t.unit_id=u.id WHERE u.origin='owner'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        html.starts_with("<table><thead><tr><th>d6</th><th>Result</th></tr></thead><tbody><tr><td>1</td><td>Rats</td></tr>"),
+        "{html}"
+    );
+    let clean = crate::sources::sanitized(&html).unwrap();
+    assert_eq!(clean, html, "thead and th survive the sanitiser");
+    let plain_text = crate::sources::tables::plain(
+        &crate::sources::tables::parse_grid(HEADED_CELLS, true).unwrap(),
+    );
+    assert_eq!(raw_text, plain_text);
+    assert_eq!(search.trim_end(), plain_text);
+    let page = body(router_get(&app, &auth[0], &location).await).await;
+    assert!(
+        page.contains("<th>d6</th>"),
+        "the card shows the header cells"
+    );
+}
+
+#[tokio::test]
+async fn material_table_without_the_header_box_stores_plain_cells() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let saved = table_post(
+        &app,
+        &auth[0],
+        table_fields(&["1:1"], "a | b\nc | d", "checked"),
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let html: String = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT raw_html FROM source_units WHERE origin='owner'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        !html.contains("<th>") && !html.contains("<thead>"),
+        "{html}"
+    );
+    // Any other value of the header field is a malformed form.
+    let mut fields = table_fields(&["1:1"], "a | b", "checked");
+    fields.push(("header".into(), "yes".into()));
+    assert_eq!(
+        table_post(&app, &auth[0], fields).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+const TWENTY_UNITS: &str = "UPDATE source_units SET polygon='[[10,10],[50,10],[50,100],[10,100]]', raw_text=id||' Result '||id WHERE id<=20;";
+
+#[tokio::test]
+async fn material_table_saves_a_twenty_unit_roll_table() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(TWENTY_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let query: Vec<String> = (1..=20).map(|u| format!("unit={u}")).collect();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new?{}", query.join("&")),
+        )
+        .await,
+    )
+    .await;
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(cells.lines().count(), 20);
+    assert_eq!(cells.lines().nth(19).unwrap(), "| 20 | Result 20 |");
+    assert!(html.contains("Roll table (100)"));
+    let units: Vec<String> = (1..=20).map(|u| format!("{u}:1")).collect();
+    let refs: Vec<&str> = units.iter().map(String::as_str).collect();
+    let before = counts(&store).await;
+    let saved = table_post(&app, &auth[0], table_fields(&refs, &cells, "checked")).await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let after = counts(&store).await;
+    assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 20));
+}
+
+/// Words laid out as three rows of two columns inside the boxes of units 1 and 2.
+fn grid_words() -> Vec<crate::sources::page_words::PageWord> {
+    use crate::sources::page_words::PageWord;
+    let mut words = Vec::new();
+    for (row, (a, b)) in [("Item", "Cost"), ("Sword", "10"), ("Axe", "8")]
+        .into_iter()
+        .enumerate()
+    {
+        let top = 20.0 + 14.0 * f32::from(u8::try_from(row).unwrap());
+        for (text, x0) in [(a, 15.0_f32), (b, 70.0)] {
+            let width = 5.0 * f32::from(u8::try_from(text.len()).unwrap());
+            words.push(PageWord {
+                text: text.into(),
+                bounds: [x0, top, x0 + width, top + 10.0],
+            });
+        }
+    }
+    words
+}
+
+async fn store_words(store: &Store, bytes: Vec<u8>) {
+    store
+        .run(move |db| {
+            db.execute(
+                "INSERT INTO source_page_words(page_id,words) VALUES(1,?1)",
+                params![bytes],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn material_table_form_reads_stored_words_for_the_column_grid() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // The units carry exactly the words' text, as the lossless check requires.
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Item Sword Axe' WHERE id=1; UPDATE source_units SET raw_text='Cost 10 8' WHERE id=2;",
+    )
+    .await;
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&unit=2&shape=column",
+        )
+        .await,
+    )
+    .await;
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(
+        cells.trim().lines().collect::<Vec<_>>(),
+        ["| Item | Cost |", "| Sword | 10 |", "| Axe | 8 |"]
+    );
+    assert!(html.contains("Column grid (80)"), "{html}");
+    assert!(!html.contains("table-words-note"), "{html}");
+}
+
+#[tokio::test]
+async fn material_table_form_ignores_words_that_do_not_carry_the_units_text() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // The fixture's own unit texts are not the words' text.
+    let (_dir, store, auth) = table_fixture().await;
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&grid_words(), 200.0, 300.0).unwrap(),
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&unit=2&shape=column",
+        )
+        .await,
+    )
+    .await;
+    assert!(html.contains("do not carry the same text"), "{html}");
+}
+
+#[tokio::test]
+async fn material_table_form_says_why_a_page_has_no_usable_words() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // No row: the text shapes still work and the form says why Column grid is the weaker one.
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Sword    10\nAxe    8\nBow    20' WHERE id=1;",
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let url = "/admin/materials/pages/1/tables/new?unit=1&shape=column";
+    let html = body(router_get(&app, &auth[0], url).await).await;
+    assert!(html.contains("id=\"table-words-note\""), "{html}");
+    assert!(html.contains("no stored word boxes"), "{html}");
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(cells.trim().lines().next().unwrap(), "| Sword | 10 |");
+    assert!(html.contains("Column grid (60)"), "{html}");
+    // An invalid row is ignored and reported, never trusted.
+    // Version 1 but truncated in the middle of a word (the table's CHECK only sees the version).
+    store_words(&store, vec![1, 0, 0]).await;
+    let html = body(router_get(&app, &auth[0], url).await).await;
+    assert!(
+        html.contains("could not be read and were ignored"),
+        "{html}"
+    );
+    assert_eq!(
+        field_value(&html, "textarea[name=cells]")
+            .trim()
+            .lines()
+            .next()
+            .unwrap(),
+        "| Sword | 10 |"
+    );
+}
+
+#[tokio::test]
+async fn material_table_form_notes_words_outside_the_selected_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Sword    10\nAxe    8\nBow    20' WHERE id=1;",
+    )
+    .await;
+    // The words sit far from unit 1's box.
+    let mut words = grid_words();
+    for word in &mut words {
+        word.bounds[1] += 150.0;
+        word.bounds[3] += 150.0;
+    }
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&words, 200.0, 300.0).unwrap(),
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&shape=column",
+        )
+        .await,
+    )
+    .await;
+    assert!(html.contains("inside the selected units"), "{html}");
+}
+
+const TWO_HUNDRED_UNITS: &str = "WITH RECURSIVE n(i) AS (SELECT 52 UNION ALL SELECT i+1 FROM n WHERE i<200) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT i,1,'unit-'||i,'Text','[]','<p>x</p>','x' FROM n; UPDATE source_units SET raw_text='Item '||id||': gold '||id WHERE id<=200;";
+
+#[tokio::test]
+async fn material_table_prefill_reads_two_hundred_units_and_refuses_plain_above_sixteen() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(TWO_HUNDRED_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let query: Vec<String> = (1..=200).map(|u| format!("unit={u}")).collect();
+    let response = router_get(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/pages/1/tables/new?{}", query.join("&")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(cells.lines().count(), 200);
+    assert_eq!(cells.lines().next().unwrap(), "| Item 1 | gold 1 |");
+    assert!(
+        !html.contains("Plain columns"),
+        "plain columns is not offered above 16 units"
+    );
+    // Plain columns above 16 units is one column, one row per line, and says so.
+    let seventeen: Vec<String> = (1..=17).map(|u| format!("unit={u}")).collect();
+    let plain = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!(
+                "/admin/materials/pages/1/tables/new?{}&shape=plain",
+                seventeen.join("&")
+            ),
+        )
+        .await,
+    )
+    .await;
+    assert!(plain.contains("read as one column"), "{plain}");
+    assert_eq!(
+        field_value(&plain, "textarea[name=cells]")
+            .trim()
+            .lines()
+            .count(),
+        17
+    );
+}
+
+#[tokio::test]
+async fn material_table_post_accepts_the_largest_non_ascii_grid_within_the_body_limit() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // 19 rows of 1,000 three-byte characters: just under the 20,000 character bound, the
+    // longest rationale, and every byte percent-encoded: about 230 KB of the 320 KiB limit.
+    let cells = vec![format!("| {} |", "\u{8a9e}".repeat(1_000)); 19].join("\n");
+    let rationale = "\u{8a9e}".repeat(5_000);
+    let fields = table_fields(&["1:1"], &cells, &rationale);
+    let encoded = serde_urlencoded::to_string(&fields).unwrap();
+    assert!(
+        encoded.len() < 320 * 1024 && encoded.len() > 200 * 1024,
+        "{}",
+        encoded.len()
+    );
+    let saved = table_post(&app, &auth[0], fields).await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    // A body over the limit is refused as a whole, with the too-large status.
+    let before = counts(&store).await;
+    let huge = table_fields(&["1:1"], &"x".repeat(330 * 1024), "r");
+    let refused = table_post(&app, &auth[0], huge).await;
+    assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(counts(&store).await, before);
 }
 
 #[tokio::test]
@@ -4972,8 +5414,8 @@ async fn material_table_refuses_other_page_units_and_reports_bounds() {
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let before = counts(&store).await;
-    // More than 16 units on GET.
-    let many: String = (1..=17)
+    // More than 200 units on GET.
+    let many: String = (1..=201)
         .map(|u| format!("unit={u}"))
         .collect::<Vec<_>>()
         .join("&");
@@ -4984,7 +5426,7 @@ async fn material_table_refuses_other_page_units_and_reports_bounds() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body(response).await.contains("Choose 1-16"));
+    assert!(body(response).await.contains("Choose 1-200"));
     // Stored-size bounds: 64 KiB of HTML and 20,000 characters of text.
     let tall_text: Vec<Vec<String>> = vec![vec!["x".repeat(1000)]; 21];
     assert!(matches!(
@@ -4999,7 +5441,7 @@ async fn material_table_refuses_other_page_units_and_reports_bounds() {
         Err(AppError::Invalid(_))
     ));
     let big_html: Vec<Vec<String>> = vec![vec!["&".repeat(1000); 14]; 4]; // 56 cells * 5000 bytes
-    assert!(crate::sources::tables::html(&big_html).len() > 65_536);
+    assert!(crate::sources::tables::html(&big_html, false).len() > 65_536);
     assert!(matches!(
         store
             .material_create_table(
@@ -5471,4 +5913,376 @@ async fn material_review_list_after_a_read_deadline_shows_counts_and_the_next_li
     // The next request is complete again.
     let html = body(router_get(&app, &auth[0], "/admin/materials/sources/1/review").await).await;
     assert!(!html.contains("Read deadline reached") && html.contains("data-review-page"));
+}
+
+#[tokio::test]
+async fn material_table_above_sixteen_units_with_no_fitting_shape_is_one_column() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture().await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let query: Vec<String> = (1..=20).map(|u| format!("unit={u}")).collect();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new?{}", query.join("&")),
+        )
+        .await,
+    )
+    .await;
+    let cells = field_value(&html, "textarea[name=cells]");
+    assert_eq!(cells.trim().lines().count(), 20, "never an empty editor");
+    assert!(cells.trim().lines().all(|l| l == "| Fixture |"));
+}
+
+fn gap_units(count: usize) -> &'static str {
+    // Unit 1: a d100 whose markers 1, 4, 8, ... leave a gap before every row; unit 3 lies inside
+    // the union of units 1 and 2.
+    let text: Vec<String> = std::iter::once("1 a".to_owned())
+        .chain((1..=count).map(|k| format!("{} r", k * 4)))
+        .collect();
+    let sql = format!(
+        "UPDATE source_units SET raw_text='{}' WHERE id=1; UPDATE source_units SET polygon='[[55,30],[58,30],[58,40],[55,40]]' WHERE id=3;",
+        text.join("'||char(10)||'")
+    );
+    Box::leak(sql.into_boxed_str())
+}
+
+#[tokio::test]
+async fn material_table_problems_are_capped_and_kept_when_a_save_is_refused() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(gap_units(25)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=1&unit=2&shape=roll",
+        )
+        .await,
+    )
+    .await;
+    let parsed = scraper::Html::parse_document(&html);
+    let items = scraper::Selector::parse("#table-problems li").unwrap();
+    let texts: Vec<String> = parsed
+        .select(&items)
+        .map(|li| li.text().collect())
+        .collect();
+    assert_eq!(texts.len(), 21, "{texts:?}");
+    assert_eq!(texts[0], "A value is missing before row 2.");
+    assert_eq!(texts[20], "and 5 more");
+    // A refused save (no rationale) re-renders with the same notes and the Owner's cells.
+    let mut fields = table_fields(&["1:1", "2:1"], "a | b", "");
+    fields.push(("shape".into(), "roll".into()));
+    let refused = table_post(&app, &auth[0], fields).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
+    let parsed = scraper::Html::parse_document(&html);
+    assert_eq!(parsed.select(&items).count(), 21, "{html}");
+    assert!(
+        html.contains("id=\"table-overlap\"") && html.contains("unit 3"),
+        "{html}"
+    );
+    assert!(html.contains("Roll table"), "the Read as choices stay");
+    // An unknown shape in the POST is a malformed form.
+    let mut bad = table_fields(&["1:1"], "a", "r");
+    bad.push(("shape".into(), "nope".into()));
+    assert_eq!(
+        table_post(&app, &auth[0], bad).await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+/// Unit 1 and 2 as two stacked columns' worth of boxes are not needed: proposals fixtures use
+/// SQL to give units text and boxes. `ROLL_ROWS` units 1-3 are rows of one roll table.
+const PROPOSAL_ROLL: &str = "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<3 OR id>6; UPDATE source_units SET raw_text='1 Rat' WHERE id=3; UPDATE source_units SET raw_text='2 Crow' WHERE id=4; UPDATE source_units SET raw_text='3 Wolf' WHERE id=5; UPDATE source_units SET raw_text='4 Bear' WHERE id=6;";
+
+async fn proposals_of(
+    store: &Store,
+    auth: &RequestAuth,
+) -> Vec<crate::sources::proposals::Proposal> {
+    store
+        .material_table_proposals(auth.clone(), 1)
+        .await
+        .unwrap()
+        .as_ref()
+        .clone()
+}
+
+#[tokio::test]
+async fn material_table_proposals_find_a_roll_table_and_link_to_the_form() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(PROPOSAL_ROLL).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [3, 4, 5, 6]);
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let link = parsed
+        .select(&scraper::Selector::parse("#table-proposals a").unwrap())
+        .next()
+        .expect("proposal link");
+    assert_eq!(
+        link.text().collect::<String>(),
+        "Likely roll table: units 3-6"
+    );
+    assert_eq!(
+        link.value().attr("href"),
+        Some("/admin/materials/pages/1/tables/new?unit=3&unit=4&unit=5&unit=6&shape=roll")
+    );
+}
+
+#[tokio::test]
+async fn material_table_proposals_store_nothing_and_are_memoised_per_revision() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(PROPOSAL_ROLL).await;
+    let changes = |store: &Store| {
+        let store = store.clone();
+        async move { store.run(|db| Ok(db.total_changes())).await.unwrap() }
+    };
+    let before = changes(&store).await;
+    let first = proposals_of(&store, &auth[0]).await;
+    let second = proposals_of(&store, &auth[0]).await;
+    assert_eq!(first, second);
+    assert_eq!(store.2.computed(), 1, "second read is served from the memo");
+    // Reading proposals writes nothing (no decision, no worker job row).
+    assert_eq!(changes(&store).await, before);
+    // A page revision change invalidates the memo, and a reviewed unit is no longer proposed.
+    store
+        .run(|db| {
+            db.execute("UPDATE source_pages SET revision=revision+1 WHERE id=1", [])?;
+            db.execute(
+                "UPDATE source_units SET state='rejected',revision=revision+1 WHERE id=4",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let third = proposals_of(&store, &auth[0]).await;
+    assert_eq!(store.2.computed(), 2);
+    // Units 1-3 alone are only three rows: no roll table.
+    assert!(third.is_empty(), "{third:?}");
+}
+
+#[tokio::test]
+async fn material_table_proposals_skip_reviewed_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='1 Rat' WHERE id=3; UPDATE source_units SET raw_text='2 Crow' WHERE id=4; UPDATE source_units SET raw_text='3 Wolf' WHERE id=5; UPDATE source_units SET raw_text='4 Bear' WHERE id=6; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id=4 OR id<3 OR id>6;",
+    )
+    .await;
+    assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+}
+
+/// Units 1-4 are rows of a roll table stacked in one column; unit 51 (accepted) sits at
+/// `foreign`, and every other unit is accepted.
+fn column_run_sql(foreign: &str) -> &'static str {
+    use std::fmt::Write;
+    let rows = [
+        (3, "1 Rat", 100),
+        (4, "2 Crow", 130),
+        (5, "3 Wolf", 160),
+        (6, "4 Bear", 190),
+    ];
+    let mut sql = String::from(
+        "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<3 OR id>6;",
+    );
+    for (id, text, top) in rows {
+        write!(sql,
+            "UPDATE source_units SET raw_text='{text}',polygon='[[130,{top}],[170,{top}],[170,{b}],[130,{b}]]' WHERE id={id};",
+            b = top + 10
+        )
+        .unwrap();
+    }
+    write!(
+        sql,
+        "UPDATE source_units SET polygon='{foreign}' WHERE id=51;"
+    )
+    .unwrap();
+    Box::leak(sql.into_boxed_str())
+}
+
+#[tokio::test]
+async fn material_table_proposals_refuse_a_run_across_page_columns() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Unit 51 lies inside the run's union box, so the run would swallow it: refused.
+    let inside = "[[130,145],[170,145],[170,155],[130,155]]";
+    let (_dir, store, auth) = table_fixture_with(column_run_sql(inside)).await;
+    assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+    // With the other unit elsewhere, the same four units are proposed.
+    let away = "[[300,35],[350,35],[350,45],[300,45]]";
+    let (_dir, store, auth) = table_fixture_with(column_run_sql(away)).await;
+    assert_eq!(proposals_of(&store, &auth[0]).await.len(), 1);
+}
+
+#[tokio::test]
+async fn material_table_proposals_propose_a_single_merged_paragraph_unit() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='1 Rat\n2 Crow\n3 Wolf\n4 Bear\n5 Cat\n6 Dog' WHERE id=1; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>1;",
+    )
+    .await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].units, [1]);
+}
+
+#[tokio::test]
+async fn material_table_proposals_are_capped_and_bounded() {
+    use std::fmt::Write;
+    let _lock = crate::auth::test_resource_lock().await;
+    // Ten roll tables of one merged unit each, separated by accepted units: at most 8 listed.
+    let mut sql = String::new();
+    for table in 0..10 {
+        let id = 1 + table * 2;
+        write!(sql,
+            "UPDATE source_units SET raw_text='1 Rat\n2 Crow\n3 Wolf\n4 Bear' WHERE id={id}; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id={};",
+            id + 1
+        )
+        .unwrap();
+    }
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    store
+        .run(|db| {
+            db.execute(
+                "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>20",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let found = proposals_of(&store, &auth[0]).await;
+    // The store keeps all ten; a page lists at most eight.
+    assert_eq!(found.len(), 10);
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let listed = scraper::Html::parse_document(&html)
+        .select(&scraper::Selector::parse("#table-proposals a").unwrap())
+        .count();
+    assert_eq!(listed, crate::sources::proposals::MAX_PROPOSALS);
+}
+
+#[tokio::test]
+async fn material_table_proposals_use_stored_words_for_a_column_grid_without_a_worker() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET raw_text='Item Sword Axe Bow Dagger' WHERE id=1; UPDATE source_units SET raw_text='Cost 10 8 20 5' WHERE id=2; UPDATE source_units SET state='accepted',revision=revision+1 WHERE id>2;",
+    )
+    .await;
+    // No stored words: the units are plain columns, nothing proposed (and no worker is asked for).
+    assert_eq!(proposals_of(&store, &auth[0]).await, Vec::new());
+    let mut words = grid_words();
+    for (row, (a, b)) in [("Bow", "20"), ("Dagger", "5")].into_iter().enumerate() {
+        let top = 62.0 + 14.0 * f32::from(u8::try_from(row).unwrap());
+        for (text, x0) in [(a, 15.0_f32), (b, 70.0)] {
+            let width = 5.0 * f32::from(u8::try_from(text.len()).unwrap());
+            words.push(crate::sources::page_words::PageWord {
+                text: text.into(),
+                bounds: [x0, top, x0 + width, top + 10.0],
+            });
+        }
+    }
+    store_words(
+        &store,
+        crate::sources::page_words::encode(&words, 200.0, 300.0).unwrap(),
+    )
+    .await;
+    // Storing the words changes the memo key, so the next read sees them.
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].shape, crate::sources::shapes::Shape::Column);
+}
+
+#[tokio::test]
+async fn material_table_proposals_list_only_runs_touching_the_cards_shown() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Unit 51 is the 51st card: outside the first 50-card window.
+    let (_dir, store, auth) = table_fixture_with(
+        "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<51; UPDATE source_units SET raw_text='1 Rat\n2 Crow\n3 Wolf\n4 Bear' WHERE id=51;",
+    )
+    .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let first = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(!first.contains("table-proposals"), "{first}");
+    let later = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=50").await).await;
+    assert!(later.contains("Likely roll table: unit 51"), "{later}");
+}
+
+/// SQL placing `texts` on units `first..` (consecutive ids) with boxes in one column at x
+/// `left..left+40`, 10 points apart from `top` (below the fixture's boxes of units 1 and 2).
+fn column_sql(first: i64, texts: &[&str], left: i64, top: i64) -> String {
+    use std::fmt::Write;
+    let mut sql = String::new();
+    for (i, text) in texts.iter().enumerate() {
+        let id = first + i64::try_from(i).unwrap();
+        let y = top + 10 * i64::try_from(i).unwrap();
+        write!(
+            sql,
+            "UPDATE source_units SET raw_text='{text}',polygon='[[{left},{y}],[{r},{y}],[{r},{b}],[{left},{b}]]' WHERE id={id};",
+            r = left + 40,
+            b = y + 8
+        )
+        .unwrap();
+    }
+    sql
+}
+
+const ACCEPT_OUTSIDE: &str =
+    "UPDATE source_units SET state='accepted',revision=revision+1 WHERE id<3 OR id>32;";
+
+#[tokio::test]
+async fn material_fresh_page_proposes_only_the_table_among_two_columns_of_prose() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Left column: a title, a four-row roll table, ten prose units; right column: fifteen
+    // prose units. Every unit is unreviewed.
+    let mut left = vec!["Wandering Monsters", "1 Rat", "2 Crow", "3 Wolf", "4 Bear"];
+    left.extend(["Some prose here."; 10]);
+    let mut sql = column_sql(3, &left, 100, 100);
+    sql.push_str(&column_sql(18, &["Other prose here."; 15], 150, 100));
+    sql.push_str(ACCEPT_OUTSIDE);
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [3, 4, 5, 6, 7]);
+    assert_eq!(found[0].shape, crate::sources::shapes::Shape::Roll);
+}
+
+#[tokio::test]
+async fn material_fresh_page_finds_a_table_after_prose() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let mut texts = vec!["Some prose here."; 10];
+    texts.extend(["1 Rat", "2 Crow", "3 Wolf", "4 Bear"]);
+    let mut sql = column_sql(3, &texts, 100, 100);
+    sql.push_str(ACCEPT_OUTSIDE);
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [13, 14, 15, 16]);
+}
+
+#[tokio::test]
+async fn material_fresh_page_trims_a_label_list_from_the_prose_after_it() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let mut texts = vec![
+        "Hit points: sixteen",
+        "Armor: light leather",
+        "Weapon: rusty axe",
+        "Morale: steady",
+    ];
+    texts.extend(["Some prose here."; 8]);
+    let mut sql = column_sql(3, &texts, 100, 100);
+    sql.push_str(ACCEPT_OUTSIDE);
+    let sql: &'static str = Box::leak(sql.into_boxed_str());
+    let (_dir, store, auth) = table_fixture_with(sql).await;
+    let found = proposals_of(&store, &auth[0]).await;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].units, [3, 4, 5, 6]);
+    assert_eq!(found[0].shape, crate::sources::shapes::Shape::Label);
 }

@@ -586,3 +586,185 @@ fn maximum_inspect_transport_and_one_byte_more() {
         .is_err()
     );
 }
+
+// Words: one frame per requested page, validated against the page like text lines.
+fn word(text: &str, bounds: [f64; 4]) -> Word {
+    Word {
+        text: text.into(),
+        bounds,
+    }
+}
+fn words_wire(pages: &[PageWords]) -> Vec<u8> {
+    let mut wire = Vec::new();
+    let mut w = RecordWriter::new(&mut wire, Operation::Words, pages.len());
+    for page in pages {
+        w.words(page).unwrap();
+    }
+    w.finish().unwrap();
+    wire
+}
+fn page_words(n: u32, words: Vec<Word>) -> PageWords {
+    PageWords { n, words }
+}
+fn words_refused(wire: &[u8], pages: Vec<Page>) {
+    let mut reader = WordsReader::new(wire, pages).unwrap();
+    let result = (|| {
+        while reader.next_page()?.is_some() {}
+        Ok::<(), Error>(())
+    })();
+    assert!(result.is_err());
+    assert!(
+        reader.next_page().is_err(),
+        "failed reader must stay poisoned"
+    );
+}
+
+#[test]
+fn words_round_trip_in_requested_order() {
+    let a = page_words(2, vec![word("one", [1.0, 1.0, 4.0, 3.0])]);
+    let b = page_words(1, vec![]);
+    let wire = words_wire(&[a, b]);
+    let mut reader = WordsReader::new(&wire[..], vec![page(2), page(1)]).unwrap();
+    let first = reader.next_page().unwrap().unwrap();
+    assert_eq!((first.n, first.words[0].text.as_str()), (2, "one"));
+    assert_eq!(reader.next_page().unwrap().unwrap().words.len(), 0);
+    assert!(reader.next_page().unwrap().is_none());
+}
+
+#[test]
+fn hostile_word_values_are_refused() {
+    let good = || word("w", [1.0, 1.0, 2.0, 2.0]);
+    for invalid in 0..12 {
+        let mut w = good();
+        let mut count = 1;
+        match invalid {
+            0 => w.bounds[0] = -1.0,
+            1 => w.bounds[2] = 11.0,
+            2 => w.bounds[3] = 10.5,
+            3 => w.bounds[1] = f64::NAN,
+            4 => w.bounds = [2.0, 1.0, 1.0, 2.0],
+            5 => w.bounds = [1.0, 1.0, 1.0, 2.0],
+            6 => w.text = String::new(),
+            7 => w.text = "a".repeat(257),
+            8 => w.bounds[2] = f64::INFINITY,
+            9 => w.text = "a\u{0}".into(),
+            10 => w.text = "a\u{9c}b".into(),
+            _ => count = MAX_WORDS + 1,
+        }
+        let mut wire = Vec::new();
+        let mut writer = RecordWriter::new(&mut wire, Operation::Words, 1);
+        writer.words(&page_words(1, vec![w; count])).unwrap();
+        writer.finish().unwrap();
+        words_refused(&wire, vec![page(1)]);
+    }
+    // The bounds themselves are accepted: 256 bytes, 20,000 words, the page edge.
+    let edge = Word {
+        text: "a".repeat(256),
+        bounds: [0.0, 0.0, 10.0, 10.0],
+    };
+    let wire = words_wire(&[page_words(1, vec![edge; MAX_WORDS])]);
+    let mut reader = WordsReader::new(&wire[..], vec![page(1)]).unwrap();
+    assert_eq!(reader.next_page().unwrap().unwrap().words.len(), MAX_WORDS);
+}
+
+#[test]
+fn oversized_decoded_word_text_is_refused() {
+    for text in ["x".repeat(257), "\\u0061".repeat(257), "\u{e9}".repeat(129)] {
+        let json = format!(r#"{{"text":"{text}","box":[0,0,1,1]}}"#);
+        assert!(serde_json::from_str::<Word>(&json).is_err());
+    }
+    let json = format!(r#"{{"text":"{}","box":[0,0,1,1]}}"#, "\u{e9}".repeat(128));
+    assert_eq!(serde_json::from_str::<Word>(&json).unwrap().text.len(), 256);
+}
+
+#[test]
+fn hostile_words_framing_order_and_completeness() {
+    let pages = || vec![page(1), page(2)];
+    let wire = words_wire(&[
+        page_words(1, vec![word("a", [1.0, 1.0, 2.0, 2.0])]),
+        page_words(2, vec![]),
+    ]);
+    let mut frames = Frames {
+        terminal: None,
+        input: Cursor::new(wire.clone()),
+        remaining: words_budget(2),
+    };
+    let parts: Vec<_> = (0..3).map(|_| frames.read().unwrap()).collect();
+    words_refused(&wire[..wire.len() - 1], pages());
+    let mut stray = wire.clone();
+    stray.extend_from_slice(b"stray");
+    words_refused(&stray, pages());
+    for omitted in 0..3 {
+        let mut f = parts.clone();
+        f.remove(omitted);
+        words_refused(&join(&f), pages());
+    }
+    let mut f = parts.clone();
+    f.swap(0, 1);
+    words_refused(&join(&f), pages());
+    let mut f = parts.clone();
+    if let Header::Words { ref mut n, .. } = f[0].0 {
+        *n = 2;
+    }
+    words_refused(&join(&f), pages());
+    // A render's text frame is not a words frame, and the done counts must say `words`.
+    let mut f = parts.clone();
+    if let Header::Words { n, length } = f[0].0 {
+        f[0].0 = Header::Text { n, length };
+    }
+    words_refused(&join(&f), pages());
+    let mut f = parts;
+    let bytes = serde_json::to_vec(&Done {
+        operation: Operation::Words,
+        counts: Counts {
+            text: 2,
+            ..Counts::default()
+        },
+    })
+    .unwrap();
+    f[2] = (
+        Header::Done {
+            length: bytes.len(),
+        },
+        bytes,
+    );
+    words_refused(&join(&f), pages());
+    // Requests are bounded like render's.
+    assert!(WordsReader::new(&[][..], vec![]).is_err());
+    assert!(WordsReader::new(&[][..], vec![page(1), page(1)]).is_err());
+    assert!(WordsReader::new(&[][..], (1..=9).map(page).collect()).is_err());
+}
+
+#[test]
+fn words_frames_have_their_own_bound_and_budget() {
+    assert_eq!(words_budget(8), (WORDS_LIMIT + 16 * 1024) * 8 + 4096);
+    let header = Header::Words {
+        n: 1,
+        length: WORDS_LIMIT + 1,
+    };
+    assert!(
+        Frames {
+            terminal: None,
+            input: synthetic(header, WORDS_LIMIT + 1 + HEADER_LIMIT),
+            remaining: words_budget(1)
+        }
+        .read()
+        .is_err()
+    );
+    let header = Header::Words {
+        n: 1,
+        length: WORDS_LIMIT,
+    };
+    assert_eq!(
+        Frames {
+            terminal: None,
+            input: synthetic(header, WORDS_LIMIT + HEADER_LIMIT),
+            remaining: words_budget(1)
+        }
+        .read()
+        .unwrap()
+        .1
+        .len(),
+        WORDS_LIMIT
+    );
+}

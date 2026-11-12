@@ -110,6 +110,7 @@ migrations.
 | 023 | The owner's model downloads: the confirmed downloads with their licence snapshot ([model-downloads.md](model-downloads.md)) |
 | 024–027 | Source documents, owner units, review operations and suggestions; source uploads; upload fingerprint key |
 | 028 | Owner units may be `Text` or `Table` |
+| 029 | Append-only `source_page_words`: the word boxes of a page, written at import for the table shapes |
 
 ## Areas
 
