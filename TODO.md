@@ -91,6 +91,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+- **mupdf-rs release:** PR messense/mupdf-rs#280 merged upstream 2026-11-08 (dd46f0e); its text
+  API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
+  a release ships: pin it from crates.io, drop `vendor/mupdf`, the `[patch.crates-io]` entry and
+  the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
+
 - **Review-screen usability (owner, 2026-11-07, first real review of the IT pages):**
   - Unit restructuring actions (owner, 2026-11-08), each rejecting the original units in one
     batch with the reason and adding owner units (originals and raw stay intact). Create table
