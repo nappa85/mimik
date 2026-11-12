@@ -37,7 +37,8 @@ What an agreement proves depends on where the unit's text came from:
 
 The kind comes from the source's stored extractor provenance (`prepared_json`: `extractor.name`,
 `version`, `settings`) through a pinned table in code keyed by name and exact version: the
-Marker versions the prototype used with `force_ocr: true` and `disable_ocr` not true are
+Marker versions the prototype used (`marker-pdf` 2.0.0) with `force_ocr: true`, `disable_ocr`
+not true and `use_llm` absent or false (Marker's model processors may rewrite text) are
 independent, the same versions without forced OCR are same layer, route A is derived, and
 everything else is unknown. Provenance is self-declared bundle JSON (a hand-written v2 bundle
 can claim anything, L-SRC-4); the label states what the bundle declares, and the limit goes to
@@ -69,8 +70,11 @@ Pure and deterministic, in `src/sources/agreement.rs`. Prior art: the prototype 
 `tools/crosscheck_text_layer.py` (centre-in-box words, shadow duplicates dropped); this rule
 differs in being exact, with no similarity matching.
 
-1. **Words of the page.** The decoded word row; a shadow duplicate (the same text drawn again
-   within 3 points, as in the prototype) is dropped.
+1. **Words of the page.** The decoded word row. A shadow duplicate is dropped: the same text
+   drawn again with every edge shifted by less than 3 points and less than 0.3 of the smaller
+   word's height, overlapping the smaller box by at least half (stricter than the prototype, so
+   a repeated word in tiny type is kept). Words whose centre lies inside a confirmed exclusion
+   box are removed.
 2. **Candidates.** Unreviewed extracted units with text. Each other unit gets `Excluded` with its
    reason:
    - owner units; kinds `Table`, `TableGroup`, figures, pictures, equations and forms (the kind
@@ -81,14 +85,23 @@ differs in being exact, with no similarity matching.
    - units targeted by an open suggestion (not dismissed, not applied), and every unit of a page
      with an open page-level `missing_text` or `note` suggestion;
    - units holding a word whose centre lies inside two units' polygons (checked against every
-     unit of the page, reviewed and owner units included).
+     unit of the page, reviewed and owner units included);
+   - units whose polygon holds a word removed by an exclusion box, or touches such a box (the
+     umbrella plan's "a unit crossing the box's edge is left unreviewed and flagged").
+   `evaluate` itself refuses a page of more than 2,000 units or 64 KiB of unit text ("not
+   computed"), so no caller can skip the bound.
 3. **Words of a unit.** The words whose centre lies inside the unit's polygon
    (`table_words::words_among`), ordered geometrically: grouped into lines by vertical overlap
    over half the smaller height, lines top to bottom, words left to right. Stream order is not
    used.
 4. **Tokens.** Both sides, in this order:
-   1. html2text decoration removed as in `shapes::normalise`, then Unicode NFC (not NFKC:
-      superscripts, subscripts, fractions and fullwidth forms stay distinct).
+   1. On the unit side only, the markup html2text itself writes: a heading prefix (`#` to
+      `######` and a space), a `* ` list marker at line start, and paired emphasis (`*x*`,
+      `**x**`); an unpaired `*`, `- ` and ordered markers stay (stricter than
+      `shapes::normalise`, which would strip `- ` and lose a minus sign). A text-layer bullet
+      glyph (`•`, `◦`, `▪`) at a line start is dropped at most as many times as list markers
+      were removed. Then Unicode NFC on both sides (not NFKC: superscripts, subscripts,
+      fractions and fullwidth forms stay distinct).
    2. **Line-end hyphenation**, text-layer side only: a word ending in U+002D, U+2010 or U+00AD
       at the end of a line, with a letter right before that hyphen, followed by a word on the
       next line that starts with a lowercase letter, matches the unit's token joined without
@@ -101,7 +114,8 @@ differs in being exact, with no similarity matching.
    4. Split on whitespace.
 5. **Verdict per unit.**
    - `Agrees` when the token sequences are equal and non-empty (an O(n) comparison) and no
-     orphan word (below) lies on one of the unit's lines or within one line height of its box;
+     orphan word's box (below) intersects the box of the unit's polygon and words grown by one
+     line height on every side;
    - `Differs` otherwise, with the reason (tokens differ, or orphan words next to it); the
      token difference (`similar`) is computed for display only, for sequences of at most 2,000
      tokens per side, and shows the first 20 changes;
@@ -109,7 +123,8 @@ differs in being exact, with no similarity matching.
    No similarity threshold: one different token is a difference.
 6. **Page facts.** Orphan words (inside no unit, missed text of the L-SRC-1 kind) are counted
    and outlined on the page image. Words inside a confirmed exclusion box, where the source has
-   one, are left out of every count and display. There is no per-view watermark detection.
+   one, are left out of every count and display (and exclude the units they fall in, step 2).
+   There is no per-view watermark detection.
 
 `agreement-v1` is a constant; a change to steps 1 to 5 bumps it. Stored word rows carry no
 splitter version (L-SRC-TABLE), so a change to the worker's word splitter can change verdicts
@@ -178,6 +193,13 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
   the text layer's box entirely (a word the PDF draws as art) is not caught. Structure is not
   checked: a heading read as body text, or units in the wrong order across columns, agree word
   for word; the Owner's look at the page and the kind label on each card cover that, as today.
+  Raised text is invisible to both readings: a superscript or footnote number drawn right after
+  a word becomes one text-layer word (`10` and a raised `2` read as `102`), and OCR often reads
+  it the same way, so both are wrong together; slice 2 counts small raised words beside units.
+  Words claimed only by a neighbour that is not compared (reviewed, owner, table, figure) are
+  not orphans, so they do not flag the candidate beside them.
+  Likewise a word removed by an exclusion box is never an orphan, so a body word under a box
+  drawn just outside a unit's box (within one line height) does not flag that unit.
   Slice 2's safety bar checks the rule against the Owner's own corrections before anything is
   offered.
 - **Polygon misses.** A unit whose polygon misses some of its words differs, or is flagged by the
