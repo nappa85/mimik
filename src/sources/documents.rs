@@ -9,6 +9,7 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     db.execute_batch(
         "DROP TABLE IF EXISTS source_page_words;
+         DROP TABLE IF EXISTS source_owner_replacements;
          DROP TABLE IF EXISTS source_owner_tables;
          DROP VIEW IF EXISTS source_upload_invalid_exclusion;
          DROP VIEW IF EXISTS source_upload_invalid_inspection;
@@ -582,6 +583,7 @@ pub(super) fn add_owner_table(
         union.add(&polygon)?;
     }
     let polygon = union.polygon();
+    let anchor = first_in_reading_order(tx, page, table.sources.iter().map(|s| s.unit))?;
     let html = super::tables::html(&table.cells, table.header);
     let operation = new_operation_id();
     let owner = OwnerRow {
@@ -604,12 +606,66 @@ pub(super) fn add_owner_table(
         sidecar(tx, event)?;
         events.push(event);
     }
+    // first_event_id keeps the first rejection in submitted order; the replacement anchor below
+    // is the first replaced unit in reading order.
     tx.execute(
         "INSERT INTO source_owner_tables(unit_id,operation_id,first_event_id) VALUES(?1,?2,?3)",
         params![unit, operation, events[0]],
     )?;
+    record_replacement(tx, unit, &operation, "table", anchor, 1)?;
     Ok((unit, events))
 }
+
+/// The first of `units` (all on `page`) in reading order, computed inside the caller's
+/// transaction rather than taken from the submitted order.
+pub(super) fn first_in_reading_order(
+    tx: &Transaction<'_>,
+    page: i64,
+    units: impl Iterator<Item = i64>,
+) -> Result<i64, AppError> {
+    let list = serde_json::to_string(&units.collect::<Vec<_>>())
+        .map_err(|_| AppError::Invalid("Unit list failed."))?;
+    tx.query_row(
+        &format!(
+            "{} SELECT id FROM ordered WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position LIMIT 1",
+            super::materials::ORDERED_UNITS
+        ),
+        params![page, list],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or(AppError::SourceNotFound)
+}
+
+/// Insert the replacement row of an owner unit created by a table, merge or split `operation`
+/// (`kind` is `table`, `merge` or `split`), anchored at `anchor`. The order key is computed in
+/// SQL from the anchor with the expression the migration's insert trigger recomputes, so a
+/// merge or split writer cannot store a different key.
+pub(super) fn record_replacement(
+    tx: &Transaction<'_>,
+    unit: i64,
+    operation: &str,
+    kind: &str,
+    anchor: i64,
+    part: i64,
+) -> Result<(), AppError> {
+    let inserted = tx.execute(
+        REPLACEMENT_INSERT,
+        params![unit, operation, kind, anchor, part],
+    )?;
+    if inserted == 1 {
+        Ok(())
+    } else {
+        Err(AppError::SourceNotFound)
+    }
+}
+
+pub(super) const REPLACEMENT_INSERT: &str = concat!(
+    "INSERT INTO source_owner_replacements(unit_id,operation_id,kind,anchor_unit_id,part,order_key) \
+     SELECT ?1,?2,?3,anc.id,?5,",
+    unit_sort_key!("anc"),
+    "||'.'||printf('%04d',?5) FROM source_units anc WHERE anc.id=?4"
+);
 
 /// A fresh 128-bit identifier naming one batch; callers cannot choose or reuse it.
 pub(super) fn new_operation_id() -> String {

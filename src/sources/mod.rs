@@ -1,4 +1,22 @@
 //! Local, source-bound review evidence. Models cannot approve these records.
+
+/// SQL text of a unit's reading-order sort key, for the unit row aliased `$u`; every branch is
+/// TEXT (SQLite sorts all integers before all text) and never NULL. Extracted units sort by
+/// zero-padded id, an owner unit with a replacement row by its stored `order_key`, a
+/// merge-suggestion owner unit by its smallest target id, and any other owner unit at the end,
+/// by id (`'~'` follows every digit). The inner aliases are `ok_*` so the expression can be
+/// spelled inside any query. Migration 030's insert trigger and backfill spell the same
+/// expression (a test compares the text), so the writer and the trigger cannot disagree.
+macro_rules! unit_sort_key {
+    ($u:literal) => {
+        concat!(
+            "CASE WHEN ", $u, ".origin='extracted' THEN printf('%020d',", $u, ".id) ELSE coalesce(",
+            "(SELECT ok_rr.order_key FROM source_owner_replacements ok_rr WHERE ok_rr.unit_id=", $u, ".id),",
+            "(SELECT printf('%020d',ok_m) FROM (SELECT min(json_extract(ok_jt.value,'$.unit')) ok_m FROM source_suggestion_applications ok_sa JOIN source_suggestions ok_ss ON ok_ss.id=ok_sa.suggestion_id,json_each(ok_ss.targets,'$.targets') ok_jt WHERE ok_sa.owner_unit_id=", $u, ".id AND ok_ss.kind='merge') WHERE ok_m IS NOT NULL),",
+            "'~'||printf('%020d',", $u, ".id)) END"
+        )
+    };
+}
 #[expect(dead_code, reason = "used by the review screen in a later slice")]
 pub(crate) mod agreement;
 #[cfg(test)]
@@ -9,6 +27,8 @@ mod import;
 mod import_words;
 pub(crate) mod page_words;
 pub(crate) mod proposals;
+#[cfg(all(test, target_os = "linux"))]
+mod replacement_tests;
 mod reports;
 #[cfg(target_os = "linux")]
 pub mod staging;

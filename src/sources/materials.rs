@@ -20,9 +20,14 @@ pub(crate) enum ReviewNext {
     Unknown,
 }
 
-// Extracted rows retain bundle insertion order. Merge owners precede their first
-// target; other owner units sort last. Cursors are ordinals in this stable order.
-pub(super) const ORDERED_UNITS: &str = "WITH ordered AS (SELECT u.*,row_number() OVER (ORDER BY CASE WHEN u.origin='extracted' THEN u.id ELSE coalesce((SELECT min(json_extract(t.value,'$.unit')) FROM source_suggestion_applications a JOIN source_suggestions s ON s.id=a.suggestion_id,json_each(s.targets,'$.targets') t WHERE a.owner_unit_id=u.id AND s.kind='merge'),9223372036854775807) END,CASE u.origin WHEN 'owner' THEN 0 ELSE 1 END,u.id) position FROM source_units u WHERE u.page_id=?1)";
+// Reading order is the TEXT sort key of `unit_sort_key!` (extracted id, replacement anchor,
+// merge-suggestion first target, else the end), then owner before extracted, then id. Cursors
+// are ordinals in this stable order.
+pub(super) const ORDERED_UNITS: &str = concat!(
+    "WITH ordered AS (SELECT u.*,row_number() OVER (ORDER BY ",
+    unit_sort_key!("u"),
+    ",CASE u.origin WHEN 'owner' THEN 0 ELSE 1 END,u.id) position FROM source_units u WHERE u.page_id=?1)"
+);
 
 pub(super) const LOOKUP_TEXT: &str = "CASE u.state WHEN 'accepted' THEN coalesce(t.search_text,'') WHEN 'corrected' THEN u.correction WHEN 'unreviewed' THEN coalesce(t.search_text,'') ELSE '' END";
 

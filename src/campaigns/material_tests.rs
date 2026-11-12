@@ -4531,7 +4531,7 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                "DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;
@@ -5906,7 +5906,8 @@ async fn material_table_history_notice_reselect_and_accepted_lookup_end_to_end()
         )
         .await
         .unwrap();
-    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=50").await).await;
+    // The table sits at its anchor (unit 1), inside the first card window.
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
     let lookup = field_value(&page, &format!("pre[data-lookup-unit='{unit}']"));
     assert!(
         lookup.contains("Sword") && lookup.contains("d6"),
