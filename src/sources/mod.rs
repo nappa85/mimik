@@ -112,6 +112,9 @@ pub struct UnitView {
     pub sanitized_html: String,
     pub state: String,
     pub correction: String,
+    /// The extracted text, the prefill of the Correct form for a unit without a correction (`None`
+    /// when it is longer than 64 KiB: such a unit is not prefilled).
+    pub raw_text: Option<String>,
     pub revision: i64,
 }
 

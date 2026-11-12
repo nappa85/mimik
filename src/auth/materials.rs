@@ -382,8 +382,73 @@ struct Editor {
     error_unit: i64,
     /// Likely tables among the unreviewed units: `(label, link to the table form)`.
     proposals: Vec<(String, String)>,
+    /// A page-notes window past the first was asked for: keep that task open.
+    notes_open: bool,
 }
 impl Editor {
+    /// The screen card of a unit shown on this window.
+    fn card(&self, unit: i64) -> Option<&crate::sources::review::Card> {
+        self.screen.cards.iter().find(|card| card.unit == unit)
+    }
+    /// The refused decision of this unit, if its card is the error card.
+    fn draft_for(&self, unit: i64) -> Option<&Draft> {
+        if self.error_unit == unit {
+            self.draft.as_ref()
+        } else {
+            None
+        }
+    }
+    /// The revision all three forms of a card carry: the submitted one on the error card (so a
+    /// stale page cannot be decided without reloading), else the stored one.
+    fn revision_for(&self, unit: &crate::sources::UnitView) -> i64 {
+        self.draft_for(unit.id)
+            .map_or(unit.revision, |draft| draft.revision)
+    }
+    /// The Correct form's text: the submitted draft on a refused correction, else the stored
+    /// correction of a corrected unit, else the extracted text.
+    fn correct_text(&self, unit: &crate::sources::UnitView) -> String {
+        match self.draft_for(unit.id) {
+            Some(draft) if draft.refills("corrected") => draft.correction.clone(),
+            _ if unit.state == "corrected" => unit.correction.clone(),
+            _ => unit.raw_text.clone().unwrap_or_default(),
+        }
+    }
+    /// The extracted text is too long to prefill the Correct form (and no draft refills it).
+    fn prefill_missing(&self, unit: &crate::sources::UnitView) -> bool {
+        unit.state != "corrected"
+            && unit.raw_text.is_none()
+            && !self
+                .draft_for(unit.id)
+                .is_some_and(|draft| draft.refills("corrected"))
+    }
+    /// The rationale a decision's form is refilled with after a refusal of that decision.
+    fn rationale_for(&self, unit: i64, state: &str) -> String {
+        self.draft_for(unit)
+            .filter(|draft| draft.refills(state))
+            .map_or_else(String::new, |draft| draft.rationale.clone())
+    }
+    /// Whether the refused decision of this card is `state` (its disclosure opens).
+    fn refused(&self, unit: i64, state: &str) -> bool {
+        self.draft_for(unit)
+            .is_some_and(|draft| draft.state == state)
+    }
+    fn correction_invalid(&self, unit: i64) -> bool {
+        self.draft_for(unit).is_some_and(Draft::correction_missing)
+    }
+    fn rationale_invalid(&self, unit: i64, state: &str) -> bool {
+        self.draft_for(unit)
+            .is_some_and(|draft| draft.state == state && draft.rationale_missing())
+    }
+    /// The stored decision of the refused form is not one of the three (forged request).
+    fn forged_state(&self, unit: i64) -> Option<String> {
+        self.draft_for(unit)
+            .filter(|draft| !matches!(draft.state.as_str(), "accepted" | "corrected" | "rejected"))
+            .map(|draft| draft.state.clone())
+    }
+    /// Every unit of the page is decided (known only from a complete read).
+    fn all_reviewed(&self) -> bool {
+        !self.screen.reads_reduced() && self.screen.next_unit.is_none()
+    }
     fn unit_link(&self, target: &(i64, i64)) -> String {
         let (unit, cursor) = target;
         if self.page.units.iter().any(|row| row.id == *unit) {
@@ -462,6 +527,7 @@ impl Editor {
             notice_unit: if c.saved == Saved::None { 0 } else { c.to },
             error_unit: 0,
             proposals: Vec::new(),
+            notes_open: c.notes > 0,
         }
     }
 }
@@ -646,6 +712,12 @@ impl Draft {
             _ => (self.correction.clone(), self.rationale.clone()),
         }
     }
+    /// Whether a refused draft refills the form of `state`: its own decision's form, and the
+    /// Correct form (the one with every field) for a forged decision, so no text is lost.
+    fn refills(&self, state: &str) -> bool {
+        self.state == state
+            || (state == "corrected" && !matches!(self.state.as_str(), "accepted" | "rejected"))
+    }
     fn correction_missing(&self) -> bool {
         self.state == "corrected" && self.correction.trim().is_empty()
     }
@@ -790,14 +862,9 @@ async fn review(
                 },
             );
             // Preserve only a verified unit in this page, never a browser-selected identity.
-            let data = editor
-                .page
-                .units
-                .iter_mut()
-                .find(|u| u.id == unit)
-                .ok_or(StatusCode::FORBIDDEN)?;
-            data.correction.clone_from(&form.correction);
-            data.state.clone_from(&form.state);
+            if !editor.page.units.iter().any(|u| u.id == unit) {
+                return Err(StatusCode::FORBIDDEN);
+            }
             editor.message = e.to_string();
             editor.error_unit = unit;
             editor.draft = Some(form);

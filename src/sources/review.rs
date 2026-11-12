@@ -556,6 +556,12 @@ pub(crate) struct Screen {
     /// a completeness confirmation.
     pub next_incomplete: Option<i64>,
     pub primary: super::PrimaryPageState,
+    /// Units on the page and how many of them are decided (both 0 in the reduced screen).
+    pub units_total: i64,
+    pub units_reviewed: i64,
+    /// The neighbouring pages of the source by PDF page number.
+    pub prev_page: Option<i64>,
+    pub following_page: Option<i64>,
 }
 impl Screen {
     pub(crate) fn reads_reduced(&self) -> bool {
@@ -727,7 +733,7 @@ impl Store {
             let (document,pdf):(Option<i64>,i64)=tx.query_row("SELECT m.document_id,p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
             let document=document.unwrap_or(0);
             let primary=super::documents::primary_state(&tx,document,pdf)?;
-            let count:i64=tx.query_row("SELECT count(*) FROM source_units WHERE page_id=?1",[page],|r|r.get(0))?;
+            let (count,units_reviewed):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(state<>'unreviewed'),0) FROM source_units WHERE page_id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
             let mut overlay=Vec::new();
             if geometry && count<=2000 {
                 let mut q=tx.prepare(&format!("{} SELECT id,polygon,position-1,state FROM ordered ORDER BY position LIMIT 2000",super::materials::ORDERED_UNITS))?;
@@ -756,14 +762,21 @@ impl Store {
                 query.query_map(params![page,serde_json::to_string(&units)?], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?)))?.collect::<Result<std::collections::BTreeMap<_,_>,_>>()?
             };
             for unit in units {
-                let (lookup,correction_bytes):(String,usize)=tx.query_row(&format!("SELECT {},length(CAST(u.correction AS BLOB)) FROM source_units u LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE u.id=?1 AND u.page_id=?2",text(LOOKUP_TEXT,262_144)),params![unit,page],|r|Ok((read_text(r,0)?,r.get(1)?)))?;
-                // A failed unit form is reloaded as the first card. Reserve the
-                // complete escaped POST bound there so an invalid draft fits intact.
-                // Form-urlencoded escapes the HTML-special ASCII bytes as three
-                 // bytes; Askama needs at most six. State and revision each
-                 // render twice (revision's label is truncated). Four times the
-                 // wire bound covers every submitted field at two copies.
-                 let form_omitted = !cards.is_empty() && !budget.reserve(correction_bytes.saturating_mul(6));
+                // The Correct form is prefilled with the stored correction (up to 80,000 bytes) or the
+                // extracted text (up to 65,536); a longer text is not prefilled (the page read
+                // returns none). Reserve exactly the escaped bytes rendered: Askama writes each of
+                // & < > " ' as five bytes (`&#38;` etc.), so a character costs its length plus four.
+                // The prefill renders once per card. Only the Correct form is omitted past the
+                // budget (Accept and Reject stay). The first card is not charged: a refused draft
+                // is rendered there and relies on the 1,280 KiB reserve above (its revision renders
+                // three times, a forged state is truncated to 200 characters, the draft fields at
+                // most once each).
+                let prefill = "CASE WHEN u.state='corrected' THEN u.correction ELSE u.raw_text END";
+                let limit = "CASE WHEN u.state='corrected' THEN 80000 ELSE 65536 END";
+                let mut escaped = String::new();
+                for c in ["&","<",">","\"","''"] { let _ = std::fmt::Write::write_fmt(&mut escaped, format_args!("+4*(length({prefill})-length(replace({prefill},'{c}','')))")); }
+                let (lookup,correction_bytes):(String,usize)=tx.query_row(&format!("SELECT {},CASE WHEN typeof({prefill})='text' AND length(CAST({prefill} AS BLOB))<={limit} THEN length(CAST({prefill} AS BLOB)){escaped} ELSE 0 END FROM source_units u LEFT JOIN source_search_text t ON t.unit_id=u.id WHERE u.id=?1 AND u.page_id=?2",text(LOOKUP_TEXT,262_144)),params![unit,page],|r|Ok((read_text(r,0)?,r.get(1)?)))?;
+                let form_omitted = !cards.is_empty() && !budget.reserve(correction_bytes);
                 let retained=budget.retain(&lookup,12);
                 let preview=retained.len()!=lookup.len();
                 let (advice,next)=advice.remove(&unit).unwrap_or_default();
@@ -782,8 +795,10 @@ impl Store {
             }
             let next_unit=tx.query_row(&format!("{} SELECT id,position-1 FROM ordered WHERE state='unreviewed' ORDER BY position LIMIT 1",super::materials::ORDERED_UNITS),[page],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
             let next_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
+            let prev_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page<(SELECT pdf_page FROM source_pages WHERE id=?1) ORDER BY p.pdf_page DESC LIMIT 1",[page],|r|r.get(0)).optional()?;
+            let following_page=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
             let next_incomplete=tx.query_row("SELECT p.id FROM source_pages p WHERE p.source_id=(SELECT source_id FROM source_pages WHERE id=?1) AND p.pdf_page>(SELECT pdf_page FROM source_pages WHERE id=?1) AND p.complete=0 AND NOT EXISTS(SELECT 1 FROM source_units u WHERE u.page_id=p.id AND u.state='unreviewed') ORDER BY p.pdf_page LIMIT 1",[page],|r|r.get(0)).optional()?;
-            Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,next_incomplete,primary},budget))
+            Ok((Screen{reads:ScreenReads::Complete,geometry,width,height,overlay,overlay_omitted:count>2000,regions_omitted,cards,notes,notes_next,next_unit,next_page,next_incomplete,primary,units_total:count,units_reviewed,prev_page,following_page},budget))
              });
             // Drop the progress handler before authority checks and the reduced
             // response. Only reads run under the handler; no interrupted writes.
@@ -791,7 +806,7 @@ impl Store {
                  Err(AppError::Invalid(READ_TIMEOUT)) => read_with_deadline(&tx, "reduced", || {
                     let (document,pdf):(i64,i64)=tx.query_row("SELECT coalesce(m.document_id,0),p.pdf_page FROM source_pages p LEFT JOIN source_document_members m ON m.source_id=p.source_id WHERE p.id=?1",[page],|r|Ok((r.get(0)?,r.get(1)?)))?;
                     let primary=super::documents::primary_state(&tx,document,pdf)?;
-                    Ok((Screen{reads:ScreenReads::Deadline,geometry:false,width:0.0,height:0.0,overlay:Vec::new(),overlay_omitted:true,regions_omitted:true,cards:Vec::new(),notes:Vec::new(),notes_next:None,next_unit:None,next_page:None,next_incomplete:None,primary},Budget::default()))
+                    Ok((Screen{reads:ScreenReads::Deadline,geometry:false,width:0.0,height:0.0,overlay:Vec::new(),overlay_omitted:true,regions_omitted:true,cards:Vec::new(),notes:Vec::new(),notes_next:None,next_unit:None,next_page:None,next_incomplete:None,primary,units_total:0,units_reviewed:0,prev_page:None,following_page:None},Budget::default()))
                  }),
                 other => other,
             }?;
