@@ -152,6 +152,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
+- Agreement plan (`docs/source-agreement-plan.md`, reviewed): D1 (batch accept for independent
+  readings only at first, recommended) and D2 (server-written rationale prefix). Then slice 1.
 - Remaining LAN and multi-device scope to support.
 - Exact editions for D&D, Pathfinder (remaster or not), Vampire and MÖRK BORG.
 - When that work starts: print/export priorities, UI and answer languages, acceptable latency,
