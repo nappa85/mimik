@@ -178,8 +178,8 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
      forms. The Correct form is prefilled with the stored correction for a corrected unit and
      with `raw_text` otherwise; the prefill's escaped bytes are reserved in the card budget, and
      past it only the Correct form is omitted (Accept and Reject stay, with the existing "open
-     the full decision form" link). A correction identical to the extracted text is refused
-     with "Nothing was changed: use Accept". Labels name the decision and the unit (two
+     the full decision form" link). A correction identical to the prefilled text is saved as
+     today (no new refusal). Labels name the decision and the unit (two
      rationale fields per card).
    - **Error card:** after a refused save all three forms of that card carry the submitted
      revision (so a stale page cannot be decided without reloading, as today), only the
@@ -201,8 +201,8 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
    - In the reduced screen "only the first unit decision form" means the first card's three
      forms.
    Tests: each form posts without script (hidden fields, CSRF), the error card's revision on all
-   three forms, the forged-state message at card level, the refused no-change correction, the
-   prefill budget and omission, the scoped region hook, the reduced screen, the keyboard help.
+   three forms, the forged-state message at card level, an unchanged prefilled correction
+   saved as today, the prefill budget and omission, the scoped region hook, the reduced screen, the keyboard help.
 
    **3b. Agreement on the screen** (after slice 2; built on 3a).
    - **Agreement bar** at the top of the review column: the summary ("18 match, 6 differ, 3
@@ -239,18 +239,20 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
      unit is in no unit".
    - **Page image:** orphan words outlined in their own style with a legend entry, at most 2,000
      drawn with "N not drawn" past that.
-   - **Memo:** only the exclusion-free pass (words, tokens, verdicts before step 2's caller
-     exclusions) is memoised with the proposals (page revision, words size, rule version); the
-     open suggestions and the source's exclusion boxes (with their `exclusion_revision`) are read
-     and applied on every view, so dismissing a suggestion or confirming a box shows at once.
-     Slice 4's handler never uses the memo.
+   - **Memo:** the pass without the caller exclusions is memoised with the proposals, keyed by
+     page revision, words size, rule version and the source's `exclusion_revision` (exclusion
+     boxes act at the start of the rule, so they are part of the key, not applied afterwards);
+     the caller exclusions (open suggestions, proposals, shape score, text budget) only mark
+     candidates and are applied on every view, so dismissing a suggestion shows at once. Slice
+     4's handler never uses the memo.
    - **Error render:** a refused save renders with `show=all`, so the draft binding and its
      link stay valid; its agreement bar is computed like any view.
    Tests: tab membership and counts, the default rule (independent with batch vs other kinds),
    an invalid `show`, the filtered window and its cursors, `unit=` and `to` overriding a hiding
    tab, `show` round-tripping through a save to the next unit of the tab, the escaped and
    bounded difference, the orphan overlay bound, a same-layer page with full cards in
-   `matching`, the memo seeing a dismissed suggestion and a confirmed box at once.
+   `matching`, the memo seeing a dismissed suggestion and a confirmed box at once, and the memoised pass plus
+   the per-view exclusions equal to a fresh `evaluate`.
    An owner browser check closes each of 3a and 3b.
 4. **Batch accept.** A form in the agreement bar, "Accept the N matching units", listing their
    numbers, with the D2 rationale. It is offered only for the kinds D1 allows. The POST carries
