@@ -152,9 +152,9 @@ valid.
 7. **Route D: owner text.** Markdown or HTML split into blocks, aligned to a PDF reading by the
    step-8 rule, giving suggestions only, bound to the
    target source's bundle hash and unit revisions, with the same stale and decision rules.
-8. **Agreement view and batch accept:** the alignment rule across readings (region overlap and
-   normalised text) defined in its own plan; both readings stay unreviewed until the owner
-   decides.
+8. **Agreement view and batch accept:** own plan, `docs/source-agreement-plan.md` (first
+   against the stored text-layer words; readings of other sources later); both readings stay
+   unreviewed until the owner decides.
 9. **Docs and gate.** `docs/sources-and-retrieval.md` rewritten for the routes,
    `docs/release-scope.md` (route B Linux-only), notices, the prototype tools retired or kept as
    developer tools, limitations updated; migration, browser, hostile-input and unpacked-release
