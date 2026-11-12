@@ -1424,7 +1424,12 @@ mod tests {
         #[test]
         fn two_swapped_words_differ(t in tokens(), a in any::<prop::sample::Index>(), b in any::<prop::sample::Index>()) {
             let (i, j) = (a.index(t.len()), b.index(t.len()));
-            prop_assume!(fold(&t[i]) != fold(&t[j]));
+            // Compared as the rule compares them: NFC first, then the fold. Two spellings of
+            // one word ("é" and "e" + U+0301) swap into the same text, which rightly agrees.
+            let same = |x: &str, y: &str| {
+                fold(&x.nfc().collect::<String>()) == fold(&y.nfc().collect::<String>())
+            };
+            prop_assume!(!same(&t[i], &t[j]));
             let mut swapped = t.clone();
             swapped.swap(i, j);
             prop_assert!(differs(&single_line(&t, &swapped)));
