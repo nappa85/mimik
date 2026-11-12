@@ -52,6 +52,7 @@ pub(super) fn routes() -> Router<AuthState> {
         )
         .route("/admin/materials/pages/{id}/image", get(image))
         .route("/admin/materials/pages/{id}/tables/new", get(table_form))
+        .route("/admin/materials/pages/{id}/tables/image", get(table_image))
         .route(
             "/assets/source-review.js",
             get(|| async {
@@ -667,6 +668,35 @@ async fn region(
         .material_region_data(auth.clone(), page, unit, permit)
         .await
         .map_err(|e| error(&e))?;
+    crop_response(&state, auth, input).await
+}
+/// The table form's reference image: the page cropped to the area the table would cover.
+async fn table_image(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Query(fields): Query<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let (ids, _, malformed) = table_query(&fields);
+    if let Some(message) = malformed {
+        return Err(error(&AppError::Invalid(message)));
+    }
+    let permit = crate::sources::region::admit().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let input = state
+        .sessions
+        .store
+        .material_table_region_data(auth.clone(), page, ids, permit)
+        .await
+        .map_err(|e| error(&e))?;
+    crop_response(&state, auth, input).await
+}
+/// Crops off the async threads under the admission permit, rechecks the Owner, answers a PNG.
+async fn crop_response(
+    state: &AuthState,
+    auth: crate::auth::RequestAuth,
+    input: crate::sources::region::RegionInput,
+) -> AuthResult {
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = input.permit;
         crate::sources::region::crop(
@@ -1355,6 +1385,19 @@ struct TableEditor {
     shape_key: String,
     rationale: String,
     message: String,
+    /// Reference images: the page size in PDF points and the selected units' outlines.
+    /// Set only after a successful prefill with usable page geometry.
+    reference: Option<Reference>,
+}
+
+struct Reference {
+    pdf_page: i64,
+    width: f64,
+    height: f64,
+    crop_url: String,
+    outlines: Vec<(i64, String)>,
+    /// Selected units with no four-point outline.
+    missing: usize,
 }
 
 struct ShapeChoice {
@@ -1381,7 +1424,31 @@ impl TableEditor {
             shape_key: String::new(),
             rationale: String::new(),
             message: String::new(),
+            reference: None,
         }
+    }
+
+    /// The reference images, from the prefill's own unit ids; none without page geometry.
+    fn set_outlines(&mut self, prefill: &crate::sources::materials::TablePrefill) {
+        self.reference = prefill.page_size.map(|(width, height)| {
+            let query: Vec<String> = prefill
+                .units
+                .iter()
+                .map(|(id, _)| format!("unit={id}"))
+                .collect();
+            Reference {
+                pdf_page: prefill.pdf_page,
+                width,
+                height,
+                crop_url: format!(
+                    "/admin/materials/pages/{}/tables/image?{}",
+                    self.page,
+                    query.join("&")
+                ),
+                outlines: prefill.outlines.clone(),
+                missing: prefill.units.len().saturating_sub(prefill.outlines.len()),
+            }
+        });
     }
 
     /// The plain unit ids (no revisions) the "Read as" form submits back.
@@ -1421,21 +1488,13 @@ fn table_editor_response(editor: &TableEditor, status: StatusCode) -> AuthResult
     response.extensions_mut().insert(TrustedDraft);
     Ok(response)
 }
-/// The create-table form, prefilled from the units chosen with the cards' checkboxes.
-async fn table_form(
-    State(state): State<AuthState>,
-    session: Session,
-    Path(page): Path<i64>,
-    Query(fields): Query<Vec<(String, String)>>,
-) -> AuthResult {
-    let auth = owner_auth(&state, &session).await?;
-    let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
-    let mut editor = TableEditor::new(page, csrf);
-    // `unit` (repeated) and at most one `shape`; nothing else is read from the URL.
+/// The table form's query: `unit` (repeated) and at most one `shape`; nothing else is read from
+/// the URL. The message is set when anything else was sent or a value does not parse.
+fn table_query(fields: &[(String, String)]) -> (Vec<i64>, Option<Shape>, Option<&'static str>) {
     let mut shape = None;
     let mut ids = Vec::new();
     let mut malformed = None;
-    for (key, value) in &fields {
+    for (key, value) in fields {
         match key.as_str() {
             "unit" => match value.parse::<i64>() {
                 Ok(id) => ids.push(id),
@@ -1448,6 +1507,19 @@ async fn table_form(
             _ => malformed = Some("Choose 1-200 different units for a table."),
         }
     }
+    (ids, shape, malformed)
+}
+/// The create-table form, prefilled from the units chosen with the cards' checkboxes.
+async fn table_form(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Query(fields): Query<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
+    let mut editor = TableEditor::new(page, csrf);
+    let (ids, shape, malformed) = table_query(&fields);
     let prefill = match malformed {
         None => {
             state
@@ -1460,6 +1532,7 @@ async fn table_form(
     };
     match prefill {
         Ok(prefill) => {
+            editor.set_outlines(&prefill);
             editor.revision = prefill.page_revision;
             editor.units = prefill
                 .units
@@ -1518,6 +1591,7 @@ async fn refresh_table_notes(
         .material_table_prefill(auth, page, ids, shape)
         .await
     {
+        editor.set_outlines(&prefill);
         editor.shapes = shape_choices(Some(prefill.shape), &prefill.scores, editor.units.len());
         editor.problems = prefill.problems;
         editor.overlaps = overlap_note(&prefill.overlaps);

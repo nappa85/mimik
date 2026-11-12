@@ -568,7 +568,7 @@ impl Screen {
         matches!(self.reads, ScreenReads::Deadline)
     }
 }
-fn points(polygon: &[[f64; 2]; 4]) -> String {
+pub(super) fn points(polygon: &[[f64; 2]; 4]) -> String {
     polygon
         .iter()
         .map(|[x, y]| format!("{x},{y}"))

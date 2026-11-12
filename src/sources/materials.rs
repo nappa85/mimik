@@ -177,6 +177,19 @@ impl Store {
         .await
     }
 
+    /// The page cropped to the area a table over `units` would cover: a reference image, the
+    /// same crop code and input bounds as one unit's region. Nothing is stored.
+    pub(crate) async fn material_table_region_data(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        units: Vec<i64>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<super::region::RegionInput, AppError> {
+        check_table_units(&units)?;
+        self.table_region_data(auth, page, units, permit).await
+    }
+
     /// The draft grid for the selected units, read as `shape` or, without one, as the best
     /// fitting shape (corrected text where a unit was corrected, the extraction otherwise).
     /// The draft is a suggestion for the editor; it records nothing.
@@ -187,23 +200,12 @@ impl Store {
         units: Vec<i64>,
         shape: Option<Shape>,
     ) -> Result<TablePrefill, AppError> {
-        if units.is_empty()
-            || units.len() > super::tables::MAX_TABLE_SOURCES
-            || units
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != units.len()
-        {
-            return Err(AppError::Invalid(
-                "Choose 1-200 different units for a table.",
-            ));
-        }
+        check_table_units(&units)?;
         self.run_bounded_auth(move |db| {
             let tx = db.transaction()?;
             auth.recheck_owner(&tx)?;
-            let revision: i64 = tx
-                .query_row("SELECT revision FROM source_pages WHERE id=?1", [page], |r| r.get(0))
+            let (revision, pdf_page): (i64, i64) = tx
+                .query_row("SELECT revision,pdf_page FROM source_pages WHERE id=?1", [page], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?
                 .ok_or(AppError::SourceNotFound)?;
             let sql = format!(
@@ -219,6 +221,7 @@ impl Store {
             let mut rows = Vec::with_capacity(units.len());
             let mut boxes = Vec::new();
             let mut polygons = Vec::new();
+            let mut outlines = Vec::new();
             let mut any_corrected = false;
             let mut stored = None;
             let mut total = 0_usize;
@@ -229,6 +232,9 @@ impl Store {
                 })?;
                 for item in found {
                     let (position, unit, unit_revision, text, polygon, corrected) = item?;
+                    if let Ok(quad) = serde_json::from_str::<[[f64; 2]; 4]>(&polygon) {
+                        outlines.push((unit, super::review::points(&quad)));
+                    }
                     polygons.push(polygon);
                     any_corrected |= corrected;
                     total += text.len();
@@ -264,6 +270,11 @@ impl Store {
                 Ok(())
             })?;
             rows.sort_unstable();
+            let page_size = match super::documents::polygon_bounds(&tx, page) {
+                Ok((w, h)) if (1.0..=4000.0).contains(&w) && (1.0..=4000.0).contains(&h) => Some((w, h)),
+                Ok(_) | Err(AppError::Invalid("Page geometry is missing or invalid.")) => None,
+                Err(error) => return Err(error),
+            };
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             let texts: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
@@ -273,6 +284,7 @@ impl Store {
             let (overlap_checked, overlaps) = overlap_check(&boxes, &units);
             Ok(TablePrefill {
                 page_revision: revision,
+                pdf_page,
                 units: rows.iter().map(|r| (r.1, r.2)).collect(),
                 grid: super::tables::format_grid(&chosen.rows),
                 header: chosen.header,
@@ -282,6 +294,8 @@ impl Store {
                 words: words_state,
                 overlap_checked,
                 overlaps,
+                outlines,
+                page_size,
             })
         })
         .await
@@ -881,6 +895,7 @@ pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(
 /// the shapes found.
 pub(crate) struct TablePrefill {
     pub page_revision: i64,
+    pub pdf_page: i64,
     /// Selected units in reading order with the revision the Owner saw.
     pub units: Vec<(i64, i64)>,
     pub grid: String,
@@ -898,6 +913,27 @@ pub(crate) struct TablePrefill {
     pub overlaps: Vec<i64>,
     /// False when the page has too many units for the overlap check; it was not done.
     pub overlap_checked: bool,
+    /// The page size in PDF points and the selected units' outlines (unit, SVG points), for the
+    /// whole-page reference; empty when the page has no usable geometry.
+    pub page_size: Option<(f64, f64)>,
+    pub outlines: Vec<(i64, String)>,
+}
+
+/// 1-200 different units, as a table takes them.
+fn check_table_units(units: &[i64]) -> Result<(), AppError> {
+    if units.is_empty()
+        || units.len() > super::tables::MAX_TABLE_SOURCES
+        || units
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != units.len()
+    {
+        return Err(AppError::Invalid(
+            "Choose 1-200 different units for a table.",
+        ));
+    }
+    Ok(())
 }
 
 /// Units of one page read for the overlap check.

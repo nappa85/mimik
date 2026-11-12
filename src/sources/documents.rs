@@ -509,6 +509,50 @@ fn table_decisions(page: i64, table: &OwnerTable) -> Vec<UnitDecision> {
         .collect()
 }
 
+/// The combined box of units' polygons, clamped to the page: the area a table unit covers.
+/// Shared by saving a table and by the table form's reference crop.
+pub(super) struct UnionBox {
+    width: f64,
+    height: f64,
+    bounds: [f64; 4],
+}
+
+impl UnionBox {
+    pub(super) fn new(width: f64, height: f64) -> Self {
+        Self {
+            width,
+            height,
+            bounds: [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
+        }
+    }
+
+    pub(super) fn add(&mut self, polygon: &str) -> Result<(), AppError> {
+        let unusable = AppError::Invalid("A selected unit has no usable region.");
+        let points: Vec<[f64; 2]> = serde_json::from_str(polygon)
+            .ok()
+            .filter(|p: &Vec<[f64; 2]>| !p.is_empty() && p.len() <= 1024)
+            .ok_or(unusable)?;
+        for [x, y] in points {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(AppError::Invalid("A selected unit has no usable region."));
+            }
+            let (x, y) = (x.clamp(0.0, self.width), y.clamp(0.0, self.height));
+            self.bounds = [
+                self.bounds[0].min(x),
+                self.bounds[1].min(y),
+                self.bounds[2].max(x),
+                self.bounds[3].max(y),
+            ];
+        }
+        Ok(())
+    }
+
+    pub(super) fn polygon(&self) -> [[f64; 2]; 4] {
+        let [x0, y0, x1, y1] = self.bounds;
+        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    }
+}
+
 /// Reject the selected units in one operation and add one owner `Table` unit whose box is
 /// the union of theirs (clamped to the page). The new unit stays `unreviewed`: the Owner
 /// checks the generated table against the page like any other unit. All checks and writes share
@@ -522,7 +566,7 @@ pub(super) fn add_owner_table(
 ) -> Result<(i64, Vec<i64>), AppError> {
     validate_table(table)?;
     let (width, height) = polygon_bounds(tx, page)?;
-    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let mut union = UnionBox::new(width, height);
     for source in &table.sources {
         let (revision, polygon): (i64, String) = tx
             .query_row(
@@ -535,21 +579,9 @@ pub(super) fn add_owner_table(
         if revision != source.revision {
             return Err(AppError::Conflict);
         }
-        let points: Vec<[f64; 2]> = serde_json::from_str(&polygon)
-            .ok()
-            .filter(|p: &Vec<[f64; 2]>| !p.is_empty() && p.len() <= 1024)
-            .ok_or(AppError::Invalid("A selected unit has no usable region."))?;
-        for [x, y] in points {
-            if !x.is_finite() || !y.is_finite() {
-                return Err(AppError::Invalid("A selected unit has no usable region."));
-            }
-            x0 = x0.min(x.clamp(0.0, width));
-            x1 = x1.max(x.clamp(0.0, width));
-            y0 = y0.min(y.clamp(0.0, height));
-            y1 = y1.max(y.clamp(0.0, height));
-        }
+        union.add(&polygon)?;
     }
-    let polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    let polygon = union.polygon();
     let html = super::tables::html(&table.cells, table.header);
     let operation = new_operation_id();
     let owner = OwnerRow {

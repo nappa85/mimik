@@ -167,3 +167,14 @@ textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b
 /* While the create-table bar shows, keep room for it so it covers nothing (also when jumping to #unit-N). */
 .has-table-bar { scroll-padding-bottom: 5rem; }
 .has-table-bar body { padding-bottom: 5rem; }
+.table-layout { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.table-reference { min-width: 0; }
+.table-reference figure { margin: 0; }
+.table-reference figure img { display: block; max-width: 100%; height: auto; border: 1px solid #8884; }
+.table-edit { min-width: 0; }
+.table-outline polygon { fill: #075ba622; stroke: #075ba6; stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
+@media (min-width: 60rem) {
+  .table-layout { grid-template-columns: minmax(18rem, 2fr) minmax(0, 3fr); }
+  .table-reference { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
+}
+@media (min-width: 60rem) { .table-layout.table-layout-single { grid-template-columns: minmax(0, 1fr); } }

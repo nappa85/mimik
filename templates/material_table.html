@@ -15,6 +15,15 @@
 {% if !problems.is_empty() %}<div class="panel" role="status" id="table-problems"><p>The draft has problems to check; none was fixed automatically:</p><ul>{% for problem in problems %}<li>{{ problem }}</li>{% endfor %}</ul></div>{% endif %}
 {% if !words_note.is_empty() %}<p role="status" id="table-words-note">{{ words_note }}</p>{% endif %}
 {% if overlap_unchecked %}<p role="status" id="table-overlap-unchecked">This page has too many units to check whether the table would cover unselected ones; the overlap check was not done.</p>{% endif %}
+<div class="table-layout{% if reference.is_none() %} table-layout-single{% endif %}">
+{% if let Some(reference) = reference %}<aside class="table-reference" aria-label="Original PDF reference">
+<figure><img src="{{ reference.crop_url }}" alt="Original PDF page {{ reference.pdf_page }}, area of the selected units" loading="lazy"><figcaption>The area the table will cover, from the original page. <a href="{{ reference.crop_url }}" target="_blank" rel="noopener">Open full-size crop<span class="sr-only"> (opens in a new tab)</span></a></figcaption></figure>
+<details id="table-page-reference"><summary>Whole page with the selected units outlined</summary>
+{% if reference.missing > 0 %}<p>{{ reference.missing }} selected unit(s) have no outline.</p>{% endif %}
+<div class="review-image"><img src="/admin/materials/pages/{{ page }}/image" alt="Original PDF page {{ reference.pdf_page }} with the selected units outlined" loading="lazy">
+<svg class="table-outline" viewBox="0 0 {{ reference.width }} {{ reference.height }}" aria-label="Selected units in PDF points" role="group">{% for outline in reference.outlines %}<polygon points="{{ outline.1 }}" data-outline-unit="{{ outline.0 }}"><title>Unit {{ outline.0 }}</title></polygon>{% endfor %}</svg></div></details>
+</aside>{% endif %}
+<div class="table-edit">
 <p>Saving rejects the {{ units.len() }} selected unit(s) with your rationale and adds one table unit covering their combined area. It stays unreviewed until you check it against the original page. The original units and the raw extraction stay as they are.</p>
 <form method="post" action="/admin/materials/pages/{{ page }}/tables" data-form="table" data-target="{{ page }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ revision }}">{% if !shape_key.is_empty() %}<input type="hidden" name="shape" value="{{ shape_key }}">{% endif %}
@@ -24,5 +33,6 @@
 <label>Rationale / what you checked (required; at most 5,000 Unicode characters)<textarea name="rationale" required maxlength="5000" {% if !message.is_empty() && rationale.trim().is_empty() %}aria-invalid="true" aria-describedby="table-error"{% endif %}>{{ "\n" }}{{ rationale }}</textarea></label>
 <p>Reviewer identity is recorded from your signed-in Owner account.</p><button>Create table</button>
 </form>
+</div></div>
 {% endif %}
 {% endblock %}

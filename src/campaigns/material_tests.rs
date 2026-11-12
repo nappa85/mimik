@@ -6852,3 +6852,308 @@ async fn material_fresh_page_trims_a_label_list_from_the_prose_after_it() {
     assert_eq!(found[0].units, [3, 4, 5, 6]);
     assert_eq!(found[0].shape, crate::sources::shapes::Shape::Label);
 }
+
+// ---- Table form: original-page references (crop of the combined area, whole page outlined) ----
+
+/// A grey RGB page image at one pixel per PDF point (the fixture page is 200 by 300 points).
+fn grey_page_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 200, 300);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&vec![128; 200 * 300 * 3])
+            .unwrap();
+    }
+    bytes
+}
+
+async fn png_size(response: axum::response::Response) -> (u32, u32) {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let reader = png::Decoder::new(std::io::Cursor::new(bytes.to_vec()))
+        .read_info()
+        .unwrap();
+    (reader.info().width, reader.info().height)
+}
+
+/// The table fixture with a second page (unit 900) in the same finalized source.
+async fn two_page_table_fixture(
+    extra: &'static str,
+) -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    let (dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let image = grey_page_png();
+    store
+        .run(move |db| {
+            db.execute_batch(PAGE_TWO)?;
+            db.execute_batch(extra)?;
+            db.execute("UPDATE source_pages SET png=?1 WHERE id=1", [image])?;
+            for (id, polygon) in [(1, BOX1), (2, BOX2)] {
+                db.execute("UPDATE source_units SET polygon=?1 WHERE id=?2", params![polygon, id])?;
+            }
+            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":200,"height_points":300},{"pdf_page":2,"width_points":200,"height_points":300}]});
+            db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64), serde_json::to_vec(&prepared)?])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)", ["c".repeat(64)])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(2,1,?1)", ["d".repeat(64)])?;
+            db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)", params!["a".repeat(64), "b".repeat(64)])?;
+            crate::sources::documents::register_import(db, 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    (dir, store, auth)
+}
+
+#[tokio::test]
+async fn material_table_image_crops_the_combined_area_for_the_owner_only() {
+    use tower::ServiceExt;
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = two_page_table_fixture("").await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let url = "/admin/materials/pages/1/tables/image";
+    // BOX1 is 40x90 and BOX2 60x70 starting at (60,20): the union is x 10..120, y 10..100.
+    assert_eq!(
+        png_size(router_get(&app, &auth[0], &format!("{url}?unit=1&unit=2")).await).await,
+        (110, 90)
+    );
+    assert_eq!(
+        png_size(router_get(&app, &auth[0], &format!("{url}?unit=2&unit=1&shape=roll")).await)
+            .await,
+        (110, 90)
+    );
+    let unit_route = "/admin/materials/pages/1/units/1/image";
+    assert_eq!(
+        png_size(router_get(&app, &auth[0], &format!("{url}?unit=1")).await).await,
+        png_size(router_get(&app, &auth[0], unit_route).await).await
+    );
+    // A non-owner and a signed-out request are refused as the unit image route refuses them.
+    assert_eq!(
+        router_get(&app, &auth[1], &format!("{url}?unit=1"))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        router_get(&app, &auth[1], unit_route).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let anonymous = |path: String| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .header("host", "127.0.0.1:3000")
+                    .header("accept", "text/html")
+                    .header("sec-fetch-mode", "navigate")
+                    .header("sec-fetch-dest", "document")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    let signed_out = anonymous(unit_route.to_owned()).await;
+    assert_ne!(signed_out, StatusCode::OK);
+    assert_eq!(anonymous(format!("{url}?unit=1")).await, signed_out);
+    // Refused like the table form: no units, repeats, malformed ids, extra fields, too many.
+    let many: Vec<String> = (1..=201).map(|u| format!("unit={u}")).collect();
+    for (query, status) in [
+        (String::new(), StatusCode::UNPROCESSABLE_ENTITY),
+        ("?unit=x".to_owned(), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            "?unit=1&unit=1".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "?unit=1&other=1".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("?unit=1&unit=900".to_owned(), StatusCode::FORBIDDEN),
+        ("?unit=9999".to_owned(), StatusCode::FORBIDDEN),
+        (
+            format!("?{}", many.join("&")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let form = router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new{query}"),
+        )
+        .await
+        .status();
+        let image = router_get(&app, &auth[0], &format!("{url}{query}"))
+            .await
+            .status();
+        assert_eq!(image, status, "{query:.40}");
+        assert_eq!(image, form, "{query:.40}");
+    }
+}
+
+#[tokio::test]
+async fn material_table_form_shows_the_original_references_only_with_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(SHAPE_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let references = |html: &str| {
+        let parsed = scraper::Html::parse_document(html);
+        let select = |css: &str| {
+            parsed
+                .select(&scraper::Selector::parse(css).unwrap())
+                .map(|e| {
+                    (
+                        e.value().attr("src").map(str::to_owned),
+                        e.value().attr("data-outline-unit").map(str::to_owned),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        (
+            select("aside.table-reference figure img"),
+            select("details#table-page-reference img"),
+            select("details#table-page-reference svg polygon"),
+        )
+    };
+    let check = |html: &str| {
+        // The URL is HTML-escaped in the page and decodes to the plain query.
+        assert!(!html.contains("image?unit=1&unit=2"), "{html}");
+        assert!(html.contains("Open full-size crop"));
+        assert!(html.contains("alt=\"Original PDF page 1, area of the selected units\""));
+        let (crop, whole, outlines) = references(html);
+        assert_eq!(crop.len(), 1);
+        assert_eq!(
+            crop[0].0.as_deref(),
+            Some("/admin/materials/pages/1/tables/image?unit=1&unit=2")
+        );
+        assert_eq!(
+            whole[0].0.as_deref(),
+            Some("/admin/materials/pages/1/image")
+        );
+        let units: Vec<_> = outlines.iter().map(|o| o.1.clone().unwrap()).collect();
+        assert_eq!(units.len(), 2);
+        assert!(units.contains(&"1".to_owned()) && units.contains(&"2".to_owned()));
+        assert!(
+            html.contains("points=\"10,10 50,10 50,100 10,100\""),
+            "{html}"
+        );
+    };
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=2&unit=1",
+        )
+        .await,
+    )
+    .await;
+    check(&html);
+    // A refused save keeps the references (and the typed cells).
+    let refused = table_post(&app, &auth[0], table_fields(&["1:1", "2:1"], "a | b", "")).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
+    check(&html);
+    // No units: no images.
+    for query in ["", "?unit=x"] {
+        let html = body(
+            router_get(
+                &app,
+                &auth[0],
+                &format!("/admin/materials/pages/1/tables/new{query}"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !html.contains("<img") && !html.contains("tables/image"),
+            "{html}"
+        );
+        assert!(!html.contains("table-page-reference"));
+    }
+}
+
+#[tokio::test]
+async fn material_table_image_of_a_union_past_the_page_edge_is_clamped() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Unit 3 hangs over the page's right and bottom edges (the page is 200 by 300 points).
+    let (_dir, store, auth) = two_page_table_fixture(
+        "UPDATE source_units SET polygon='[[150,250],[260,250],[260,350],[150,350]]' WHERE id=3;",
+    )
+    .await;
+    let app = crate::auth::app(store).await.unwrap();
+    assert_eq!(
+        png_size(
+            router_get(
+                &app,
+                &auth[0],
+                "/admin/materials/pages/1/tables/image?unit=3"
+            )
+            .await
+        )
+        .await,
+        (50, 50)
+    );
+}
+
+#[tokio::test]
+async fn material_table_form_without_a_usable_reference_shows_no_images() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // A refused save whose notes cannot be recomputed (201 units): the cells stay, and no
+    // reference shows "page 0" or a crop that cannot load.
+    let (_dir, store, auth) = table_fixture_with(SHAPE_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let many: Vec<String> = (1..=201).map(|u| format!("{u}:1")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let refused = table_post(&app, &auth[0], table_fields(&refs, "a | b", "checked")).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
+    assert!(
+        !html.contains("page 0") && !html.contains("tables/image") && !html.contains("<img"),
+        "{html}"
+    );
+    assert!(!html.contains("table-page-reference"));
+    // A page without usable geometry (width outside the accepted range): no crop, no outlines.
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            for (id, polygon) in [(1, BOX1), (2, BOX2)] {
+                db.execute("UPDATE source_units SET polygon=?1 WHERE id=?2", params![polygon, id])?;
+            }
+            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":5000,"height_points":300}]});
+            db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64), serde_json::to_vec(&prepared)?])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)", ["c".repeat(64)])?;
+            db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)", params!["a".repeat(64), "b".repeat(64)])?;
+            crate::sources::documents::register_import(db, 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store).await.unwrap();
+    let response = router_get(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/tables/new?unit=1&unit=2",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(field_value(&html, "textarea[name=cells]").contains('|'));
+    assert!(
+        !html.contains("tables/image")
+            && !html.contains("<img")
+            && !html.contains("table-page-reference"),
+        "{html}"
+    );
+}
