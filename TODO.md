@@ -63,9 +63,16 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   (launch_tests.rs:463), and `assistant::runtime::launch::tests::a_leftover_still_running_blocks_the_start_and_keeps_its_entry`
   (failed once in a full gate beside another test container, 2026-11-10; 3 of 3 alone), and seven
   `assistant::download::task` tests on a slow post-merge run (2026-11-10, 1,360 s suite; the
-  5 s `until` poll in task_tests.rs:214 ran out; 52 of 52 pass alone, 3 of 3): find their
-  timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
+  5 s `until` poll in task_tests.rs:214 ran out; 52 of 52 pass alone, 3 of 3; `a_blocked_disk_write_never_blocks_cancel_or_the_runtime` failed once in the
+  table-shapes gate, 2026-11-12, 3 of 3 alone): find their timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
+
+- **Worker live tests for the Words operation (table shapes, merged 2026-11-12):** the ignored
+  `sources::worker::live_tests` (words in unit polygons, rotated page, offset CropBox, UserUnit 2,
+  the corpus words case) have not run: containers cannot create the sandbox. Owner to choose: a
+  relaxed container (seccomp/apparmor unconfined, SYS_ADMIN, no network) or a host run from the
+  main checkout. Then re-import the IT source (`mimik import-source` on the same bundle fills word
+  boxes once) and browser-check the table form and page proposals.
 
 - **Resume after a reboot:** build/test agent worktrees with
   `WT=<worktree> [CPUS=n] sh /home/marco/Progetti/mimik/target/agent-tools/ci.sh <cmd>` (image
