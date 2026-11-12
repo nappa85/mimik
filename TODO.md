@@ -7,7 +7,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Current work
 
 - **Agreement view and batch accept** (`docs/source-agreement-plan.md`, reviewed, SRC-21): slice 1
-  (agreement core) in progress on branch `agreement`.
+  (agreement core) committed on branch `agreement` (b60a411); slice 2 (measurement on a copy of
+  the owner database, `/media/data/mimik/agreement/`) in progress.
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
@@ -74,8 +75,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `sources::worker::live_tests` (words in unit polygons, rotated page, offset CropBox, UserUnit 2,
   the corpus words case) have not run: containers cannot create the sandbox. Owner to choose: a
   relaxed container (seccomp/apparmor unconfined, SYS_ADMIN, no network) or a host run from the
-  main checkout. Then re-import the IT source (`mimik import-source` on the same bundle fills word
-  boxes once) and browser-check the table form and page proposals.
+  main checkout. The real worker did run once on the host (2026-11-12): the owner's re-import of
+  the IT source stored word boxes for all 18 pages. Still owed: the browser check of the table
+  form and page proposals.
 
 - **Resume after a reboot:** build/test agent worktrees with
   `WT=<worktree> [CPUS=n] sh /home/marco/Progetti/mimik/target/agent-tools/ci.sh <cmd>` (image
