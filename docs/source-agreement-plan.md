@@ -47,19 +47,19 @@ Later readings (not in this plan): a second source of the same document (route A
 B, through `source_documents`) and an OCR reading of a same-layer page, through the same rule
 with another word source.
 
-## Decisions this plan needs (owner)
+## Decisions
 
-- **D1. Batch accept beyond independent readings.** SRC-14 allows batch accept "where two
-  readings agree"; a same-layer page has one reading checked against its own origin, so
-  offering batch accept there changes SRC-14. Recommended: independent only at first, so a
-  same-layer or unknown page shows the differences and orphan words but its units are accepted
-  one by one; decide same layer again after slice 2 measures it. Alternative: offer it for same
-  layer too, labelled "matches the PDF text layer it was read from"; cost: a wrong character
-  map, such as a single dropped ligature, can be accepted in a batch.
-- **D2. Rationale.** Each event's rationale starts with a fixed prefix the server writes and
-  the Owner cannot edit (`agreement-v1; independent:` then the Owner's text, prefilled with
-  "matches the PDF text layer word for word; checked against the page image"), so every batch
-  decision names the rule and kind it relied on.
+Decided (SRC-21, 2026-11-12):
+
+- **D1.** Batch accept only for independent readings; same-layer, unknown and derived pages show
+  differences and orphan words, and their units are accepted one by one. Decided again after
+  slice 2 measures same-layer pages (a change there also changes SRC-14).
+- **D2.** Each batch decision's rationale starts with a prefix the server writes and the Owner
+  cannot edit (`agreement-v1; independent:`), followed by the Owner's text, prefilled with
+  "matches the PDF text layer word for word; checked against the page image".
+
+Still owed with slice 5:
+
 - **SRC-20 change.** Stored words may be shown to the Owner as the other side of a difference
   (labelled "PDF text layer"), never as text of their own, never as evidence, never searched.
 
@@ -138,7 +138,7 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
      that differ are counted too. Each number is reported with its count; a zero on a few
      hundred units from one manual is weak evidence, and the report says so.
    - **Yield:** reported, no bar: the share of unreviewed prose units that agree, per manual
-     and kind. The Owner decides from it whether slices 3 and 4 go ahead and settles D1.
+     and kind. The Owner decides from it whether slices 3 and 4 go ahead and revisits D1.
    Conclusions (aggregates only) go to `docs/results.md`.
 3. **Review screen.** On the page: a summary ("41 units match, 6 differ, 3 have no second
    reading, 4 are excluded, 12 text-layer words are in no unit"), each card's verdict or
@@ -165,7 +165,7 @@ Each slice is its own reviewed change; slices 3 and 4 may merge together.
    agrees, a unit id from another page, a forged rationale prefix, CSRF, a non-owner, and that
    no word row or raw text changes.
 5. **Docs.** `docs/sources-and-retrieval.md` (rule, screen, batch); decisions (D1, D2, the
-   SRC-20 change, SRC-14 if D1 widens it); limitations (drop caps, chained lines, a word claimed
+   SRC-20 change, SRC-14 if D1 is widened later); limitations (drop caps, chained lines, a word claimed
    by two units, self-declared provenance, a text layer that is itself OCR, same-layer limits,
    words inside image text); the umbrella's step 8 removed. Owner browser check of the page and
    of one batch.

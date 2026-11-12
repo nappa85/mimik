@@ -6,6 +6,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
+- **Agreement view and batch accept** (`docs/source-agreement-plan.md`, reviewed, SRC-21): slice 1
+  (agreement core) in progress on branch `agreement`.
+
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
@@ -152,8 +155,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- Agreement plan (`docs/source-agreement-plan.md`, reviewed): D1 (batch accept for independent
-  readings only at first, recommended) and D2 (server-written rationale prefix). Then slice 1.
 - Remaining LAN and multi-device scope to support.
 - Exact editions for D&D, Pathfinder (remaster or not), Vampire and MÖRK BORG.
 - When that work starts: print/export priorities, UI and answer languages, acceptable latency,
