@@ -392,9 +392,34 @@ pub(super) fn add_owner_operation(
     unit: &OwnerUnit,
     operation: Option<&str>,
 ) -> Result<i64, AppError> {
+    add_owner_with(tx, page, unit, operation, Some(unit.revision), None)
+}
+
+/// Like [`add_owner_operation`] for a caller that inserts several owner units and has checked
+/// the page revision itself, once, before its first write: each write bumps the page revision,
+/// so the revision in `unit` is not compared again. `bounds` is the page's size, read once by
+/// the caller, so the polygon is checked without reading the geometry again.
+pub(super) fn add_owner_operation_checked(
+    tx: &Transaction<'_>,
+    page: i64,
+    unit: &OwnerUnit,
+    operation: &str,
+    bounds: (f64, f64),
+) -> Result<i64, AppError> {
+    add_owner_with(tx, page, unit, Some(operation), None, Some(bounds))
+}
+
+fn add_owner_with(
+    tx: &Transaction<'_>,
+    page: i64,
+    unit: &OwnerUnit,
+    operation: Option<&str>,
+    expected_revision: Option<i64>,
+    bounds: Option<(f64, f64)>,
+) -> Result<i64, AppError> {
     let html = owner_html(&unit.text);
     let raw_text = if operation.is_some() {
-        // A merge's initial owner transcription is the exact plain text approved in
+        // A merge's or split's initial owner transcription is the exact plain text approved in
         // the operation (025 checks equality), not the wrapped display projection.
         unit.text.clone()
     } else {
@@ -408,7 +433,8 @@ pub(super) fn add_owner_operation(
             polygon: &unit.polygon,
             html: &html,
             raw_text,
-            expected_revision: unit.revision,
+            expected_revision,
+            bounds,
         },
     )?;
     super::store::review_unit_operation(tx, page, id, &owner_review(unit), operation)
@@ -425,7 +451,10 @@ struct OwnerRow<'a> {
     polygon: &'a [[f64; 2]; 4],
     html: &'a str,
     raw_text: String,
-    expected_revision: i64,
+    /// The page revision the Owner saw; `None` when the caller checked it already.
+    expected_revision: Option<i64>,
+    /// The page's size when the caller has read it already; else it is read from the database.
+    bounds: Option<(f64, f64)>,
 }
 
 /// Insert one unreviewed owner unit with its search text; the caller records any decision.
@@ -438,11 +467,17 @@ fn insert_owner(tx: &Transaction<'_>, page: i64, row: &OwnerRow<'_>) -> Result<i
         )
         .optional()?
         .ok_or(AppError::SourceNotFound)?;
-    if revision != row.expected_revision {
+    if row
+        .expected_revision
+        .is_some_and(|expected| expected != revision)
+    {
         return Err(AppError::Conflict);
     }
     super::store::next_revision(revision)?;
-    validate_polygon(tx, page, row.polygon)?;
+    match row.bounds {
+        Some((width, height)) => validate_polygon_bounds(width, height, row.polygon)?,
+        None => validate_polygon(tx, page, row.polygon)?,
+    }
     let (html, raw_text) = (row.html, &row.raw_text);
     let search = super::search::search_text(html)?;
     // SQL may have inserted a reserved ordinal ahead of the allocator; never reuse it.
@@ -615,7 +650,8 @@ pub(super) fn add_owner_table(
         polygon: &polygon,
         raw_text: super::tables::plain(&table.cells),
         html: &html,
-        expected_revision: table.revision,
+        expected_revision: Some(table.revision),
+        bounds: None,
     };
     let unit = insert_owner(tx, page, &owner)?;
     let mut events = Vec::with_capacity(table.sources.len());
@@ -658,22 +694,33 @@ pub(crate) const MAX_MERGE_CHARS: usize = 20_000;
 /// The fewest units a merge takes.
 pub(crate) const MIN_MERGE_SOURCES: usize = 2;
 
+/// The length bounds of one owner text (a merge's, or a split part's): at most 20,000
+/// characters, and at most 64 KiB raw and once escaped as HTML. The messages are the caller's.
+fn check_text_bounds(
+    text: &str,
+    too_many_chars: &'static str,
+    too_many_bytes: &'static str,
+) -> Result<(), AppError> {
+    if text.chars().count() > MAX_MERGE_CHARS {
+        return Err(AppError::Invalid(too_many_chars));
+    }
+    if text.len() > MAX_MERGE_BYTES || owner_html(text).len() > MAX_MERGE_BYTES {
+        return Err(AppError::Invalid(too_many_bytes));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_merge(merge: &OwnerMerge) -> Result<(), AppError> {
     if merge.sources.len() < MIN_MERGE_SOURCES
         || merge.sources.len() > super::tables::MAX_TABLE_SOURCES
     {
         return Err(AppError::Invalid("Choose 2-200 different units to merge."));
     }
-    if merge.text.chars().count() > MAX_MERGE_CHARS {
-        return Err(AppError::Invalid(
-            "Merged text is too long: at most 20,000 characters.",
-        ));
-    }
-    if merge.text.len() > MAX_MERGE_BYTES || owner_html(&merge.text).len() > MAX_MERGE_BYTES {
-        return Err(AppError::Invalid(
-            "Merged text is too long: at most 64 KiB, and & < > and quotes count for up to 6 bytes each; shorten it.",
-        ));
-    }
+    check_text_bounds(
+        &merge.text,
+        "Merged text is too long: at most 20,000 characters.",
+        "Merged text is too long: at most 64 KiB, and & < > and quotes count for up to 6 bytes each; shorten it.",
+    )?;
     validate_batch(&merge_rejections(0, merge), &merge.rationale)?;
     validate_owner(&merge_unit(merge, [[0.0; 2]; 4]))
 }
@@ -729,6 +776,264 @@ pub(super) fn add_owner_merge(
     }
     record_replacement(tx, unit, &operation, "merge", anchor, 1)?;
     Ok((unit, events))
+}
+
+/// The most parts a split makes, and the fewest.
+pub(crate) const MAX_SPLIT_PARTS: usize = 20;
+pub(crate) const MIN_SPLIT_PARTS: usize = 2;
+
+/// A unit the Owner splits: the page revision and the unit's revision seen, the text with `---`
+/// lines between the parts, the parts' boxes (computed on save when `None`) and one rationale.
+#[derive(Clone)]
+pub struct OwnerSplit {
+    pub revision: i64,
+    pub unit: TableSource,
+    pub text: String,
+    pub boxes: Option<Vec<[[f64; 2]; 4]>>,
+    pub actor: String,
+    pub rationale: String,
+}
+
+/// Whether a line is a part marker: exactly `---` once trimmed (a CR before the newline included).
+pub(crate) fn is_split_marker(line: &str) -> bool {
+    line.trim() == "---"
+}
+
+/// The parts of `text`: a part starts after each marker line. Parts are trimmed.
+#[must_use]
+pub(crate) fn split_parts(text: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    for line in text.lines() {
+        if is_split_marker(line) {
+            parts.push(String::new());
+        } else {
+            let part = parts.last_mut().expect("one part at least");
+            if !part.is_empty() {
+                part.push('\n');
+            }
+            part.push_str(line);
+        }
+    }
+    parts.into_iter().map(|p| p.trim().to_owned()).collect()
+}
+
+/// The parts of a split text, checked: 2-20, none empty, each within the text bounds. Nothing
+/// is read from the database.
+pub(crate) fn check_split_text(text: &str) -> Result<Vec<String>, AppError> {
+    if text.len() > MAX_MERGE_BYTES {
+        return Err(AppError::Invalid(
+            "The text is too long: at most 64 KiB in all.",
+        ));
+    }
+    let parts = split_parts(text);
+    if parts.len() < MIN_SPLIT_PARTS || parts.len() > MAX_SPLIT_PARTS {
+        return Err(AppError::Invalid(
+            "Split into 2-20 parts: put a line with only --- between the parts.",
+        ));
+    }
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            return Err(AppError::Invalid(PART_EMPTY[index]));
+        }
+        check_text_bounds(
+            part,
+            "A part is too long: at most 20,000 characters.",
+            "A part is too long: at most 64 KiB, and & < > and quotes count for up to 6 bytes each; shorten it.",
+        )?;
+    }
+    Ok(parts)
+}
+
+/// Check the text, boxes and rationale of a split and return its parts; nothing is read from
+/// the database.
+pub(super) fn validate_split(split: &OwnerSplit) -> Result<Vec<String>, AppError> {
+    let parts = check_split_text(&split.text)?;
+    if let Some(boxes) = &split.boxes
+        && boxes.len() != parts.len()
+    {
+        return Err(AppError::Invalid(
+            "The number of parts changed after the areas were shown; show the areas again.",
+        ));
+    }
+    validate_batch(&split_rejection(0, split), &split.rationale)?;
+    for part in &parts {
+        validate_owner(&split_unit(split, part, [[0.0; 2]; 4]))?;
+    }
+    Ok(parts)
+}
+
+/// The refusal for an empty part, naming it (`AppError::Invalid` takes static text).
+const PART_EMPTY: [&str; 20] = [
+    "Part 1 is empty.",
+    "Part 2 is empty.",
+    "Part 3 is empty.",
+    "Part 4 is empty.",
+    "Part 5 is empty.",
+    "Part 6 is empty.",
+    "Part 7 is empty.",
+    "Part 8 is empty.",
+    "Part 9 is empty.",
+    "Part 10 is empty.",
+    "Part 11 is empty.",
+    "Part 12 is empty.",
+    "Part 13 is empty.",
+    "Part 14 is empty.",
+    "Part 15 is empty.",
+    "Part 16 is empty.",
+    "Part 17 is empty.",
+    "Part 18 is empty.",
+    "Part 19 is empty.",
+    "Part 20 is empty.",
+];
+
+fn split_rejection(page: i64, split: &OwnerSplit) -> Vec<UnitDecision> {
+    rejections(
+        page,
+        std::slice::from_ref(&split.unit),
+        &split.actor,
+        &split.rationale,
+    )
+}
+
+fn split_unit(split: &OwnerSplit, text: &str, polygon: [[f64; 2]; 4]) -> OwnerUnit {
+    OwnerUnit {
+        revision: split.revision,
+        polygon,
+        text: text.to_owned(),
+        actor: split.actor.clone(),
+        rationale: split.rationale.clone(),
+    }
+}
+
+/// A box `[x0, y0, x1, y1]` as the four corners an owner unit stores.
+#[must_use]
+pub(crate) fn box_polygon(b: [f64; 4]) -> [[f64; 2]; 4] {
+    [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]
+}
+
+/// What the split areas are computed from: the unit's stored box and the page's size and words.
+pub(super) fn split_areas_for(
+    db: &Connection,
+    page: i64,
+    polygon: &str,
+    parts: &[&str],
+) -> Result<super::split_areas::Areas, AppError> {
+    let size = polygon_bounds(db, page)?;
+    let stored: Option<Vec<u8>> = db
+        .query_row(
+            &format!(
+                "SELECT CASE WHEN length(words)<={} THEN words END FROM source_page_words WHERE page_id=?1",
+                super::page_words::MAX_ROW_BYTES
+            ),
+            [page],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    let words = stored.and_then(|bytes| super::page_words::decode(&bytes).ok());
+    super::split_areas::areas(parts, polygon, words.as_deref(), size).ok_or(AppError::Invalid(
+        "The unit has no usable region, so the parts' areas cannot be computed.",
+    ))
+}
+
+/// Split one unit: one owner `Text` unit per part, each recorded `corrected` with its text, the
+/// unit `rejected`, all in one operation, then the `split` replacement rows (parts 1..n,
+/// anchored at the unit). The page revision and the unit's revision are checked once, before the
+/// first write; the owner inserts then skip the page revision check, which each write bumps.
+/// Returns the new unit ids in part order and every event id (the parts' first).
+pub(super) fn add_owner_split(
+    tx: &Transaction<'_>,
+    page: i64,
+    split: &OwnerSplit,
+    mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
+) -> Result<(Vec<i64>, Vec<i64>), AppError> {
+    let parts = validate_split(split)?;
+    let page_revision: i64 = tx
+        .query_row(
+            "SELECT revision FROM source_pages WHERE id=?1",
+            [page],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
+    if page_revision != split.revision {
+        return Err(AppError::Conflict);
+    }
+    let (revision, state, kind, polygon, text_bytes): (i64, String, String, String, i64) = tx
+        .query_row(
+            "SELECT revision,state,kind,polygon,coalesce(length(CAST(CASE WHEN state='corrected' THEN correction ELSE raw_text END AS BLOB)),0) FROM source_units WHERE id=?1 AND page_id=?2",
+            params![split.unit.unit, page],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
+    if revision != split.unit.revision {
+        return Err(AppError::Conflict);
+    }
+    if state == "rejected" {
+        return Err(AppError::Invalid(
+            "This unit is already rejected; it cannot be split.",
+        ));
+    }
+    if kind != "Text" {
+        return Err(AppError::Invalid("Only text units can be split."));
+    }
+    // The form cuts a longer text at 64 KiB; what was cut cannot be kept in any part.
+    if usize::try_from(text_bytes).is_ok_and(|bytes| bytes > MAX_MERGE_BYTES) {
+        return Err(AppError::Invalid(
+            "The unit holds more than 64 KiB of text, which the form cut; it cannot be split here.",
+        ));
+    }
+    let bounds = polygon_bounds(tx, page)?;
+    let boxes: Vec<[[f64; 2]; 4]> = if let Some(boxes) = &split.boxes {
+        boxes.clone()
+    } else {
+        let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+        split_areas_for(tx, page, &polygon, &refs)?
+            .boxes
+            .into_iter()
+            .map(box_polygon)
+            .collect()
+    };
+    for polygon in &boxes {
+        validate_polygon_bounds(bounds.0, bounds.1, polygon).map_err(|_| {
+            AppError::Invalid("Every part's box must be inside the page and not empty.")
+        })?;
+    }
+    let operation = new_operation_id();
+    let mut units = Vec::with_capacity(parts.len());
+    let mut events = Vec::with_capacity(parts.len() + 1);
+    for (text, polygon) in parts.iter().zip(&boxes) {
+        let event = add_owner_operation_checked(
+            tx,
+            page,
+            &split_unit(split, text, *polygon),
+            &operation,
+            bounds,
+        )?;
+        sidecar(tx, event)?;
+        units.push(tx.query_row(
+            "SELECT unit_id FROM source_review_events WHERE id=?1",
+            [event],
+            |r| r.get::<_, i64>(0),
+        )?);
+        events.push(event);
+    }
+    for decision in split_rejection(page, split) {
+        let event = super::store::review_unit_operation(
+            tx,
+            page,
+            decision.unit,
+            &decision.review,
+            Some(&operation),
+        )?;
+        sidecar(tx, event)?;
+        events.push(event);
+    }
+    for (part, unit) in (1..).zip(&units) {
+        record_replacement(tx, *unit, &operation, "split", split.unit.unit, part)?;
+    }
+    Ok((units, events))
 }
 
 /// The first of `units` (all on `page`) in reading order, computed inside the caller's

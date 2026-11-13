@@ -231,7 +231,7 @@ fn shadows(a: &PageWord, b: &PageWord) -> bool {
 
 /// Step 1: drop a word drawn again (see [`shadows`]) over an earlier one. Linear: words are
 /// bucketed by text and a 3-point grid cell.
-fn without_shadows<'a>(words: &[&'a PageWord]) -> Vec<&'a PageWord> {
+pub(super) fn without_shadows<'a>(words: &[&'a PageWord]) -> Vec<&'a PageWord> {
     let mut grid: HashMap<(&str, i32, i32), Vec<&PageWord>> = HashMap::new();
     let mut kept = Vec::with_capacity(words.len());
     for &word in words {
@@ -254,7 +254,7 @@ fn without_shadows<'a>(words: &[&'a PageWord]) -> Vec<&'a PageWord> {
 
 /// Step 3: group into lines by vertical overlap over half the smaller height, lines top to
 /// bottom, words left to right. Stream order is not used.
-fn lines_of(mut words: Vec<&PageWord>) -> Vec<Vec<&PageWord>> {
+pub(super) fn lines_of(mut words: Vec<&PageWord>) -> Vec<Vec<&PageWord>> {
     words.sort_by(|a, b| {
         a.bounds[1]
             .total_cmp(&b.bounds[1])
@@ -412,7 +412,8 @@ pub(super) fn unit_tokens(text: &str) -> (Vec<String>, usize) {
 
 /// A text-layer token. A line-end hyphenation takes two words and matches the unit's token
 /// joined without the hyphen or with it.
-enum LayerToken {
+#[derive(Clone)]
+pub(super) enum LayerToken {
     Word(String),
     Hyphenated {
         joined: String,
@@ -425,6 +426,7 @@ enum LayerToken {
 struct Flat {
     text: String,
     line_end: bool,
+    index: usize,
 }
 
 /// Whether `first` (at a line end) and `second` (the next line's first word) are one word
@@ -444,12 +446,30 @@ fn hyphenation(first: &str, second: &str) -> Option<(String, String)> {
     Some((format!("{stem}{second}"), format!("{stem}-{second}")))
 }
 
+/// A text-layer token with the words behind it: indices into the words of `lines` read line by
+/// line (the bullet glyphs the unit side lost included), one for a word, two for a hyphenation.
+/// A word split on a no-break space gives several tokens that share its index.
+pub(super) struct Layered {
+    pub(super) token: LayerToken,
+    pub(super) words: Vec<usize>,
+}
+
 /// `bullets` is how many list markers the unit side lost: that many line-start bullet glyphs
 /// of the text layer are dropped, no more.
-fn layer_tokens(lines: &[Vec<&PageWord>], mut bullets: usize) -> Vec<LayerToken> {
+pub(super) fn layer_tokens(lines: &[Vec<&PageWord>], bullets: usize) -> Vec<LayerToken> {
+    layered_tokens(lines, bullets)
+        .into_iter()
+        .map(|entry| entry.token)
+        .collect()
+}
+
+/// [`layer_tokens`] with the word indices behind each token.
+pub(super) fn layered_tokens(lines: &[Vec<&PageWord>], mut bullets: usize) -> Vec<Layered> {
     let mut flat: Vec<Flat> = Vec::new();
+    let mut index = 0;
     for line in lines {
         for (i, word) in line.iter().enumerate() {
+            index += 1;
             if i == 0 && bullets > 0 && BULLET_GLYPHS.contains(&word.text.as_str()) {
                 bullets -= 1;
                 continue;
@@ -457,6 +477,7 @@ fn layer_tokens(lines: &[Vec<&PageWord>], mut bullets: usize) -> Vec<LayerToken>
             flat.push(Flat {
                 text: word.text.nfc().collect(),
                 line_end: i + 1 == line.len(),
+                index: index - 1,
             });
         }
     }
@@ -468,37 +489,42 @@ fn layer_tokens(lines: &[Vec<&PageWord>], mut bullets: usize) -> Vec<LayerToken>
             && let Some(next) = flat.get(i + 1)
             && let Some((joined, kept)) = hyphenation(&word.text, &next.text)
         {
-            tokens.push(LayerToken::Hyphenated {
-                joined,
-                kept,
-                first: fold(&word.text),
-                second: fold(&next.text),
+            tokens.push(Layered {
+                token: LayerToken::Hyphenated {
+                    joined,
+                    kept,
+                    first: fold(&word.text),
+                    second: fold(&next.text),
+                },
+                words: vec![word.index, next.index],
             });
             i += 2;
         } else {
             // A word is split on whitespace like the unit's text (a no-break space).
-            tokens.extend(
-                fold(&word.text)
-                    .split_whitespace()
-                    .map(|part| LayerToken::Word(part.to_owned())),
-            );
+            tokens.extend(fold(&word.text).split_whitespace().map(|part| Layered {
+                token: LayerToken::Word(part.to_owned()),
+                words: vec![word.index],
+            }));
             i += 1;
         }
     }
     tokens
 }
 
-/// Linear equality of the unit's tokens and the text layer's.
-fn equal(unit: &[String], layer: &[LayerToken]) -> bool {
+/// How many of the unit's tokens each layer token consumed (1, or 2 for a hyphenation the unit
+/// wrote as two words), or `None` when the unit's tokens and the text layer's differ.
+pub(super) fn consumed(unit: &[String], layer: &[LayerToken]) -> Option<Vec<usize>> {
     let at = |i: usize| unit.get(i).map(String::as_str);
     let mut i = 0;
+    let mut counts = Vec::with_capacity(layer.len());
     for token in layer {
         match token {
             LayerToken::Word(word) => {
                 if at(i) != Some(word) {
-                    return false;
+                    return None;
                 }
                 i += 1;
+                counts.push(1);
             }
             LayerToken::Hyphenated {
                 joined,
@@ -508,15 +534,22 @@ fn equal(unit: &[String], layer: &[LayerToken]) -> bool {
             } => {
                 if at(i) == Some(joined) || at(i) == Some(kept) {
                     i += 1;
+                    counts.push(1);
                 } else if at(i) == Some(first) && at(i + 1) == Some(second) {
                     i += 2;
+                    counts.push(2);
                 } else {
-                    return false;
+                    return None;
                 }
             }
         }
     }
-    i == unit.len()
+    (i == unit.len()).then_some(counts)
+}
+
+/// Linear equality of the unit's tokens and the text layer's.
+fn equal(unit: &[String], layer: &[LayerToken]) -> bool {
+    consumed(unit, layer).is_some()
 }
 
 fn display_tokens(layer: &[LayerToken]) -> Vec<&str> {
@@ -1382,6 +1415,38 @@ mod tests {
 
     fn single_line(unit_tokens: &[String], layer: &[String]) -> Verdict {
         laid_out(unit_tokens, layer, None)
+    }
+
+    #[test]
+    fn layer_token_word_indices_are_consistent_with_the_tokens() {
+        // A bullet glyph (index 0, dropped), a hyphenated pair across lines, a no-break space.
+        let words = layout(&[&["\u{2022}", "alpha", "exam-"], &["ple", "beta\u{a0}gamma"]]);
+        let refs: Vec<&PageWord> = words.iter().collect();
+        let lines = lines_of(refs);
+        let layered = layered_tokens(&lines, 1);
+        let flat: Vec<&PageWord> = lines.iter().flatten().copied().collect();
+        // Same tokens as the plain function, same order.
+        let plain = layer_tokens(&lines, 1);
+        assert_eq!(layered.len(), plain.len());
+        let indices: Vec<Vec<usize>> = layered.iter().map(|e| e.words.clone()).collect();
+        assert_eq!(indices, [vec![1], vec![2, 3], vec![4], vec![4]]);
+        for entry in &layered {
+            for &index in &entry.words {
+                assert!(index < flat.len());
+            }
+            match &entry.token {
+                LayerToken::Word(text) => {
+                    assert!(fold(&flat[entry.words[0]].text).contains(text.as_str()));
+                }
+                LayerToken::Hyphenated { first, second, .. } => {
+                    assert_eq!(fold(&flat[entry.words[0]].text), *first);
+                    assert_eq!(fold(&flat[entry.words[1]].text), *second);
+                }
+            }
+        }
+        let (tokens, bullets) = unit_tokens("* alpha exam-ple beta gamma");
+        assert_eq!(bullets, 1);
+        assert_eq!(consumed(&tokens, &plain), Some(vec![1, 1, 1, 1]));
     }
 
     proptest! {

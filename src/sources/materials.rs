@@ -420,6 +420,102 @@ impl Store {
         .await
     }
 
+    /// What the split form needs for `unit`: its text (correction where corrected, else the
+    /// extraction), revisions, box and the page size, and with `parts` the areas computed for
+    /// them. A rejected or non-text unit is refused. Records nothing.
+    pub(crate) async fn material_split_read(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+        parts: Option<Vec<String>>,
+    ) -> Result<SplitRead, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let (page_revision, pdf_page): (i64, i64) = tx
+                .query_row("SELECT revision,pdf_page FROM source_pages WHERE id=?1", [page], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            let sql = format!(
+                "SELECT revision,state,kind,CASE WHEN state='corrected' THEN {} ELSE {} END,{} FROM source_units WHERE id=?1 AND page_id=?2",
+                text("correction", 80_000),
+                text("raw_text", 65_536),
+                text("polygon", 65_536)
+            );
+            let (unit_revision, state, kind, whole, polygon) = super::review::read_with_deadline(&tx, "split", || {
+                tx.query_row(&sql, params![unit, page], |r| {
+                    Ok((r.get::<_, i64>(0)?, read_text(r, 1)?, read_text(r, 2)?, read_text(r, 3)?, read_text(r, 4)?))
+                })
+                .optional()?
+                .ok_or(AppError::SourceNotFound)
+            })?;
+            if state == "rejected" {
+                return Err(AppError::Invalid("This unit is already rejected; it cannot be split."));
+            }
+            if kind != "Text" {
+                return Err(AppError::Invalid("Only text units can be split."));
+            }
+            let page_size = usable_page_size(&tx, page)?;
+            let areas = match (&parts, page_size) {
+                (Some(parts), Some(_)) => {
+                    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+                    Some(super::documents::split_areas_for(&tx, page, &polygon, &refs)?)
+                }
+                _ => None,
+            };
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            let cut = whole.len() > super::documents::MAX_MERGE_BYTES;
+            let text = if cut { cut_at(&whole, super::documents::MAX_MERGE_BYTES).to_owned() } else { whole };
+            let crop = page_size.and_then(|size| {
+                let b = super::table_words::Region::parse(&polygon)?.bounds();
+                let b = [b[0].clamp(0.0, size.0), b[1].clamp(0.0, size.1), b[2].clamp(0.0, size.0), b[3].clamp(0.0, size.1)];
+                (b[0] < b[2] && b[1] < b[3]).then_some(b)
+            });
+            Ok(SplitRead {
+                page_revision,
+                unit_revision,
+                pdf_page,
+                has_marker: text.lines().any(super::documents::is_split_marker),
+                text,
+                cut,
+                page_size,
+                crop,
+                areas,
+            })
+        })
+        .await
+    }
+
+    /// Split a unit: one immediate transaction rechecks the Owner, CSRF, page revision and the
+    /// unit's revision, adds one corrected owner unit per part and rejects the unit.
+    pub(crate) async fn material_create_split(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        page: i64,
+        mut split: super::OwnerSplit,
+    ) -> Result<(Vec<i64>, Vec<i64>), AppError> {
+        split.actor = format!("account:{}", auth.account_id());
+        super::documents::validate_split(&split)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let created = super::documents::add_owner_split(&tx, page, &split, |tx, event| {
+                    audit(tx, &auth, event)
+                })?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                tx.commit()?;
+                Ok(created)
+            })
+        })
+        .await
+    }
+
     /// Tables the page's unreviewed units seem to hold (see [`super::proposals`]), uncapped in
     /// reading order. Read only: nothing is stored and no worker job is started. Computed on
     /// every page view unless memoised for this page revision. A timed-out read yields no
@@ -706,8 +802,8 @@ impl Store {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
             let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position,{} FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000),text("raw_text",65536)))?;
                 q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,raw_text:r.get::<_,Option<String>>(9)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
-            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=source_review_events.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=source_review_events.operation_id AND source_review_events.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)),CASE WHEN source_review_events.id=(SELECT min(m.id) FROM source_review_events m WHERE m.operation_id=source_review_events.operation_id) AND EXISTS(SELECT 1 FROM source_owner_replacements r WHERE r.kind='merge' AND r.operation_id=source_review_events.operation_id) THEN (SELECT r.unit_id FROM source_owner_replacements r WHERE r.kind='merge' AND r.operation_id=source_review_events.operation_id) END,CASE WHEN source_review_events.id=(SELECT min(m.id) FROM source_review_events m WHERE m.operation_id=source_review_events.operation_id) AND EXISTS(SELECT 1 FROM source_owner_replacements r WHERE r.kind='merge' AND r.operation_id=source_review_events.operation_id) THEN (SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=source_review_events.operation_id AND o.state='rejected' ORDER BY o.id)) END FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
-                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?),merge:r.get::<_,Option<i64>>(11)?.zip(r.get::<_,Option<String>>(12)?)})))?.collect::<Result<Vec<_>,_>>()?};
+            let events={let mut q=tx.prepare(&format!("SELECT e.id,e.unit_id,{},{},{},{},{},e.previous_revision,e.operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=e.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=e.operation_id AND e.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)),CASE WHEN r.kind='merge' THEN r.unit_id END,CASE WHEN r.kind='merge' THEN (SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=e.operation_id AND o.state='rejected' ORDER BY o.id)) END,CASE WHEN r.kind='split' THEN r.anchor_unit_id END,CASE WHEN r.kind='split' THEN (SELECT group_concat(unit_id,', ') FROM (SELECT p.unit_id FROM source_owner_replacements p WHERE p.operation_id=e.operation_id ORDER BY p.part)) END FROM source_review_events e LEFT JOIN (SELECT operation_id,min(id) AS first_id FROM source_review_events WHERE page_id=?1 GROUP BY operation_id) f ON f.first_id=e.id LEFT JOIN source_owner_replacements r ON r.operation_id=f.operation_id AND r.part=1 WHERE e.page_id=?1 AND e.id>?2 ORDER BY e.id LIMIT 51",text("e.created_at",64),text("e.actor",400),text("e.state",32),text("e.rationale",20000),text("e.correction",80000)))?;
+                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?),merge:r.get::<_,Option<i64>>(11)?.zip(r.get::<_,Option<String>>(12)?),split:r.get::<_,Option<i64>>(13)?.zip(r.get::<_,Option<String>>(14)?)})))?.collect::<Result<Vec<_>,_>>()?};
             let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);
             page.units=units.rows.into_iter().map(|r|r.1).collect();page.events=events.rows.into_iter().map(|r|r.1).collect();
             Ok(MaterialPage{page,units_next:units.next,history_next:events.next})
@@ -1098,6 +1194,23 @@ pub(crate) struct MergePrefill {
     pub overlap_checked: bool,
     pub page_size: Option<(f64, f64)>,
     pub outlines: Vec<(i64, String)>,
+}
+
+/// What the split form shows for one unit.
+pub(crate) struct SplitRead {
+    pub page_revision: i64,
+    pub unit_revision: i64,
+    pub pdf_page: i64,
+    /// The unit's text, cut at 64 KiB.
+    pub text: String,
+    pub cut: bool,
+    /// The text already has a line that is exactly `---`.
+    pub has_marker: bool,
+    pub page_size: Option<(f64, f64)>,
+    /// The unit's box clamped to the page, `[x0, y0, x1, y1]`: what its crop shows.
+    pub crop: Option<[f64; 4]>,
+    /// The parts' areas, when parts were given and the page has usable geometry.
+    pub areas: Option<super::split_areas::Areas>,
 }
 
 /// `text` cut to at most `limit` bytes on a character boundary.

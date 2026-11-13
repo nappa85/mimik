@@ -6888,6 +6888,20 @@ async fn png_size(response: axum::response::Response) -> (u32, u32) {
 async fn two_page_table_fixture(
     extra: &'static str,
 ) -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    sized_two_page_fixture(
+        extra,
+        BOX1,
+        (serde_json::json!(200), serde_json::json!(300)),
+    )
+    .await
+}
+
+/// [`two_page_table_fixture`] with the first unit's box and the first page's size given.
+async fn sized_two_page_fixture(
+    extra: &'static str,
+    box1: &'static str,
+    (width, height): (serde_json::Value, serde_json::Value),
+) -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
     let (dir, store, auth, _clock) = fixture().await;
     seed(&store).await;
     let image = grey_page_png();
@@ -6896,10 +6910,10 @@ async fn two_page_table_fixture(
             db.execute_batch(PAGE_TWO)?;
             db.execute_batch(extra)?;
             db.execute("UPDATE source_pages SET png=?1 WHERE id=1", [image])?;
-            for (id, polygon) in [(1, BOX1), (2, BOX2)] {
+            for (id, polygon) in [(1, box1), (2, BOX2)] {
                 db.execute("UPDATE source_units SET polygon=?1 WHERE id=?2", params![polygon, id])?;
             }
-            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":200,"height_points":300},{"pdf_page":2,"width_points":200,"height_points":300}]});
+            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":width,"height_points":height},{"pdf_page":2,"width_points":200,"height_points":300}]});
             db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64), serde_json::to_vec(&prepared)?])?;
             db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)", ["c".repeat(64)])?;
             db.execute("INSERT INTO source_page_hashes VALUES(2,1,?1)", ["d".repeat(64)])?;
@@ -7161,3 +7175,6 @@ async fn material_table_form_without_a_usable_reference_shows_no_images() {
 
 #[path = "merge_tests.rs"]
 mod merge_tests;
+
+#[path = "split_tests.rs"]
+mod split_tests;

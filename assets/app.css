@@ -178,3 +178,13 @@ textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b
   .table-reference { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
 }
 @media (min-width: 60rem) { .table-layout.table-layout-single { grid-template-columns: minmax(0, 1fr); } }
+
+/* Split form: every part's area outlined on the unit's crop; the box being edited is .drawn-region. */
+.split-outline polygon { fill: #075ba622; stroke: #075ba6; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.split-outline polygon.split-other { fill: transparent; stroke-dasharray: 6 4; }
+.split-outline polygon.drawn-region { fill: #f6ba3b55; stroke: #b55b00; stroke-dasharray: none; }
+.split-overview img { max-width: 100%; height: auto; }
+.review-image > img { border: 0; }
+fieldset[data-split-part] details { margin: .5rem 0; }
+.split-link { margin: .5rem 0 0; }
+.split-outline text { fill: #075ba6; font-weight: bold; }

@@ -38,7 +38,8 @@ pub mod uploads;
 #[cfg(target_os = "linux")]
 pub mod worker;
 pub use documents::{
-    OwnerMerge, OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision, parse_page_list,
+    OwnerMerge, OwnerSplit, OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision,
+    parse_page_list,
 };
 pub use import::WordsReport;
 #[doc(hidden)]
@@ -50,6 +51,7 @@ pub(crate) mod region;
 pub(crate) mod review;
 pub(crate) mod search;
 pub(crate) mod shapes;
+pub(crate) mod split_areas;
 pub(crate) mod table_words;
 pub(crate) mod tables;
 pub use search::SEARCH_SCHEMA;
@@ -124,6 +126,8 @@ pub struct ReviewEvent {
     pub table: Option<(i64, String)>,
     /// Set on the first event of a merge operation: the merged unit and the units it replaced.
     pub merge: Option<(i64, String)>,
+    /// Set on the first event of a split operation: the split unit and its parts in order.
+    pub split: Option<(i64, String)>,
 }
 
 pub struct UnitView {

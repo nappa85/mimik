@@ -54,6 +54,10 @@ pub(super) fn routes() -> Router<AuthState> {
         .route("/admin/materials/pages/{id}/tables/new", get(table_form))
         .route("/admin/materials/pages/{id}/merges/new", get(merge_form))
         .route(
+            "/admin/materials/pages/{page}/units/{unit}/split",
+            get(split_form),
+        )
+        .route(
             "/admin/materials/pages/{id}/selection/image",
             get(selection_image),
         )
@@ -87,6 +91,14 @@ pub(super) fn routes() -> Router<AuthState> {
                 .route("/admin/materials/pages/{id}/owner-units", post(add_owner))
                 .route("/admin/materials/pages/{id}/tables", post(create_table))
                 .route("/admin/materials/pages/{id}/merges", post(create_merge))
+                .route(
+                    "/admin/materials/pages/{page}/units/{unit}/split",
+                    post(create_split),
+                )
+                .route(
+                    "/admin/materials/pages/{page}/units/{unit}/split/areas",
+                    post(split_areas),
+                )
                 .route("/admin/materials/pages/{id}/primary", post(primary))
                 .route("/admin/materials/sources/{id}/primary", post(primary_pages))
                 .route("/admin/materials/pages/{page}/units/{unit}", post(review))
@@ -136,6 +148,8 @@ struct PageCursor {
     table: i64,
     /// An owner merge the Owner just saved (checked before it is announced).
     merge: i64,
+    /// The first unit of a split the Owner just saved (checked before it is announced).
+    split: i64,
 }
 /// The decision a redirect confirms; only these fixed words are ever rendered.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -565,9 +579,11 @@ async fn page(
     let auth = owner_auth(&state, &session).await?;
     let mut created = 0;
     let mut merged = 0;
+    let mut split = 0;
     for (unit, kind, slot) in [
         (c.table, "table", &mut created),
         (c.merge, "merge", &mut merged),
+        (c.split, "split", &mut split),
     ] {
         if unit > 0
             && state
@@ -647,6 +663,12 @@ async fn page(
             "Merged into unit {merged}; the selected units are rejected and the new unit holds your text as a correction. Check it against the original page."
         );
         editor.notice_unit = merged;
+    }
+    if split > 0 {
+        editor.notice = format!(
+            "Split: unit {split} is the first of the new units; the original unit is rejected and each new unit holds your text as a correction. Check them against the original page."
+        );
+        editor.notice_unit = split;
     }
     html(&editor)
 }
@@ -1952,6 +1974,435 @@ async fn create_merge(
                 editor.set_notes(&prefill);
             }
             merge_editor_response(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "material_split.html")]
+struct SplitEditor {
+    page: i64,
+    unit: i64,
+    csrf: String,
+    /// The page and unit revisions the Owner saw, carried through every step.
+    revision: i64,
+    unit_revision: i64,
+    text: String,
+    rationale: String,
+    message: String,
+    /// The unit was read and may be split (the form shows).
+    open: bool,
+    pdf_page: i64,
+    cut: bool,
+    has_marker: bool,
+    /// The crop and the page size, and the boxes (submitted values) when the areas are shown.
+    view: Option<SplitView>,
+    boxes: Vec<PartBox>,
+    areas_note: String,
+}
+
+struct SplitView {
+    width: f64,
+    height: f64,
+    /// The crop's box as an SVG `viewBox` in PDF points, and the size of the part numbers.
+    view_box: String,
+    label: String,
+}
+
+/// One part's box as the four fields hold it, with its outline.
+struct PartBox {
+    number: usize,
+    values: [String; 4],
+    points: String,
+}
+
+impl PartBox {
+    fn new(number: usize, values: [String; 4]) -> Self {
+        let parsed: Option<Vec<f64>> = values
+            .iter()
+            .map(|v| v.trim().parse::<f64>().ok().filter(|n| n.is_finite()))
+            .collect();
+        let points = parsed.map_or_else(String::new, |n| {
+            format!(
+                "{},{} {},{} {},{} {},{}",
+                n[0], n[1], n[2], n[1], n[2], n[3], n[0], n[3]
+            )
+        });
+        Self {
+            number,
+            values,
+            points,
+        }
+    }
+}
+
+impl SplitEditor {
+    fn new(page: i64, unit: i64, csrf: String) -> Self {
+        Self {
+            page,
+            unit,
+            csrf,
+            revision: 0,
+            unit_revision: 0,
+            text: String::new(),
+            rationale: String::new(),
+            message: String::new(),
+            open: false,
+            pdf_page: 0,
+            cut: false,
+            has_marker: false,
+            view: None,
+            boxes: Vec::new(),
+            areas_note: String::new(),
+        }
+    }
+
+    /// The crop and page size of a read; nothing else is taken from it (the draft stays).
+    fn set_view(&mut self, read: &crate::sources::materials::SplitRead) {
+        self.pdf_page = read.pdf_page;
+        self.view = read.page_size.zip(read.crop).map(|((width, height), c)| {
+            let size = ((c[2] - c[0]).min(c[3] - c[1]) / 6.0).max(2.0);
+            SplitView {
+                width,
+                height,
+                view_box: format!("{} {} {} {}", c[0], c[1], c[2] - c[0], c[3] - c[1]),
+                label: format!("{size:.1}"),
+            }
+        });
+    }
+
+    /// Show the boxes to two decimals, rounded outward (left and top down, right and
+    /// bottom up) and never past the page, so a box on the page's edge still fits the page when
+    /// the shown values are saved as they are.
+    fn set_boxes(&mut self, boxes: &[[f64; 4]]) {
+        let page = self
+            .view
+            .as_ref()
+            .map_or((f64::MAX, f64::MAX), |v| (v.width, v.height));
+        self.boxes = boxes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let values = std::array::from_fn(|k| {
+                    let limit = if k % 2 == 0 { page.0 } else { page.1 };
+                    outward_value(b[k], k >= 2, limit)
+                });
+                PartBox::new(i + 1, values)
+            })
+            .collect();
+    }
+}
+
+/// One box value with two decimals, rounded down (`up` false) or up, and the page's own limit
+/// printed in full when rounding up would pass it.
+fn outward_value(value: f64, up: bool, limit: f64) -> String {
+    let scaled = value * 100.0;
+    let rounded = if up { scaled.ceil() } else { scaled.floor() } / 100.0;
+    if rounded > limit {
+        limit.to_string()
+    } else {
+        format!("{:.2}", rounded.max(0.0))
+    }
+}
+
+fn split_editor_response(editor: &SplitEditor, status: StatusCode) -> AuthResult {
+    let mut response = html(editor)?;
+    *response.status_mut() = status;
+    response.extensions_mut().insert(TrustedDraft);
+    Ok(response)
+}
+
+/// The split form for one unit, prefilled with its text.
+async fn split_form(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((page, unit)): Path<(i64, i64)>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
+    let mut editor = SplitEditor::new(page, unit, csrf);
+    match state
+        .sessions
+        .store
+        .material_split_read(auth, page, unit, None)
+        .await
+    {
+        Ok(read) => {
+            editor.open = true;
+            editor.revision = read.page_revision;
+            editor.unit_revision = read.unit_revision;
+            editor.cut = read.cut;
+            editor.has_marker = read.has_marker;
+            editor.set_view(&read);
+            editor.text = read.text;
+            html(&editor)
+        }
+        Err(e @ AppError::Invalid(_)) => {
+            editor.message = e.to_string();
+            split_editor_response(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+/// The fields of the split forms. Box fields (`box_{part}_{corner}`) are kept as submitted.
+struct SplitFields {
+    csrf: Option<String>,
+    revision: Option<i64>,
+    unit_revision: Option<i64>,
+    text: Option<String>,
+    rationale: Option<String>,
+    boxes: std::collections::BTreeMap<(usize, usize), String>,
+    malformed: bool,
+}
+
+fn split_fields(fields: Vec<(String, String)>) -> SplitFields {
+    let mut out = SplitFields {
+        csrf: None,
+        revision: None,
+        unit_revision: None,
+        text: None,
+        rationale: None,
+        boxes: std::collections::BTreeMap::new(),
+        malformed: false,
+    };
+    for (key, value) in fields {
+        let value = crate::form_text::newlines_to_lf(value);
+        match key.as_str() {
+            "csrf" if out.csrf.is_none() => out.csrf = Some(value),
+            "revision" if out.revision.is_none() => out.revision = value.parse().ok(),
+            "unit_revision" if out.unit_revision.is_none() => {
+                out.unit_revision = value.parse().ok();
+            }
+            "text" if out.text.is_none() => out.text = Some(value),
+            "rationale" if out.rationale.is_none() => out.rationale = Some(value),
+            _ => {
+                let corner = key
+                    .strip_prefix("box_")
+                    .and_then(|rest| rest.split_once('_'))
+                    .and_then(|(n, k)| Some((n.parse::<usize>().ok()?, k.parse::<usize>().ok()?)))
+                    .filter(|(n, k)| {
+                        (1..=crate::sources::documents::MAX_SPLIT_PARTS).contains(n) && *k < 4
+                    });
+                match corner {
+                    Some(at) if !out.boxes.contains_key(&at) => {
+                        out.boxes.insert(at, value);
+                    }
+                    _ => out.malformed = true,
+                }
+            }
+        }
+    }
+    out
+}
+
+impl SplitFields {
+    /// An editor holding the submitted draft, revisions and boxes.
+    fn editor(&self, page: i64, unit: i64, csrf: String) -> SplitEditor {
+        let mut editor = SplitEditor::new(page, unit, csrf);
+        editor.open = true;
+        editor.revision = self.revision.unwrap_or(0);
+        editor.unit_revision = self.unit_revision.unwrap_or(0);
+        editor.text = self.text.clone().unwrap_or_default();
+        editor.rationale = self.rationale.clone().unwrap_or_default();
+        let parts = self.boxes.keys().map(|(n, _)| *n).max().unwrap_or(0);
+        editor.boxes = (1..=parts)
+            .map(|n| {
+                PartBox::new(
+                    n,
+                    std::array::from_fn(|k| self.boxes.get(&(n, k)).cloned().unwrap_or_default()),
+                )
+            })
+            .collect();
+        editor
+    }
+}
+
+/// "Show the areas": computes every part's area and shows them on the unit's crop, one box
+/// editor per part. Writes nothing; the text comes in the body, never the URL.
+async fn split_areas(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((page, unit)): Path<(i64, i64)>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let fields = split_fields(fields);
+    let token = fields.csrf.clone().ok_or(StatusCode::FORBIDDEN)?;
+    csrf_admission(&session, &token).await?;
+    let mut editor = fields.editor(page, unit, token);
+    let submitted = std::mem::take(&mut editor.boxes);
+    let checked = if fields.malformed || fields.revision.is_none() || fields.unit_revision.is_none()
+    {
+        Err(AppError::Invalid(
+            "The split form was incomplete; reopen it from the page.",
+        ))
+    } else {
+        crate::sources::documents::check_split_text(&editor.text)
+    };
+    // Boxes shown before are kept while the part count holds and each is a set of four numbers;
+    // otherwise the areas are computed again from the text.
+    let (keep, read) = match checked {
+        Ok(parts) => {
+            let keep = !submitted.is_empty()
+                && submitted.len() == parts.len()
+                && submitted.iter().all(|b| !b.points.is_empty());
+            let read = state
+                .sessions
+                .store
+                .material_split_read(auth.clone(), page, unit, (!keep).then_some(parts))
+                .await;
+            (keep, read)
+        }
+        Err(e) => (false, Err(e)),
+    };
+    match read {
+        Ok(read) => {
+            editor.set_view(&read);
+            if keep {
+                editor.boxes = submitted;
+                editor.areas_note = "These are the boxes you submitted, kept because the number of parts has not changed. Change the number of parts to compute the areas again.".into();
+            } else if let Some(areas) = &read.areas {
+                editor.set_boxes(&areas.boxes);
+                editor.areas_note = if submitted.is_empty() {
+                    areas.path.note().into()
+                } else {
+                    areas.path.replaced_note()
+                };
+            } else {
+                editor.message =
+                    "This page has no usable geometry, so the areas cannot be shown.".into();
+                return split_editor_response(&editor, StatusCode::UNPROCESSABLE_ENTITY);
+            }
+            html(&editor)
+        }
+        Err(e @ AppError::Invalid(_)) => {
+            editor.message = e.to_string();
+            split_editor_response(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+/// The boxes of a save: none when no box field came (computed on save), else exactly four per
+/// part, each a finite number.
+fn split_boxes(fields: &SplitFields, parts: usize) -> Result<Option<Vec<[[f64; 2]; 4]>>, AppError> {
+    if fields.boxes.is_empty() {
+        return Ok(None);
+    }
+    if fields.boxes.len() != parts * 4 || fields.boxes.keys().any(|(n, _)| *n > parts) {
+        return Err(AppError::Invalid(
+            "The boxes do not match the parts; show the areas again.",
+        ));
+    }
+    (1..=parts)
+        .map(|n| {
+            let value = |k: usize| {
+                fields.boxes[&(n, k)]
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .ok_or(AppError::Invalid("A box value is not a number."))
+            };
+            Ok(crate::sources::documents::box_polygon([
+                value(0)?,
+                value(1)?,
+                value(2)?,
+                value(3)?,
+            ]))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+async fn create_split(
+    State(state): State<AuthState>,
+    session: Session,
+    Path((page, unit)): Path<(i64, i64)>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let fields = split_fields(fields);
+    let token = fields.csrf.clone().ok_or(StatusCode::FORBIDDEN)?;
+    let csrf = csrf_admission(&session, &token).await?;
+    let editor_base = fields.editor(page, unit, token);
+    // The part count is judged first, so a text with too many parts says so whatever else came.
+    let parts = if fields.text.is_some() {
+        crate::sources::documents::check_split_text(&editor_base.text).map(|parts| parts.len())
+    } else {
+        Err(AppError::Invalid(
+            "The split form was incomplete; reopen it from the page.",
+        ))
+    };
+    let result = match (
+        parts,
+        fields.malformed,
+        fields.revision,
+        fields.unit_revision,
+    ) {
+        (Err(e), ..) => Err(e),
+        (Ok(parts), false, Some(revision), Some(unit_revision)) => {
+            match split_boxes(&fields, parts) {
+                Ok(boxes) => {
+                    state
+                        .sessions
+                        .store
+                        .material_create_split(
+                            auth.clone(),
+                            csrf,
+                            page,
+                            crate::sources::OwnerSplit {
+                                revision,
+                                unit: crate::sources::TableSource {
+                                    unit,
+                                    revision: unit_revision,
+                                },
+                                text: editor_base.text.clone(),
+                                boxes,
+                                actor: String::new(),
+                                rationale: editor_base.rationale.clone(),
+                            },
+                        )
+                        .await
+                }
+                Err(e) => Err(e),
+            }
+        }
+        _ => Err(AppError::Invalid(
+            "The split form was incomplete; reopen it from the page.",
+        )),
+    };
+    match result {
+        Ok((units, _)) => {
+            let first = units[0];
+            let cursor = state
+                .sessions
+                .store
+                .material_unit_cursor(auth, page, first)
+                .await
+                .unwrap_or(0);
+            Ok(Redirect::to(&format!(
+                "/admin/materials/pages/{page}?units={cursor}&split={first}#unit-{first}"
+            ))
+            .into_response())
+        }
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let mut editor = editor_base;
+            editor.message = e.to_string();
+            if let Ok(read) = state
+                .sessions
+                .store
+                .material_split_read(auth, page, unit, None)
+                .await
+            {
+                editor.set_view(&read);
+            }
+            if !editor.boxes.is_empty() {
+                editor.areas_note = "These are the boxes you submitted.".into();
+            }
+            split_editor_response(&editor, error(&e))
         }
         Err(e) => Err(error(&e)),
     }

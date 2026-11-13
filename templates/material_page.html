@@ -69,6 +69,7 @@
 <textarea name="rationale" required {% if self.rationale_invalid(*unit.id, "rejected") %}aria-invalid="true" aria-describedby="unit-{{ unit.id }}-error"{% endif %}>
 {{ self.rationale_for(*unit.id, "rejected") }}</textarea></label>
 <p>Reviewer identity is recorded from your signed-in Owner account.</p><button>Record rejection for unit {{ unit.id }}</button></form></details>
+{% if unit.kind == "Text" && unit.state != "rejected" %}<p class="split-link"><a href="/admin/materials/pages/{{ page.id }}/units/{{ unit.id }}/split">Split…<span class="sr-only"> unit {{ unit.id }} into several units</span></a></p>{% endif %}
 </div>{% endif %}</article>
 {% endfor %}
 <p><button form="table-select" data-no-script-table>Create table from selected units</button> <button form="table-select" data-no-script-table formaction="/admin/materials/pages/{{ page.id }}/merges/new">Merge selected units</button></p>
@@ -111,7 +112,7 @@
 <ul>{% for event in page.events %}<li>
 <time data-local-time datetime="{{ event.created_at.replace(" ", "T") }}Z">{{ event.created_at }} UTC</time> · {{ event.actor }} · {{ event.state }} ·
 {% match event.unit_id %}{% when Some with (id) %}unit {{ id }}{% when None %}page completeness{% endmatch %} · previous revision {{ event.previous_revision }}
-{% if let Some((table, sources)) = event.table %}<p>Table unit {{ table }} created from units {{ sources }}.</p>{% endif %}{% if let Some((merged, sources)) = event.merge %}<p>Units {{ sources }} merged into {{ merged }}.</p>{% endif %}<p>{% if event.rationale.is_empty() %}<em>No rationale given.</em>{% else %}{{ event.rationale }}{% endif %}</p><pre class="evidence-text">
+{% if let Some((table, sources)) = event.table %}<p>Table unit {{ table }} created from units {{ sources }}.</p>{% endif %}{% if let Some((merged, sources)) = event.merge %}<p>Units {{ sources }} merged into {{ merged }}.</p>{% endif %}{% if let Some((whole, parts)) = event.split %}<p>Unit {{ whole }} split into {{ parts }}.</p>{% endif %}<p>{% if event.rationale.is_empty() %}<em>No rationale given.</em>{% else %}{{ event.rationale }}{% endif %}</p><pre class="evidence-text">
 {{ event.correction }}</pre></li>{% endfor %}</ul>
 {% if let Some(next) = history_next %}<a href="/admin/materials/pages/{{ page.id }}?units={{ units }}&amp;history={{ next }}">Next history</a>{% endif %} ·
 <a href="/admin/materials/pages/{{ page.id }}?units={{ units }}">First history</a>

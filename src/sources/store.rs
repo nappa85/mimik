@@ -106,7 +106,7 @@ impl Store {
             let mut query = db.prepare("SELECT id,block_id,kind,polygon,raw_html,state,correction,revision,raw_text FROM source_units WHERE page_id=?1 ORDER BY id")?;
             page.units = query.query_map([id], |row| { let raw: String = row.get(4)?; let clean = sanitized(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?; Ok(UnitView { id: row.get(0)?, block_id: row.get(1)?, kind: row.get(2)?, polygon: row.get(3)?, sanitized_html: clean, state: row.get(5)?, correction: row.get(6)?, raw_text: Some(row.get(8)?), revision: row.get(7)? }) })?.collect::<Result<Vec<_>, _>>()?;
             let mut history = db.prepare("SELECT unit_id,created_at,actor,state,rationale,correction,previous_revision,operation_id FROM source_review_events WHERE page_id=?1 ORDER BY id DESC LIMIT 100")?;
-            page.events = history.query_map([id], |row| Ok(ReviewEvent { unit_id: row.get(0)?, created_at: row.get(1)?, actor: row.get(2)?, state: row.get(3)?, rationale: row.get(4)?, correction: row.get(5)?, previous_revision: row.get(6)?, operation_id: row.get(7)?, table: None, merge: None }))?.collect::<Result<Vec<_>, _>>()?;
+            page.events = history.query_map([id], |row| Ok(ReviewEvent { unit_id: row.get(0)?, created_at: row.get(1)?, actor: row.get(2)?, state: row.get(3)?, rationale: row.get(4)?, correction: row.get(5)?, previous_revision: row.get(6)?, operation_id: row.get(7)?, table: None, merge: None, split: None }))?.collect::<Result<Vec<_>, _>>()?;
             Ok(page)
         }).await
     }
