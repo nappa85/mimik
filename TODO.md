@@ -6,14 +6,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Agreement view and batch accept** (SRC-21, `docs/sources-and-retrieval.md` on the branch),
-  branch `agreement`, not merged: all slices done (agreement core, measurement, work-queue
-  layout, table reference images, split/merge SRC-22, 3b agreement on the screen 224570e, 4
-  batch accept 50d4384, 5 docs 8f73f8d; each reviewed, full suite green, 2034 passed). Owed:
-  the owner's browser check of the agreement bar/tabs and of one batch accept on an
-  independent page (build the branch, back up `data/mimik.sqlite3` first: migration 030 runs
-  on open). Then merge to master and remove the worktree and the `mimik-agree-*` volumes.
-
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
   0.45.0 upgrade are merged into master, and so is 2c-2b-1 (the GPU path, live-verified on the
@@ -96,8 +88,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 ## Next steps
 
 - **Review-screen UX revamp (owner, 2026-11-13):** the materials review screen (cards, table
-  form, merge, split) works but has UX issues; a bigger revamp comes later, after the agreement
-  branch lands. Collect the owner's points when it starts.
+  form, merge, split) works but has UX issues; a bigger revamp comes next, now that the agreement
+  branch is merged (2026-11-13). Collect the owner's points when it starts.
 
 - **mupdf-rs release:** PR messense/mupdf-rs#280 merged upstream 2026-11-08 (dd46f0e); its text
   API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
