@@ -3,9 +3,8 @@
 import os
 import subprocess
 import unittest
-from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from smoke_release import (
     DEFINITION_CONFLICT,
@@ -13,7 +12,7 @@ from smoke_release import (
     corrected_evidence,
     registry_cli,
     require_secret_free,
-    smoke_owner_development,
+    smoke_invalid_flags,
     version_link,
 )
 
@@ -144,31 +143,14 @@ class AccountFailureTests(unittest.TestCase):
 
 
 class WorkspaceFormTests(unittest.TestCase):
-    def test_development_preservation_cannot_pass_with_empty_history(self):
-        db = MagicMock()
-        db.execute.return_value.fetchone.return_value = ("synthetic snapshot",)
-        db.execute.return_value.fetchall.return_value = []
-        connection = MagicMock()
-        connection.__enter__.return_value = db
-        with ExitStack() as stack:
-            for name, value in {
-                "subprocess.run": subprocess.CompletedProcess([], 2, b"", b""),
-                "start": (None, None),
-                "stop": None,
-                "auth_request": (200, {}, "Development"),
-                "auth_cookie": "dummy-cookie",
-                "auth_fields": {},
-                "auth_login": "dummy-cookie",
-                "workspace_form": ("/dummy", {}, ""),
-                "workspace_submit": "/private-sheets/1",
-                "auth_error": None,
-                "sqlite3.connect": connection,
-            }.items():
-                stack.enter_context(patch(f"smoke_release.{name}", return_value=value))
-            with self.assertRaisesRegex(
-                AssertionError, "Development sheet/history baseline missing"
-            ):
-                smoke_owner_development(Path("/fake/mimik"), Path("/fake/work"), (b"dummy",))
+    def test_removed_or_invalid_flags_must_be_refused(self):
+        accepted = subprocess.CompletedProcess([], 0, b"", b"")
+        with patch("smoke_release.subprocess.run", return_value=accepted):
+            with self.assertRaisesRegex(AssertionError, "Invalid CLI flags accessed database"):
+                smoke_invalid_flags(Path("/fake/mimik"), Path("/fake/work"))
+        refused = subprocess.CompletedProcess([], 2, b"", b"")
+        with patch("smoke_release.subprocess.run", return_value=refused):
+            smoke_invalid_flags(Path("/fake/mimik"), Path("/fake/work"))
 
     def test_select_values_preserve_explicit_false_unknown_and_enum(self):
         parser = FormFields()

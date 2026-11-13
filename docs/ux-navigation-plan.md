@@ -13,51 +13,10 @@ unauthenticated local mode (`web::app`: `/characters`, `/sources`) is not change
   materials waiting for review; a player sees the campaigns they play in; a Master also sees
   their campaigns with the latest edited sheets.
 - Opening a menu never loads a page.
-- `--dev-owner-play` is removed in slice 1, as AUTH-3 already requires: the Owner never plays.
 - Swapping page content without a full load (htmx boost) is not built: the most used pages
   (materials review, upload) run under the strict sheet CSP, which forbids htmx's swaps, so a
   boost would only cover the light list pages, at the cost of private pages in htmx's history
   cache and a second error and login path. Revisit if full loads are reported as slow.
-
-## 1. Shared layout and menu
-
-- One base template (`templates/layout.html`) for every page of the authenticated app: header
-  with the logo (link to `/`), the menu, and the account menu on the right. Every template
-  that today writes its own document or extends `material_base.html` extends it;
-  `material_base.html`'s link row goes. Template blocks: title, head (page scripts), content.
-- Menu (entries shown per role; a menu with no entries is not shown):
-  - **Play** (player accounts): Campaigns, My sheets.
-  - **Materials** (Owner): Sources and review, Upload PDF, Rulesets.
-  - **Administration** (Owner): Accounts, Assistant.
-  - **Account** (everyone, right side, labelled with the display name): Switch account,
-    Sign out (POST form with the CSRF token).
-- Drop-downs are `<details>`/`<summary>`: they open without a page load and without
-  JavaScript, under every page's CSP including `SHEET_CSP` (no inline script or style). A small
-  same-origin script closes an open menu on an outside click or Escape; without it the menu
-  still works. Keyboard: summary is focusable, entries are links. The layout takes a `strict`
-  flag: on `SheetPage` responses (sheet pages, owner material and upload pages) the nav script
-  is left out, so the sheet script invariants of `src/campaigns/script_tests.rs` (no script on
-  the create page and on `history/{revision}`, exactly one module on a saved sheet) hold
-  unchanged; on the material pages the existing same-origin scripts may include it.
-- The current section is marked (`aria-current="page"` on the entry).
-- One Rust struct (`Nav`: display name, role flags, CSRF token, current section) built by one
-  helper from the account summary and token the handler's authentication already loaded (no
-  second session lookup), passed to every page template; no per-handler duplication.
-- Pages without a session keep a logo-only header and are listed as exclusions in the route
-  test: rebuilt error pages (`errors::document`), the login, enrolment and reset pages,
-  catalogue notices, `private_sheet_busy`, the non-Linux upload stub.
-- Sheet pages keep `SHEET_CSP` unchanged; the layout adds no inline code anywhere.
-- After login, `/` is the destination (players and Owner alike). `/auth/session` redirects to
-  `/`; its "Signed in" page and template go, and the links to it (`admin.html`,
-  `campaigns.html`, `script_tests.rs`, the browser navigation test) are updated.
-- `--dev-owner-play` and everything behind it go (`src/main.rs`, `src/auth/mod.rs`,
-  `src/campaigns/domain.rs`, `snapshots.rs`, their tests, `tools/smoke_release.py`, the docs);
-  AUTH-3 loses its "to be removed" clause.
-- Tests: every authenticated page renders the menu with the role's entries (table test over
-  the routes, Owner / player); sheet pages keep their CSP header and
-  carry no inline script or style; Sign out still requires CSRF; no entry leaks a page the
-  role cannot open (each entry's route answers 200 for that role); `/auth/session` redirects
-  to `/`.
 
 ## 2. Home page
 
@@ -95,5 +54,6 @@ unauthenticated local mode (`web::app`: `/characters`, `/sources`) is not change
 
 ## Order
 
-Slices 1 and 2, each reviewed and committed on a branch; the owner browser-checks after each. The Master's latest edited sheets land with the Master view. Points about the review
+Slice 1 (shared layout and menu, `docs/auth-and-sessions.md`) is done. Slice 2 is next, reviewed
+and committed on the branch; the owner browser-checks after it. The Master's latest edited sheets land with the Master view. Points about the review
 screen itself are collected from the owner after slice 1.

@@ -1,0 +1,6 @@
+{% extends "layout.html" %}
+{% block title %}Home · Mimik{% endblock %}
+{% block content %}
+<h1>Home</h1>
+{% for menu in nav.menus %}<section class="panel"><h2>{{ menu.label }}</h2><ul>{% for item in menu.items %}<li><a href="{{ item.href }}">{{ item.label }}</a></li>{% endfor %}</ul></section>{% endfor %}
+{% endblock %}

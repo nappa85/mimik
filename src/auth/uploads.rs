@@ -72,6 +72,11 @@ pub(super) fn routes() -> Router<AuthState> {
         ))
 }
 
+/// The header of an upload page, served under the strict sheet policy (no layout script).
+fn upload_nav() -> super::nav::Nav {
+    super::nav::Nav::here_strict(super::nav::Section::Upload)
+}
+
 fn manager(state: &AuthState) -> Result<Uploads, StatusCode> {
     state
         .options
@@ -244,6 +249,7 @@ async fn upload(State(state): State<AuthState>, session: Session, request: Reque
         blocking(move || Ok(probe.availability())).await?
     {
         let mut response = materials::html(&UploadForm {
+            nav: upload_nav(),
             csrf: String::new(),
             reason,
             remedy: how_to_fix,
@@ -262,7 +268,10 @@ async fn upload(State(state): State<AuthState>, session: Session, request: Reque
             let owner = auth.clone();
             let retained = blocking(move || current.current_for_owner(&owner)).await?;
             let mut response = if let Some(id) = retained {
-                materials::html(&StagedConflict { id })?
+                materials::html(&StagedConflict {
+                    nav: upload_nav(),
+                    id,
+                })?
             } else {
                 (StatusCode::CONFLICT, "an upload is in progress").into_response()
             };
@@ -393,6 +402,7 @@ async fn receive(
     ext = "html"
 )]
 struct StagedConflict {
+    nav: super::nav::Nav,
     id: String,
 }
 #[derive(Template)]
@@ -401,11 +411,15 @@ struct StagedConflict {
     ext = "html"
 )]
 struct ProposalError {
+    nav: super::nav::Nav,
     message: &'static str,
 }
 
 fn proposal_error(status: StatusCode, message: &'static str) -> AuthResult {
-    let mut response = materials::html(&ProposalError { message })?;
+    let mut response = materials::html(&ProposalError {
+        nav: upload_nav(),
+        message,
+    })?;
     *response.status_mut() = status;
     response.extensions_mut().insert(materials::TrustedDraft);
     Ok(response)
@@ -413,6 +427,7 @@ fn proposal_error(status: StatusCode, message: &'static str) -> AuthResult {
 #[derive(Template)]
 #[template(path = "upload_form.html")]
 struct UploadForm {
+    nav: super::nav::Nav,
     csrf: String,
     reason: String,
     remedy: String,
@@ -430,6 +445,7 @@ async fn index(State(state): State<AuthState>, session: Session) -> AuthResult {
         worker::Availability::Unavailable { reason, how_to_fix } => (reason, how_to_fix),
     };
     materials::html(&UploadForm {
+        nav: upload_nav(),
         csrf: super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?,
         reason,
         remedy,
@@ -438,6 +454,7 @@ async fn index(State(state): State<AuthState>, session: Session) -> AuthResult {
 #[derive(Template)]
 #[template(path = "upload_page.html")]
 struct Screen {
+    nav: super::nav::Nav,
     upload: Upload,
     csrf: String,
     refresh: bool,
@@ -540,6 +557,7 @@ async fn model(state: &AuthState, session: &Session, id: String) -> Result<Scree
     let upload = blocking(move || m.read_for_owner(&auth, &id)).await?;
     let refresh = matches!(upload.job.state.as_str(), "queued" | "running");
     Ok(Screen {
+        nav: upload_nav(),
         editors: Screen::editors(&upload, vec![]),
         upload,
         csrf: super::token(session).await?.ok_or(StatusCode::FORBIDDEN)?,

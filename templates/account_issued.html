@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Invitation link · Mimik</title><script src="/assets/account-sharing.js"></script><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+{% extends "layout.html" %}{% block title %}Invitation link · Mimik{% endblock %}{% block head %}<script src="/assets/account-sharing.js"></script>{% endblock %}{% block content %}
 <h1>{% if purpose == "enroll" %}Invitation ready{% else %}Password reset ready{% endif %}</h1><p>{{ account.display_name }} ({{ account.login }})</p>
 <label>{% if purpose == "enroll" %}Invitation link{% else %}Password reset link{% endif %} <input id="credential-link" readonly type="text" value="{{ link }}" autocomplete="off" spellcheck="false"></label>
 <button type="button" data-copy-target="credential-link">Copy link</button><p id="copy-status" role="status" aria-live="polite"></p>
@@ -8,4 +8,4 @@
 <p><a href="{{ link }}">Open {% if purpose == "enroll" %}invitation{% else %}password reset{% endif %}</a></p>
 <p>Expires <time data-local-time datetime="{{ expires.iso }}">{{ expires.readable }}</time>. The link works once.</p>
 <details><summary>Manual token entry</summary><label>Token <input type="text" readonly value="{{ token }}" autocomplete="off" spellcheck="false"></label><p>If needed, paste this token into <a href="/auth/{{ purpose }}">the {{ purpose }} form</a>.</p></details>
-<p>This link is available in this response only. If it is lost, explicitly reissue it from the account directory.</p><a href="/admin">Back to administration</a></main></body></html>
+<p>This link is available in this response only. If it is lost, explicitly reissue it from the account directory.</p><a href="/admin">Back to administration</a>{% endblock %}

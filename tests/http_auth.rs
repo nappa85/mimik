@@ -227,14 +227,7 @@ async fn readonly_and_second_save(app: Router, path: &std::path::Path) -> String
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    let response = request(
-        &app,
-        "GET",
-        "/auth/session",
-        Some(&owner_cookie),
-        String::new(),
-    )
-    .await;
+    let response = request(&app, "GET", "/", Some(&owner_cookie), String::new()).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key(header::SET_COOKIE));
     let html = text(response).await;
@@ -293,14 +286,7 @@ async fn rotate_and_switch(app: Router, owner_cookie: String) -> String {
 }
 
 async fn check_logout(app: &Router, player_cookie: &str) {
-    let response = request(
-        app,
-        "GET",
-        "/auth/session",
-        Some(player_cookie),
-        String::new(),
-    )
-    .await;
+    let response = request(app, "GET", "/", Some(player_cookie), String::new()).await;
     assert_eq!(response.status(), StatusCode::OK);
     let token = csrf(response).await;
     assert_eq!(
@@ -355,15 +341,9 @@ async fn check_epoch_revocation(
     );
     let during_reset = seed_authenticated(store, issued.id, issued.epoch).await;
     assert_eq!(
-        request(
-            app,
-            "GET",
-            "/auth/session",
-            Some(&during_reset),
-            String::new()
-        )
-        .await
-        .status(),
+        request(app, "GET", "/", Some(&during_reset), String::new())
+            .await
+            .status(),
         StatusCode::OK
     );
     let changed = accounts.complete_reset(&reset, pw).await.unwrap();
@@ -387,15 +367,9 @@ async fn check_epoch_revocation(
     );
     let before_disable = seed_authenticated(store, changed.id, changed.epoch).await;
     assert_eq!(
-        request(
-            app,
-            "GET",
-            "/auth/session",
-            Some(&before_disable),
-            String::new()
-        )
-        .await
-        .status(),
+        request(app, "GET", "/", Some(&before_disable), String::new())
+            .await
+            .status(),
         StatusCode::OK
     );
     accounts.disable(changed.id, changed.epoch).await.unwrap();

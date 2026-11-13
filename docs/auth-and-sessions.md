@@ -17,7 +17,6 @@ admission), `migrations/010`, `011`, `013`, `014`.
 ./mimik --loopback                        # authenticated, 127.0.0.1 only (development)
 ./mimik --external-url https://mimik.example   # canonical origin behind a proxy
 ./mimik --no-auth                         # unauthenticated prototype, loopback only
-./mimik --dev-owner-play                  # development: Owner may play
 ```
 
 - **Database:** `--database PATH`, else `MIMIK_DATABASE`, else `data/mimik.sqlite3`
@@ -31,11 +30,11 @@ admission), `migrations/010`, `011`, `013`, `014`.
   `Error: <message>` and exits with status 1; command-line argument errors are clap's own
   (exit status 2).
   The binding must exist; the Owner account need not be enabled for players to log in.
-- **Serving flags vs subcommands:** `--no-auth`, `--loopback`, `--dev-owner-play`,
+- **Serving flags vs subcommands:** `--no-auth`, `--loopback`,
   `--lan-address` and `--external-url` are rejected with any subcommand.
   `MIMIK_EXTERNAL_URL` is ignored by subcommands.
 - **Conflicts:** `--loopback` with `--lan-address`; `--no-auth` with
-  `--dev-owner-play`, `--lan-address`, `--external-url` or `MIMIK_EXTERNAL_URL`.
+  `--lan-address`, `--external-url` or `MIMIK_EXTERNAL_URL`.
 - **Port:** always 3000. LAN mode binds `0.0.0.0:3000`; loopback and `--no-auth` bind
   `127.0.0.1:3000`. The two modes cannot run at once on overlapping listeners.
 
@@ -47,15 +46,35 @@ It cannot reach campaign or private-sheet tables. Authenticated mode never falls
 to it: legacy character, global source/image/context and export routes return 403 in
 authenticated mode, including for the Owner.
 
-### `--dev-owner-play`
+### Owner and gameplay
 
-Development only; due for removal (see limitations). It lets the Owner pass gameplay
-routes (normally 403), be accepted into campaigns and act as supervising Master; the SQL
-guards (`campaign_request_auth` view, Owner triggers in migration 013) admit the Owner
-because the request context carries `development_owner_play`, and rosters show the
-Owner. Startup prints `DEVELOPMENT ONLY: Owner gameplay override enabled.`; the session
-page shows a warning. Without the flag, Owner memberships and custody left from
-development stay in the database but give no access and are hidden from rosters.
+The Owner is administration-only: gameplay routes answer 403 and the SQL guards
+(`campaign_request_auth` view, Owner triggers in migration 013) refuse Owner memberships
+and supervision. Owner memberships and custody left in an old database stay but give no
+access and are hidden from rosters. There is no flag that lifts this.
+
+## Pages and menu
+
+Every page of the authenticated app extends `templates/layout.html`: the logo (a link to
+`/`), a menu and the account menu on the right. `GET /` is the home page for a signed-in
+account (signed out it goes to the sign-in form); `/auth/session` redirects to `/`. The
+menu entries depend on the role (`src/auth/nav.rs`, one `Nav` per request, built from the
+account `principal` already loaded):
+
+- **Play** (players): Campaigns, My sheets.
+- **Materials** (Owner): Sources and review, Upload PDF, Rulesets.
+- **Administration** (Owner): Accounts, Assistant.
+- **Account** (everyone, labelled with the display name): Switch account (the sign-in
+  form), Sign out (a POST form with the CSRF token).
+
+The menus are `<details>` drop-downs: they open without a page load and without script,
+under every page's CSP. `assets/nav.js` (same origin, no inline code) closes an open menu
+on an outside click or Escape; the layout's `strict` flag leaves it out of sheet pages (also
+their history revisions and catalogue pages) and owner material and upload pages, so the
+script invariants of sheet pages hold. The current entry
+carries `aria-current="page"`. Pages without a session (error documents, sign-in, enrolment
+and reset, catalogue notices, the sheet-busy page, the non-Linux upload stub) keep a
+logo-only header. On sheet pages `sheet-assist.js` holds back form submissions while saves are pending; the Sign out form is one of the page's forms, so signing out waits until pending saves finish.
 
 ## LAN and reverse-proxy deployment
 
@@ -202,7 +221,7 @@ table `auth_sessions`, migration 011).
 - **Login** canonicalizes the login (trim, ASCII lowercase); password bytes are exact.
   The CSRF session is rechecked before and after password verification. Success rotates
   the session ID (`cycle_id`), stores only account ID and epoch, and redirects to
-  `/auth/session`, which links the Owner to `/admin` and players to `/campaigns`.
+  `/`, the home page.
 - **Per request** the account is rebuilt from current state: enabled and same epoch, or
   the session is invalid. Any epoch change (reset, disable) revokes all its sessions.
 - **Mutations** recheck session, deadline, epoch and grants inside their transaction.

@@ -1,4 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ detail.campaign.title }} · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
+{% extends "layout.html" %}{% block title %}{{ detail.campaign.title }} · Mimik{% endblock %}{% block content %}
 <a href="/campaigns">Campaign workspace</a><h1>{{ detail.campaign.title }}</h1><p>#{{ detail.campaign.id }} · {{ detail.campaign.game_id }} / {{ detail.campaign.edition_id }} · Original Master: {{ detail.campaign.creator }}</p>
 {% if detail.role.is_empty() %}
 <p>Join request status: {{ detail.request_state }}</p><form method="post" action="/campaigns/{{ detail.campaign.id }}/join"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Request to join</button></form>
@@ -27,4 +27,4 @@
 {% for request in detail.requests %}<form method="post" action="/campaigns/{{ detail.campaign.id }}/requests/{{ request.account_id }}"><p>{{ request.display }}</p><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ request.revision }}"><button name="action" value="accept">Accept as player</button><button name="action" value="decline">Decline</button></form>{% endfor %}
 {% if let Some(next) = detail.requests_next %}<a href="/campaigns/{{ detail.campaign.id }}?requests_after={{ next }}&amp;members_after={{ page.members }}&amp;versions_after={{ page.versions }}&amp;sheets_after={{ page.sheets }}">Next requests page</a>{% endif %}
 </section>{% endif %}
-{% endif %}</main></body></html>
+{% endif %}{% endblock %}

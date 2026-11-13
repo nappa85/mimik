@@ -142,7 +142,7 @@ def login(page, origin, name, password):
     page.locator('input[name="login"]').fill(name)
     page.locator('input[name="password"]').fill(password)
     submit(page, page.get_by_role("button", name="Sign in", exact=True), "/auth/login")
-    page.wait_for_url("**/auth/session")
+    page.wait_for_url("**/")
 
 
 def login_errors(browser, address, origin, proxy=False):
@@ -164,7 +164,7 @@ def login_errors(browser, address, origin, proxy=False):
         )
         page.locator('input[name="password"]').fill(OWNER_PASSWORD)
         submit(page, page.get_by_role("button", name="Sign in", exact=True), "/auth/login")
-        page.wait_for_url("**/auth/session")
+        page.wait_for_url("**/")
         visit(page, origin + "/auth/login")
         require(
             control(address, "/revoke", {"id": context.cookies()[0]["value"]})["changed"] == 1,
@@ -191,7 +191,7 @@ def login_errors(browser, address, origin, proxy=False):
         page.locator('input[name="login"]').fill("smoke-owner")
         page.locator('input[name="password"]').fill(OWNER_PASSWORD)
         submit(page, page.get_by_role("button", name="Sign in", exact=True), "/auth/login")
-        page.wait_for_url("**/auth/session")
+        page.wait_for_url("**/")
     finally:
         context.close()
 
@@ -390,7 +390,8 @@ def scenario(browser, address, origin, viewport, name, verification=None, proxy=
             "Reset form cookie transport policy differs",
         )
         if proxy:
-            owner.goto(origin + "/auth/session")
+            owner.goto(origin + "/")
+            owner.locator("header.site details.account summary").click()
             response = submit(
                 owner, owner.get_by_role("button", name="Sign out", exact=True), "/auth/logout"
             )

@@ -172,7 +172,7 @@ async fn admin_authority_pagination_stale_epochs_and_audit_failure_preserve_stat
     let (_dir, store, auth, clock) = fixture().await;
     let accounts = Accounts::new(store.clone());
     let app = crate::auth::app(store.clone()).await.unwrap();
-    for actor in [&auth[1], &auth[1].clone().development_fixture()] {
+    for actor in [&auth[1]] {
         assert!(
             accounts
                 .browser_invite(actor.clone(), "denied".into(), "Denied".into(), 0)

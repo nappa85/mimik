@@ -182,7 +182,7 @@ async fn sheet_pages_get_the_strict_csp_and_only_the_module() {
         "/campaigns",
         "/private-sheets",
         "/private-sheets/1/history",
-        "/auth/session",
+        "/",
         "/assets/app.css",
         "/assets/sheet-assist.js",
     ] {

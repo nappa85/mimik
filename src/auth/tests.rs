@@ -677,8 +677,11 @@ async fn browser_entry_preserves_valid_sessions_and_errors_but_handles_expiry() 
         .oneshot(navigation("/", Some(authenticated.id)))
         .await
         .unwrap();
-    assert_eq!(root.status(), StatusCode::SEE_OTHER);
-    assert_eq!(root.headers()[header::LOCATION], "/auth/session");
+    assert_eq!(
+        root.status(),
+        StatusCode::OK,
+        "a signed-in `/` is the home page"
+    );
     assert_eq!(
         app.clone()
             .oneshot(navigation("/campaigns", Some(authenticated.id)))
@@ -1436,7 +1439,7 @@ async fn missing_account_reconstruction_flushes_without_cached_owner_access() {
     sessions.create(&mut r).await.unwrap();
     assert_eq!(
         app.clone()
-            .oneshot(request("/auth/session", Some(r.id)))
+            .oneshot(request("/", Some(r.id)))
             .await
             .unwrap()
             .status(),

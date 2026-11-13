@@ -971,7 +971,7 @@ async fn first_submitter_in_tree_order_is_op_save_before_groups() {
         setup.campaign, setup.version
     );
     let (_, create) = setup.get(&path).await;
-    let full = order(&create, "form");
+    let full = order(&create, "main form");
     assert_eq!(
         full.first().map(String::as_str),
         Some("button:op=save"),
@@ -1852,7 +1852,7 @@ async fn list_history_rows_have_stable_ids_and_no_ops() {
             .collect();
         assert_eq!(legends, want, "revision {revision}");
         assert_eq!(
-            page.select(&selector("button")).count(),
+            page.select(&selector("main button")).count(),
             0,
             "no ops, no Save"
         );

@@ -111,11 +111,11 @@ impl Store {
             let role=role(&tx,id,auth.account_id())?.unwrap_or_default();
             let request_state=tx.query_row("SELECT state FROM campaign_requests WHERE campaign_id=?1 AND account_id=?2",params![id,auth.account_id()],|r|r.get(0)).optional()?.unwrap_or_default();
             let members=if role.is_empty(){Vec::new()}else{
-                let mut q=tx.prepare("SELECT m.account_id,a.display_name,m.revision,m.role FROM campaign_members m JOIN accounts a ON a.id=m.account_id WHERE m.campaign_id=?1 AND m.state='active' AND m.account_id>?2 AND (?3 OR NOT EXISTS(SELECT 1 FROM account_owner o WHERE o.account_id=a.id)) ORDER BY m.account_id LIMIT 51")?;
-                q.query_map(params![id,page.members,auth.development_owner_play()],|r|Ok(Member{account_id:r.get(0)?,display:r.get(1)?,revision:r.get(2)?,role:r.get(3)?}))?.collect::<Result<Vec<_>,_>>()?};
+                let mut q=tx.prepare("SELECT m.account_id,a.display_name,m.revision,m.role FROM campaign_members m JOIN accounts a ON a.id=m.account_id WHERE m.campaign_id=?1 AND m.state='active' AND m.account_id>?2 AND NOT EXISTS(SELECT 1 FROM account_owner o WHERE o.account_id=a.id) ORDER BY m.account_id LIMIT 51")?;
+                q.query_map(params![id,page.members],|r|Ok(Member{account_id:r.get(0)?,display:r.get(1)?,revision:r.get(2)?,role:r.get(3)?}))?.collect::<Result<Vec<_>,_>>()?};
             let requests=if role=="master"{
-                let mut q=tx.prepare("SELECT r.account_id,a.display_name,r.revision FROM campaign_requests r JOIN accounts a ON a.id=r.account_id WHERE r.campaign_id=?1 AND r.state='pending' AND r.account_id>?2 AND (?3 OR NOT EXISTS(SELECT 1 FROM account_owner o WHERE o.account_id=a.id)) ORDER BY r.account_id LIMIT 51")?;
-                q.query_map(params![id,page.requests,auth.development_owner_play()],|r|Ok(JoinRequest{account_id:r.get(0)?,display:r.get(1)?,revision:r.get(2)?}))?.collect::<Result<Vec<_>,_>>()?}else{Vec::new()};
+                let mut q=tx.prepare("SELECT r.account_id,a.display_name,r.revision FROM campaign_requests r JOIN accounts a ON a.id=r.account_id WHERE r.campaign_id=?1 AND r.state='pending' AND r.account_id>?2 AND NOT EXISTS(SELECT 1 FROM account_owner o WHERE o.account_id=a.id) ORDER BY r.account_id LIMIT 51")?;
+                q.query_map(params![id,page.requests],|r|Ok(JoinRequest{account_id:r.get(0)?,display:r.get(1)?,revision:r.get(2)?}))?.collect::<Result<Vec<_>,_>>()?}else{Vec::new()};
             let versions=if role.is_empty(){Vec::new()}else{
                 let mut q=tx.prepare("SELECT v.id,v.version,v.definition_id FROM definition_versions v WHERE v.game_id=?1 AND v.edition_id=?2 AND v.id>?3 AND EXISTS(SELECT 1 FROM definition_approvals a WHERE a.version_id=v.id AND a.id=(SELECT max(id) FROM definition_approvals WHERE version_id=v.id) AND NOT EXISTS(SELECT 1 FROM definition_withdrawals w WHERE w.approval_id=a.id)) ORDER BY v.id LIMIT 51")?;
                 q.query_map(params![campaign.game_id,campaign.edition_id,page.versions],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<Result<Vec<_>,_>>()?};
@@ -177,7 +177,7 @@ impl Store {
         self.run_campaign(auth.clone(),move |db| {
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             auth.recheck(&tx)?;master(&tx,id,&auth)?;
-            if accept && !auth.development_owner_play() && tx.query_row("SELECT EXISTS(SELECT 1 FROM account_owner WHERE account_id=?1)",[target],|row|row.get::<_,bool>(0))? {
+            if accept && tx.query_row("SELECT EXISTS(SELECT 1 FROM account_owner WHERE account_id=?1)",[target],|row|row.get::<_,bool>(0))? {
                 return Err(AppError::Invalid("Owner is administration-only; enroll a separate player account."));
             }
             let next=revision.checked_add(1).ok_or(AppError::Conflict)?;

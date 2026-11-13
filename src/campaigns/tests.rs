@@ -44,6 +44,8 @@ pub(super) mod list_tests;
 mod list_values_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
+#[path = "nav_tests.rs"]
+mod nav_tests;
 #[path = "notes_tests.rs"]
 mod notes_tests;
 #[path = "quick_tests.rs"]
@@ -2426,77 +2428,13 @@ async fn regression_production_owner_is_administration_only() {
 }
 
 #[tokio::test]
-async fn owner_development_records_are_preserved_but_do_not_grant_production_authority() {
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let (_dir, store, auth, _clock) = fixture().await;
-    let development = auth[0].clone().development_fixture();
-    let campaign = store
-        .create_campaign(
-            development.clone(),
-            "Retained development campaign".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    store.request_join(auth[2].clone(), campaign).await.unwrap();
-    store
-        .decide_join(development.clone(), campaign, 3, 1, true)
-        .await
-        .unwrap();
-    insert_native(&store, development.clone(), native(campaign, 1)).await;
-    assert!(
-        store
-            .private_read(
-                auth[0].clone(),
-                1,
-                None,
-                crate::definitions::admit().unwrap()
-            )
-            .await
-            .is_err()
-    );
-    assert!(store.private_history(auth[0].clone(), 1, 0).await.is_err());
-    let (view, permit) = store
-        .private_read(
-            development.clone(),
-            1,
-            None,
-            crate::definitions::admit().unwrap(),
-        )
-        .await
-        .unwrap();
-    assert!(view.editable);
-    drop(permit);
-    let player = auth[2].clone();
-    store
-        .run_campaign(player.clone(), move |db| {
-            assert!(super::snapshots::authorize_edit(db, &player, &native(campaign, 3)).is_err());
-            let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let mut sheet = native(campaign, 3);
-            sheet.sheet_id = 2;
-            assert!(snapshots::write(&tx, &player, sheet, "create", None).is_err());
-            Ok(())
-        })
-        .await
-        .unwrap();
-    assert_private_counts(&store, 1).await;
-    assert!(store.run(|db|{
-        db.execute("INSERT INTO campaigns VALUES(99,1,'mork-borg','it-2025','No leaked development context',1)",[])?;
-        Ok(())
-    }).await.is_err());
-}
-
-#[tokio::test]
-async fn owner_admin_landing_and_explicit_development_router_enforce_their_scopes() {
+async fn owner_is_administration_only_and_players_cannot_open_administration() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
-    let owner = auth[0].clone().development_fixture();
     let campaign = store
         .create_campaign(
-            owner,
-            "Development only".into(),
+            auth[1].clone(),
+            "Players only".into(),
             "mork-borg".into(),
             "it-2025".into(),
         )
@@ -2504,15 +2442,8 @@ async fn owner_admin_landing_and_explicit_development_router_enforce_their_scope
         .unwrap();
     let normal = crate::auth::app(store.clone()).await.unwrap();
     let status = router_request(&normal, &auth[0], "/auth/session", None).await;
-    let html = String::from_utf8(
-        axum::body::to_bytes(status.into_body(), 8192)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
-    assert!(html.contains("Open administration"));
-    assert!(!html.contains("Open campaign workspace"));
+    assert_eq!(status.status(), axum::http::StatusCode::SEE_OTHER);
+    assert_eq!(status.headers()["location"], "/");
     assert_eq!(
         router_request(&normal, &auth[0], "/admin", None)
             .await
@@ -2537,40 +2468,14 @@ async fn owner_admin_landing_and_explicit_development_router_enforce_their_scope
                 .is_client_error()
         );
     }
-    let development = crate::auth::app_with_options(
-        store,
-        crate::auth::AuthOptions {
-            development_owner_play: true,
-            ..crate::auth::AuthOptions::default()
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        router_request(
-            &development,
-            &auth[0],
-            &format!("/campaigns/{campaign}"),
-            None
-        )
-        .await
-        .status(),
-        axum::http::StatusCode::OK
-    );
-    assert_eq!(
-        router_request(&normal, &auth[0], &format!("/campaigns/{campaign}"), None)
-            .await
-            .status(),
-        axum::http::StatusCode::FORBIDDEN
-    );
 }
 
 #[tokio::test]
-async fn populated_schema12_upgrade_preserves_owner_development_records_and_sessions() {
+async fn populated_schema12_upgrade_preserves_private_records_and_sessions() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (directory, store, auth, clock) = fixture().await;
-    let development = auth[0].clone().development_fixture();
+    let development = auth[1].clone();
     let campaign = store
         .create_campaign(
             development.clone(),
@@ -2580,7 +2485,7 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
         )
         .await
         .unwrap();
-    let original = insert_native(&store, development.clone(), native(campaign, 1)).await;
+    let original = insert_native(&store, development.clone(), native(campaign, 2)).await;
     store
         .run(|db| {
             assert_eq!(
@@ -2661,37 +2566,10 @@ async fn populated_schema12_upgrade_preserves_owner_development_records_and_sess
 }
 
 #[tokio::test]
-async fn schema13_guards_reject_owner_insert_regrant_and_owner_only_supervised_update() {
+async fn schema13_guards_reject_owner_membership_and_requests() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
-    let developer = auth[0].clone().development_fixture();
-    let legacy = store
-        .create_campaign(
-            developer.clone(),
-            "Owner only Master".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    store.request_join(auth[2].clone(), legacy).await.unwrap();
-    store
-        .decide_join(developer, legacy, 3, 1, true)
-        .await
-        .unwrap();
-    insert_native(
-        &store,
-        auth[2].clone().development_fixture(),
-        native(legacy, 3),
-    )
-    .await;
-    let player = auth[2].clone();
-    store.run_campaign(player,move|db|{
-        let result=db.execute("UPDATE private_sheets SET revision=2 WHERE id=1",[]);
-        assert!(matches!(result,Err(rusqlite::Error::SqliteFailure(_,Some(ref message))) if message=="enabled gameplay Master required"));
-        Ok(())
-    }).await.unwrap();
     let campaign = store
         .create_campaign(
             auth[1].clone(),
@@ -2701,10 +2579,7 @@ async fn schema13_guards_reject_owner_insert_regrant_and_owner_only_supervised_u
         )
         .await
         .unwrap();
-    store
-        .request_join(auth[0].clone().development_fixture(), campaign)
-        .await
-        .unwrap();
+    assert!(store.request_join(auth[0].clone(), campaign).await.is_err());
     assert!(
         store
             .campaign_detail(auth[1].clone(), campaign, 0)
@@ -2713,34 +2588,180 @@ async fn schema13_guards_reject_owner_insert_regrant_and_owner_only_supervised_u
             .requests
             .is_empty()
     );
-    let development_requests = store
-        .campaign_detail(auth[1].clone().development_fixture(), campaign, 0)
-        .await
-        .unwrap();
-    assert_eq!(development_requests.requests.len(), 1);
-    assert_eq!(development_requests.requests[0].account_id, 1);
-    assert!(matches!(
-        store
-            .decide_join(auth[1].clone(), campaign, 1, 1, true)
-            .await,
-        Err(AppError::Invalid(_))
-    ));
-    store
-        .decide_join(auth[1].clone().development_fixture(), campaign, 1, 1, true)
-        .await
-        .unwrap();
+    let owner = auth[0].clone();
     assert!(
         store
-            .change_role(auth[1].clone(), campaign, 1, 1, true)
+            .run_campaign(owner, |db| {
+                db.execute(
+                    "INSERT INTO campaigns VALUES(99,1,'mork-borg','it-2025','Owner campaign',1)",
+                    [],
+                )?;
+                Ok(())
+            })
             .await
             .is_err()
     );
-    let owner = auth[0].clone();
-    assert!(store.run_campaign(owner,|db|{
-        db.execute("INSERT INTO campaigns VALUES(99,1,'mork-borg','it-2025','False flag denial',1)",[])?;
+    assert!(
+        store
+            .run(|db| {
+                db.execute(
+                    "INSERT INTO campaign_members(campaign_id,account_id,revision,state,role) VALUES(1,1,1,'active','player')",
+                    [],
+                )
+                .map(|_| ())
+                .map_err(Into::into)
+            })
+            .await
+            .is_err()
+    );
+    assert_private_counts(&store, 0).await;
+}
+
+/// Makes account `id` the Owner after the fact: the database then holds, for the Owner, the
+/// memberships, requests and custody that an older release let an Owner create.
+async fn promote_to_owner(store: &Store, id: i64) {
+    const ACCOUNTS: &str = include_str!("../../migrations/010_accounts.sql");
+    let restore = ACCOUNTS
+        .lines()
+        .find(|line| line.starts_with("CREATE TRIGGER account_owner_update"))
+        .expect("the owner binding trigger");
+    store
+        .run(move |db| {
+            db.execute_batch("DROP TRIGGER account_owner_update;")?;
+            db.execute("UPDATE account_owner SET account_id=?1", [id])?;
+            db.execute_batch(restore)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Account 2 (`auth[1]`) first masters a campaign with a player (account 3) holding a sheet,
+/// requests to join a campaign of account 4, and holds a sheet of its own; then it becomes the
+/// Owner. Returns `(campaign, other_campaign)`.
+async fn legacy_owner_world(store: &Store, auth: &[RequestAuth]) -> (i64, i64) {
+    let campaign = store
+        .create_campaign(
+            auth[1].clone(),
+            "Legacy".into(),
+            "mork-borg".into(),
+            "it-2025".into(),
+        )
+        .await
+        .unwrap();
+    store.request_join(auth[2].clone(), campaign).await.unwrap();
+    store
+        .decide_join(auth[1].clone(), campaign, 3, 1, true)
+        .await
+        .unwrap();
+    insert_native(store, auth[1].clone(), native(campaign, 2)).await;
+    let mut player_sheet = native(campaign, 3);
+    player_sheet.sheet_id = 2;
+    insert_native(store, auth[2].clone(), player_sheet).await;
+    let other = store
+        .create_campaign(
+            auth[3].clone(),
+            "Other".into(),
+            "mork-borg".into(),
+            "it-2025".into(),
+        )
+        .await
+        .unwrap();
+    store.request_join(auth[1].clone(), other).await.unwrap();
+    promote_to_owner(store, 2).await;
+    (campaign, other)
+}
+
+#[tokio::test]
+async fn legacy_owner_join_request_is_refused_with_422_and_hidden_from_the_roster() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    let (campaign, other) = legacy_owner_world(&store, &auth).await;
+    // Accepting is a 422 answer, not a storage failure from the SQL guard.
+    assert!(matches!(
+        store.decide_join(auth[3].clone(), other, 2, 1, true).await,
+        Err(AppError::Invalid(_))
+    ));
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = router_request(
+        &app,
+        &auth[3],
+        &format!("/campaigns/{other}/requests/2"),
+        Some(vec![
+            ("csrf".into(), "a".repeat(64)),
+            ("revision".into(), "1".into()),
+            ("action".into(), "accept".into()),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY
+    );
+    // The retained request and membership never show on a roster.
+    let requests = store
+        .campaign_detail(auth[3].clone(), other, 0)
+        .await
+        .unwrap();
+    assert!(requests.requests.is_empty());
+    let members = store
+        .campaign_detail(auth[2].clone(), campaign, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        members
+            .members
+            .iter()
+            .map(|m| m.account_id)
+            .collect::<Vec<_>>(),
+        [3]
+    );
+}
+
+#[tokio::test]
+async fn legacy_owner_custody_and_mastership_give_no_access() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    let (campaign, _) = legacy_owner_world(&store, &auth).await;
+    assert!(
+        store
+            .private_read(
+                auth[1].clone(),
+                1,
+                None,
+                crate::definitions::admit().unwrap()
+            )
+            .await
+            .is_err()
+    );
+    assert!(store.private_history(auth[1].clone(), 1, 0).await.is_err());
+    // The player's own sheet is supervised only by the Owner now: no edit is authorized.
+    let player = auth[2].clone();
+    store
+        .run_campaign(player.clone(), move |db| {
+            let mut sheet = native(campaign, 3);
+            sheet.sheet_id = 2;
+            assert!(super::snapshots::authorize_edit(db, &player, &sheet).is_err());
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_owner_only_master_refuses_a_supervised_update_in_sql() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    legacy_owner_world(&store, &auth).await;
+    let player = auth[2].clone();
+    store.run_campaign(player,move|db|{
+        let result=db.execute("UPDATE private_sheets SET revision=2 WHERE id=2",[]);
+        assert!(matches!(result,Err(rusqlite::Error::SqliteFailure(_,Some(ref message))) if message=="enabled gameplay Master required"));
         Ok(())
-    }).await.is_err());
-    assert_private_counts(&store, 1).await;
+    }).await.unwrap();
 }
 
 #[tokio::test]
@@ -3014,54 +3035,6 @@ async fn approved_versions_paginate_without_resetting_other_sections() {
     assert!(html.contains(
         "versions_after=50&amp;members_after=1&amp;requests_after=7&amp;sheets_after=23"
     ));
-}
-
-#[tokio::test]
-async fn regression_retained_owner_join_request_is_not_offered_or_reported_as_server_failure() {
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let (_dir, store, auth, _clock) = fixture().await;
-    let campaign = store
-        .create_campaign(
-            auth[1].clone(),
-            "Retained request".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    store
-        .request_join(auth[0].clone().development_fixture(), campaign)
-        .await
-        .unwrap();
-    let app = crate::auth::app(store.clone()).await.unwrap();
-    let response = router_request(
-        &app,
-        &auth[1],
-        &format!("/campaigns/{campaign}/requests/1"),
-        Some(vec![
-            ("csrf".into(), "a".repeat(64)),
-            ("revision".into(), "1".into()),
-            ("action".into(), "accept".into()),
-        ]),
-    )
-    .await;
-    assert_eq!(
-        response.status(),
-        axum::http::StatusCode::UNPROCESSABLE_ENTITY
-    );
-    assert!(!response.headers().contains_key("set-cookie"));
-    let normal = store
-        .campaign_detail(auth[1].clone(), campaign, 0)
-        .await
-        .unwrap();
-    assert!(normal.requests.is_empty());
-    assert_eq!(normal.requests_next, None);
-    let development = store
-        .campaign_detail(auth[1].clone().development_fixture(), campaign, 0)
-        .await
-        .unwrap();
-    assert_eq!(development.requests.len(), 1);
-    assert_eq!(development.requests[0].revision, 1);
 }
 
 async fn assert_private_counts(store: &Store, expected: i64) {

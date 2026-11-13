@@ -164,7 +164,6 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **AUTH-L6** [security] SQL guards protect against ordinary application SQL, not against direct write access to the database file.
 - **AUTH-L7** [accounts] Credential-file durability is verified only for Linux local filesystems with working fsync, not power loss.
 - **AUTH-L9** [deployment] Behind a proxy, Mimik sees only the proxy; client network restrictions depend entirely on the proxy configuration.
-- **AUTH-L10** [security] `--dev-owner-play` still lets the Owner play through SQL and route guards (AUTH-3). Remove it (`src/main.rs`, `src/auth/`) as its own reviewed change, deciding what happens to development Owner memberships and custody in existing databases.
 - **CAMP-L1** [campaigns] Transfer, frozen-sheet reactivation, soft delete, Owner restore, purge and rollback are decided (CAMP-9 to CAMP-12) but not built; nothing can be deleted. Rollback semantics are undecided: ask the user when the lifecycle slice is selected.
 - **CAMP-L2** [campaigns] The creator cannot leave, be removed or hand over the campaign; no creator succession.
 - **CAMP-L4** [campaigns] Prototype character records cannot move into campaigns, and changing a campaign's ruleset or moving a sheet across rulesets has no policy.

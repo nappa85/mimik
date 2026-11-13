@@ -47,7 +47,7 @@ fn removed_auth_and_conflicting_modes_are_rejected() {
             "--external-url",
             "https://mimik.example",
         ],
-        vec!["mimik", "--no-auth", "--dev-owner-play"],
+        vec!["mimik", "--dev-owner-play"],
         vec!["mimik", "--loopback", "--lan-address", "192.168.1.2"],
     ] {
         assert!(Args::try_parse_from(flags).is_err());

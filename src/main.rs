@@ -12,9 +12,6 @@ struct Args {
     /// Development only: disable authentication and use the isolated loopback prototype.
     #[arg(long)]
     no_auth: bool,
-    /// Development only: allow the administrative Owner to use gameplay grants.
-    #[arg(long, conflicts_with = "no_auth")]
-    dev_owner_play: bool,
     /// Development only: restrict authenticated serving to this machine.
     #[arg(long, conflicts_with = "lan_address")]
     loopback: bool,
@@ -535,7 +532,6 @@ fn validate_serving_args(args: &Args) -> Result<(), Box<dyn std::error::Error>> 
     if args.command.is_some()
         && (args.no_auth
             || args.loopback
-            || args.dev_owner_play
             || args.assistant.on
             || args.lan_address.is_some()
             || args.external_url.is_some())
@@ -582,7 +578,6 @@ fn server_options(
             .transpose()?
     };
     Ok(mimik::auth::AuthOptions {
-        development_owner_play: args.dev_owner_play,
         assistant: None,
         network,
         external_url,

@@ -1244,7 +1244,7 @@ def auth_login(cookie, fields, login, password):
             "/auth/login", cookie=cookie, form=dict(fields, login=login, password=password.decode())
         )
     require(
-        response[0] == 303 and response[1].get("location") == "/auth/session",
+        response[0] == 303 and response[1].get("location") == "/",
         "Auth login failed (diagnostics redacted)",
     )
     return auth_cookie(response)
@@ -1472,9 +1472,13 @@ def smoke_auth(binary, directory, passwords):
             replay.append(cookie)
             cookie = auth_login(cookie, fields, login, passwords[0])
             require(cookie != replay[-1], "Login did not rotate session identity")
-            status = auth_request("/auth/session", cookie=cookie)
+            status = auth_request("/", cookie=cookie)
             fields = auth_fields(status, "/auth/logout")
-            require(login in status[2], "Current auth principal differs")
+            require(
+                {"smoke-owner": "Synthetic Owner", "auth-player": "SyntheticLongDisplay" * 5}[login]
+                in status[2],
+                "Current auth principal differs",
+            )
             for old in replay:
                 auth_error(
                     auth_request("/auth/session", cookie=old),
@@ -1495,7 +1499,7 @@ def smoke_auth(binary, directory, passwords):
             )
             version = db.execute("PRAGMA data_version").fetchone()
             for _ in range(3):
-                read = auth_request("/auth/session", cookie=cookie)
+                read = auth_request("/", cookie=cookie)
                 auth_fields(read, "/auth/logout")
                 require("set-cookie" not in read[1], "Status read extended cookie")
             require(
@@ -1516,7 +1520,7 @@ def smoke_auth(binary, directory, passwords):
         stop(process, log)
     process, log = start(binary, directory, auth=True)
     try:
-        fields = auth_fields(auth_request("/auth/session", cookie=cookie), "/auth/logout")
+        fields = auth_fields(auth_request("/", cookie=cookie), "/auth/logout")
         require(
             all(auth_request(path, cookie=cookie)[0] == 200 for path in retained),
             "Campaign/private sheet access did not persist across restart",
@@ -1565,7 +1569,7 @@ def smoke_auth(binary, directory, passwords):
             "Invalid credentials or session.",
         )
         current = auth_login(anonymous, fields, "auth-player", passwords[1])
-        fields = auth_fields(auth_request("/auth/session", cookie=current), "/auth/logout")
+        fields = auth_fields(auth_request("/", cookie=current), "/auth/logout")
         require(
             auth_request("/auth/logout", cookie=current, form=fields)[0] == 303, "Logout failed"
         )
@@ -1604,7 +1608,7 @@ def smoke_auth(binary, directory, passwords):
         )
     finally:
         stop(process, log)
-    smoke_owner_development(binary, directory, passwords)
+    smoke_invalid_flags(binary, directory)
     require_secret_free((directory / "server.log").read_bytes(), passwords)
     print(
         "Auth process stage passed: strict forms/cookies, rotation, denial, fixed reads, restart, reset, disable, logout replay."
@@ -1745,7 +1749,7 @@ def smoke_account_administration(directory, passwords):
         account_id, epoch = db.execute(
             "SELECT id,epoch FROM accounts WHERE login='browser-player'"
         ).fetchone()
-    csrf = auth_fields(auth_request("/auth/session", cookie=owner_cookie), "/auth/logout")["csrf"]
+    csrf = auth_fields(auth_request("/", cookie=owner_cookie), "/auth/logout")["csrf"]
     path = f"/admin/accounts/{account_id}"
     token = issued_credential(
         auth_request(
@@ -1810,10 +1814,10 @@ def smoke_environment(directory):
     return env
 
 
-def smoke_owner_development(binary, directory, passwords):
-    """Trusted CLI override and retained Owner records across production restart."""
+def smoke_invalid_flags(binary, directory):
+    """Invalid or removed CLI flags must not touch the database."""
     untouched = directory / "invalid-flags" / "must-not-exist.sqlite3"
-    for flags in [("--no-auth", "--dev-owner-play"), ("--loopback", "list-accounts"), ("--auth",)]:
+    for flags in [("--dev-owner-play",), ("--loopback", "list-accounts"), ("--auth",)]:
         result = subprocess.run(
             [str(binary), "--database", str(untouched), *flags],
             cwd=directory,
@@ -1826,91 +1830,15 @@ def smoke_owner_development(binary, directory, passwords):
             result.returncode != 0 and not untouched.parent.exists(),
             "Invalid CLI flags accessed database",
         )
-    process, log = start(binary, directory, auth=True, development_owner_play=True)
-    try:
-        response = auth_request("/auth/login")
-        cookie = auth_login(
-            auth_cookie(response), auth_fields(response, "/auth/login"), "smoke-owner", passwords[0]
-        )
-        status = auth_request("/auth/session", cookie=cookie)
-        require("Development" in status[2], "Development Owner warning missing")
-        _, fields, _ = workspace_form("/campaigns", cookie, "/campaigns")
-        campaign = workspace_submit(
-            cookie,
-            "/campaigns",
-            fields,
-            title="Retained Owner development",
-            game_id="mork-borg",
-            edition_id="it-2025",
-        )
-        action, fields, _ = workspace_form(campaign + "/sheets/new", cookie)
-        sheet = workspace_submit(cookie, action, fields, name="Retained development sheet")
-        require(
-            auth_request(sheet + "/history", cookie=cookie)[0] == 200,
-            "Development history unavailable",
-        )
-    finally:
-        stop(process, log)
-    with sqlite3.connect(directory / "smoke.sqlite3") as db:
-        retained = db.execute(
-            "SELECT snapshot FROM private_sheets WHERE id=?", (int(sheet.rsplit("/", 1)[1]),)
-        ).fetchone()
-        history = db.execute(
-            "SELECT * FROM private_sheet_history WHERE sheet_id=? ORDER BY revision",
-            (int(sheet.rsplit("/", 1)[1]),),
-        ).fetchall()
-        require(
-            retained is not None and bool(history), "Development sheet/history baseline missing"
-        )
-    process, log = start(binary, directory, auth=True)
-    try:
-        require(
-            auth_request("/admin", cookie=cookie)[0] == 200,
-            "Owner session lost on production restart",
-        )
-        for path in (campaign, sheet, sheet + "/history"):
-            auth_error(auth_request(path, cookie=cookie), 403, "Access denied.")
-    finally:
-        stop(process, log)
-    process, log = start(binary, directory, auth=True, development_owner_play=True)
-    try:
-        require(auth_request(sheet, cookie=cookie)[0] == 200, "Retained development grant lost")
-        require(
-            auth_request(sheet + "/history", cookie=cookie)[0] == 200,
-            "Retained development history lost",
-        )
-        with sqlite3.connect(directory / "smoke.sqlite3") as db:
-            require(
-                db.execute(
-                    "SELECT snapshot FROM private_sheets WHERE id=?",
-                    (int(sheet.rsplit("/", 1)[1]),),
-                ).fetchone()
-                == retained,
-                "Owner sheet changed on mode restart",
-            )
-            require(
-                db.execute(
-                    "SELECT * FROM private_sheet_history WHERE sheet_id=? ORDER BY revision",
-                    (int(sheet.rsplit("/", 1)[1]),),
-                ).fetchall()
-                == history,
-                "History changed on mode restart",
-            )
-    finally:
-        stop(process, log)
-    print(
-        "Owner development process stage passed: invalid flags, explicit grants, production denial, retained snapshots/history."
-    )
 
 
-def start(binary, directory, *, auth=False, development_owner_play=False, extra=()):
+def start(binary, directory, *, auth=False, extra=()):
     # A fresh working directory proves embedded assets/templates are sufficient.
     log = open(directory / "server.log", "a", encoding="utf-8")
     process = subprocess.Popen(
         [
             str(binary),
             *(["--loopback"] if auth else ["--no-auth"]),
-            *(["--dev-owner-play"] if development_owner_play else []),
             *extra,
         ],
         cwd=directory,

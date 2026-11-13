@@ -198,3 +198,23 @@ fieldset[data-split-part] details { margin: .5rem 0; }
 .agreement-differs { color: #b42329; }
 .agreement-no-words, .agreement-excluded { color: #5a5a5a; }
 .agreement-diff q { background: #f6ba3b33; }
+
+/* Shared header of the signed-in app: logo, drop-down menus, account menu on the right. */
+header.site { flex-wrap: wrap; gap: .75rem 1.5rem; }
+header.site .logo img { display: block; max-width: 100%; height: auto; }
+.menu { display: flex; flex: 1; flex-wrap: wrap; gap: .5rem 1rem; align-items: flex-start; }
+.menu details { position: relative; }
+.menu details.account { margin-left: auto; }
+.menu summary { cursor: pointer; padding: .4rem .75rem; border-radius: .4rem; list-style: none; font-weight: 600; }
+.menu summary::-webkit-details-marker { display: none; }
+.menu summary::after { content: " \25BE"; }
+.menu summary:hover, .menu details[open] > summary { background: #e8e6da; }
+.menu summary:focus-visible, .menu a:focus-visible, .menu button:focus-visible { outline: 2px solid #285d4c; outline-offset: 2px; }
+.menu .items { position: absolute; z-index: 10; min-width: 12rem; margin: .25rem 0 0; padding: .35rem; background: #fffdf8; border: 1px solid #d8d8cc; border-radius: .4rem; box-shadow: 0 .25rem .75rem rgba(0, 0, 0, .12); }
+.menu details.account .items { right: 0; }
+.menu .items a, .menu .items button { display: block; width: 100%; margin: 0; padding: .45rem .6rem; text-align: left; text-decoration: none; border-radius: .3rem; background: none; border: 0; font: inherit; color: inherit; cursor: pointer; }
+.menu .items a:hover, .menu .items button:hover { background: #e8e6da; }
+.menu .items a[aria-current="page"] { font-weight: 700; background: #e1ece6; }
+.menu .items form { margin: 0; }
+@media (max-width: 700px) { .menu details.account { margin-left: 0; } }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }

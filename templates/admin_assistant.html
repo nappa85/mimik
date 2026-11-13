@@ -1,5 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Assistant · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
-<nav><a href="/admin">Owner administration</a> · <a href="/admin/assistant">Assistant</a></nav>
+{% extends "layout.html" %}{% block title %}Assistant · Mimik{% endblock %}{% block content %}
 <h1>Interpretation assistant</h1>
 <p>The assistant reads a scribble a number field could not take and offers a reading to confirm; it never writes on its own. It runs a pinned llama.cpp model server as Mimik's child, on this machine only.</p>
 {% if !notice.is_empty() %}<p class="panel" role="status">{{ notice }}</p>{% endif %}
@@ -112,4 +111,4 @@
 {% else %}
 <section class="panel"><h2>State</h2><p><strong>Off</strong>: Mimik was started without <code>--assistant</code>. No model server runs, nothing is listed or probed.</p></section>
 {% endif %}
-</main></body></html>
+{% endblock %}

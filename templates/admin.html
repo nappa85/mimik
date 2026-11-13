@@ -1,5 +1,5 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Owner administration · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
-<a href="/auth/session">Session</a><h1>Owner administration</h1>
+{% extends "layout.html" %}{% block title %}Owner administration · Mimik{% endblock %}{% block content %}
+<h1>Owner administration</h1>
 <p>Use a separate enrolled player account for campaigns. Administration grants no sheet or history access.</p>
 <section class="panel"><h2>Invite a player</h2><form method="post" action="/admin/invite">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="epoch" value="0">
@@ -13,4 +13,4 @@
 <p>Invitations expire after24h; resets after1h. Reissue/reset revokes old tokens and sessions. Reset issuance keeps the old password usable for new login until completion. Disablement is irreversible here and preserves custody/history. Owner reset issuance/disablement requires local CLI.</p>
 <section class="panel"><h2>Local materials</h2><p><a href="/admin/materials">Inspect sources and review evidence</a>. Ingestion, finalization and definition publication use the local operator workflows in docs/sources-and-retrieval.md and docs/runtime-definition-contract.md. Imported materials stay local.</p></section>
 <section class="panel"><h2>Ruleset registry</h2><p><a href="/admin/rulesets">Register game editions and exact legacy aliases</a> before importing version-2 sources. Registration identifies materials only; it does not approve evidence or enable a sheet. The local CLI offers the same registrations.</p></section>
-</main></body></html>
+{% endblock %}

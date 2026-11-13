@@ -261,7 +261,7 @@ async fn upload_route_disconnect_drop_busy_and_responsive() {
         assert_eq!(second.status(), StatusCode::CONFLICT);
         assert_eq!(
             app.clone()
-                .oneshot(request("/auth/session", Some(id)))
+                .oneshot(request("/", Some(id)))
                 .await
                 .unwrap()
                 .status(),
@@ -332,7 +332,12 @@ async fn upload_route_filename_not_stored_and_actions_admitted() {
     let text = body_text(conflict).await;
     assert!(text.contains("an upload is already staged; open or discard it"));
     assert!(text.contains(&format!("href=\"{path}\"")));
-    assert!(text.contains("<nav>") && text.contains("href=\"/admin/materials\""));
+    let uploads = Some("/admin/materials/uploads");
+    crate::auth::nav::check::assert_header(&text, true, uploads, true, "staged conflict");
+    let staged = app.clone().oneshot(request(&path, Some(id))).await.unwrap();
+    assert_eq!(staged.status(), StatusCode::OK);
+    let staged = body_text(staged).await;
+    crate::auth::nav::check::assert_header(&staged, true, uploads, true, "staged upload");
     let player = player_session(&store).await;
     assert_upload_action_admission(&app, &path, id, player, &token).await;
     assert_upload_filename_not_stored(&store).await;
@@ -818,11 +823,7 @@ async fn upload_route_server_responds_while_job_runs() {
         }
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    let response = app
-        .clone()
-        .oneshot(request("/auth/session", Some(id)))
-        .await
-        .unwrap();
+    let response = app.clone().oneshot(request("/", Some(id))).await.unwrap();
     let manager = m.clone();
     let running =
         blocking_test(move || manager.read(&upload_id).unwrap().job.state == "running").await;
@@ -840,7 +841,13 @@ async fn upload_route_server_responds_while_job_runs() {
     );
     let proposed = body_text(proposed).await;
     assert!(proposed.contains("Wait for the upload job to finish"));
-    assert!(proposed.contains("<nav>") && proposed.contains("href=\"/admin/materials\""));
+    crate::auth::nav::check::assert_header(
+        &proposed,
+        true,
+        Some("/admin/materials/uploads"),
+        true,
+        "proposal error",
+    );
     assert!(!proposed.contains("http-equiv=\"refresh\""));
     let mut req = post_body(id, Body::from(format!("csrf={token}")));
     *req.uri_mut() = format!("{path}/discard").parse().unwrap();

@@ -5,6 +5,7 @@ mod assistant_downloads;
 mod assistant_downloads_view;
 mod errors;
 mod materials;
+pub(crate) mod nav;
 mod persistence;
 mod rulesets;
 #[cfg(target_os = "linux")]
@@ -65,7 +66,7 @@ thread_local! { static DOMAIN_REQUEST: std::cell::RefCell<Option<RequestAuth>> =
 
 pub(crate) fn register_domain_guard(db: &rusqlite::Connection) -> Result<(), AppError> {
     db.create_scalar_function("mimik_request_auth",0,rusqlite::functions::FunctionFlags::SQLITE_UTF8,|_|{
-        Ok(DOMAIN_REQUEST.with(|ctx|ctx.borrow().as_ref().map(|auth|serde_json::json!({"id":auth.original_id.to_string(),"account":auth.account.id,"epoch":auth.account.epoch,"deadline":auth.deadline,"development_owner_play":auth.development_owner_play,"digest":auth.digest()}).to_string())))
+        Ok(DOMAIN_REQUEST.with(|ctx|ctx.borrow().as_ref().map(|auth|serde_json::json!({"id":auth.original_id.to_string(),"account":auth.account.id,"epoch":auth.account.epoch,"deadline":auth.deadline,"digest":auth.digest()}).to_string())))
     })?;
     Ok(())
 }
@@ -108,7 +109,6 @@ pub(crate) struct AuthState {
 pub struct AuthOptions {
     #[cfg(target_os = "linux")]
     pub uploads: Option<crate::sources::uploads::Uploads>,
-    pub development_owner_play: bool,
     /// The interpretation assistant (`--assistant`, step 2c-1); `None` is off.
     pub assistant: Option<crate::assistant::AssistantHandle>,
     pub network: crate::network::Network,
@@ -208,6 +208,7 @@ fn router_with_sessions(
         ))
         .route("/assets/app.css", get(crate::web::css_asset))
         .route("/assets/logo.png", get(crate::web::logo_asset))
+        .route("/assets/nav.js", get(nav::script))
         .route(
             "/assets/sheet-assist.js",
             get(crate::campaigns::web::script_asset),
@@ -261,8 +262,10 @@ async fn boundary(request: Request, next: Next) -> Response {
                 busy.clone(),
                 READ_ADMISSION.scope(
                     std::cell::Cell::new(None),
-                    DOCUMENT_PRESENTATION
-                        .scope(document, tokio::time::timeout(deadline, next.run(request))),
+                    DOCUMENT_PRESENTATION.scope(
+                        document,
+                        nav::scope(tokio::time::timeout(deadline, next.run(request))),
+                    ),
                 ),
             )
             .await;
@@ -319,13 +322,24 @@ async fn boundary(request: Request, next: Next) -> Response {
     }
 }
 
+#[derive(Template)]
+#[template(path = "home.html")]
+struct HomeTemplate {
+    nav: nav::Nav,
+}
+
 async fn landing(State(state): State<AuthState>, session: Session) -> AuthResult {
-    let target = if principal(&state, &session).await?.is_some() {
-        "/auth/session"
-    } else {
-        "/auth/login"
-    };
-    Ok(Redirect::to(target).into_response())
+    if principal(&state, &session).await?.is_none() {
+        return Ok(Redirect::to("/auth/login").into_response());
+    }
+    Ok(Html(
+        HomeTemplate {
+            nav: nav::Nav::here(nav::Section::Home),
+        }
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .into_response())
 }
 
 fn positive_quality(value: &str) -> Option<bool> {
@@ -585,7 +599,6 @@ pub(crate) struct RequestAuth {
     account: Principal,
     original_id: tower_sessions::session::Id,
     deadline: i64,
-    development_owner_play: bool,
 }
 
 impl RequestAuth {
@@ -619,7 +632,6 @@ impl RequestAuth {
             },
             original_id: id,
             deadline,
-            development_owner_play: false,
         }
     }
     pub(crate) fn account_id(&self) -> i64 {
@@ -627,14 +639,6 @@ impl RequestAuth {
     }
     pub(crate) fn epoch(&self) -> i64 {
         self.account.epoch
-    }
-    pub(crate) fn development_owner_play(&self) -> bool {
-        self.development_owner_play
-    }
-    #[cfg(test)]
-    pub(crate) fn development_fixture(mut self) -> Self {
-        self.development_owner_play = true;
-        self
     }
     pub(crate) fn digest(&self) -> String {
         use sha2::{Digest, Sha256};
@@ -644,7 +648,7 @@ impl RequestAuth {
         hex::encode(hash.finalize())
     }
     pub(crate) fn recheck(&self, db: &rusqlite::Connection) -> Result<i64, AppError> {
-        self.recheck_binding(db, self.development_owner_play)
+        self.recheck_binding(db, false)
     }
     pub(crate) fn recheck_owner(&self, db: &rusqlite::Connection) -> Result<i64, AppError> {
         self.recheck_binding(db, true)?;
@@ -683,7 +687,7 @@ pub(crate) async fn request_auth(
     let account = principal(state, session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    if account.owner && !state.options.development_owner_play {
+    if account.owner {
         return Err(StatusCode::FORBIDDEN);
     }
     let (original_id, deadline) = READ_ADMISSION
@@ -697,7 +701,6 @@ pub(crate) async fn request_auth(
         },
         original_id,
         deadline,
-        development_owner_play: state.options.development_owner_play,
     })
 }
 
@@ -722,6 +725,17 @@ pub(crate) async fn has_principal(session: &Session) -> Result<bool, StatusCode>
 }
 
 async fn principal(state: &AuthState, session: &Session) -> Result<Option<Summary>, StatusCode> {
+    let result = load_principal(state, session).await;
+    if !matches!(result, Ok(Some(_))) {
+        nav::forget();
+    }
+    result
+}
+
+async fn load_principal(
+    state: &AuthState,
+    session: &Session,
+) -> Result<Option<Summary>, StatusCode> {
     let binding: Option<Principal> = session.get("principal").await.map_err(session_error)?;
     let Some(binding) = binding else {
         return Ok(None);
@@ -763,6 +777,13 @@ async fn principal(state: &AuthState, session: &Session) -> Result<Option<Summar
     {
         return Ok(None);
     }
+    if let Some(account) = &current {
+        nav::remember(nav::Context {
+            display_name: account.display_name.clone(),
+            owner: account.owner,
+            csrf: token(session).await?.unwrap_or_default(),
+        });
+    }
     Ok(current)
 }
 
@@ -773,14 +794,6 @@ struct LoginTemplate<'a> {
     login: &'a str,
     message: &'a str,
 }
-#[derive(Template)]
-#[template(path = "auth_session.html")]
-struct StatusTemplate<'a> {
-    account: &'a Summary,
-    csrf: &'a str,
-    development_owner_play: bool,
-}
-
 async fn owner_auth(state: &AuthState, session: &Session) -> Result<RequestAuth, StatusCode> {
     let account = principal(state, session)
         .await?
@@ -799,7 +812,6 @@ async fn owner_auth(state: &AuthState, session: &Session) -> Result<RequestAuth,
         },
         original_id,
         deadline,
-        development_owner_play: false,
     })
 }
 
@@ -1003,7 +1015,7 @@ async fn login(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     )));
     session.save().await.map_err(session_error)?;
-    Ok(Redirect::to("/auth/session").into_response())
+    Ok(Redirect::to("/").into_response())
 }
 async fn recheck_login_form(state: &AuthState, admission: CsrfAdmission) -> Result<(), StatusCode> {
     state
@@ -1032,23 +1044,12 @@ fn login_form_problem(status: StatusCode, login: &str, csrf: &str) -> AuthResult
         _ => Err(status),
     }
 }
+/// The former "Signed in" page: the home page replaced it.
 async fn status(State(state): State<AuthState>, session: Session) -> AuthResult {
-    let account = principal(&state, &session)
+    principal(&state, &session)
         .await?
         .ok_or(StatusCode::UNAUTHORIZED)?;
-    let token = token(&session)
-        .await?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Html(
-        StatusTemplate {
-            account: &account,
-            csrf: &token,
-            development_owner_play: state.options.development_owner_play,
-        }
-        .render()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    )
-    .into_response())
+    Ok(Redirect::to("/").into_response())
 }
 async fn logout(session: Session, Form(form): Form<LogoutForm>) -> AuthResult {
     check_csrf(&session, &form.csrf).await?;
@@ -1076,9 +1077,6 @@ pub async fn serve_with_options(
     options: AuthOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let router = app_with_options(store.clone(), options.clone()).await?;
-    if options.development_owner_play {
-        println!("DEVELOPMENT ONLY: Owner gameplay override enabled.");
-    }
     println!(
         "Mimik auth mode: {} — private campaign workspace",
         options.origin()
