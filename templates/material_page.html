@@ -38,7 +38,14 @@
 {% else %}<p data-agreement-none>{{ self.no_result() }}</p>{% endif %}
 {% if let Some(notice) = tab_notice %}<p role="status" data-tab-notice>{{ notice }}</p>{% endif %}
 <nav class="review-tabs" aria-label="Show units">{% for link in self.tabs() %}<a href="{{ link.href }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.label }}{% if let Some(count) = link.count %} ({{ count }}){% endif %}</a> {% endfor %}</nav>
-{# Slice 4: the batch form for matching units goes here. #}
+{% if !batch_notice.is_empty() %}<p role="status" data-batch-notice><strong>{{ batch_notice }}</strong></p>{% endif %}
+{% if !batch_message.is_empty() %}<p class="field-error" role="alert" tabindex="-1" autofocus data-batch-error>Nothing was accepted: {{ batch_message }}</p>{% endif %}
+{% if let Some(batch) = batch %}<form id="agreement-batch" method="post" action="/admin/materials/pages/{{ page.id }}/batch" data-batch-form><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ batch.revision }}"><input type="hidden" name="words" value="{{ batch.words }}"><input type="hidden" name="units" value="{{ batch.value }}">
+<h3>Accept the {% if batch.more > 0 %}first {{ batch.ids.len() }} of the {{ batch.total }}{% else %}{{ batch.total }}{% endif %} matching units</h3>
+<p data-batch-units>Units {% for id in batch.listed %}{{ id }}{% if !loop.last %}, {% endif %}{% endfor %}{% if batch.ids.len() > batch.listed.len() %}, and {{ batch.ids.len() - batch.listed.len() }} more in this form{% endif %}.{% if batch.more > 0 %} The other {{ batch.more }} follow in the next parts, after this one is saved.{% endif %} Accepting records each as extracted, with the rationale below; it changes no text. Check the page image first.</p>
+<p><span data-batch-prefix>{{ batch.prefix }}</span> (written by the server, not editable)</p>
+<label>Your rationale<textarea name="rationale" required maxlength="4900">{{ "\n" }}{{ batch.text }}</textarea></label>
+<button>Accept the {{ batch.ids.len() }} matching units</button></form>{% endif %}
 </div>
 {% if !proposals.is_empty() %}<div class="panel" id="table-proposals"><p>These unreviewed units may form a table. Each link opens the table form with them selected and a draft to check; nothing is decided or saved until you save the form.</p><ul>{% for proposal in proposals %}<li><a href="{{ proposal.1 }}">{{ proposal.0 }}</a></li>{% endfor %}</ul></div>
 {% endif %}<form id="table-select" method="get" action="/admin/materials/pages/{{ page.id }}/tables/new" class="panel"><p>Tick "Select" on 1 to 200 units among the cards shown (50 per window), in any order, then open the table form, or the merge form (2 or more units). The selection applies to the cards shown. Ticking only selects: it records no decision. Use the bar at the bottom, or the buttons above and below the cards.</p><button data-no-script-table>Create table from selected units</button> <button data-no-script-table formaction="/admin/materials/pages/{{ page.id }}/merges/new">Merge selected units</button>

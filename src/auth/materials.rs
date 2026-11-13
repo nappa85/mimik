@@ -100,6 +100,7 @@ pub(super) fn routes() -> Router<AuthState> {
                     "/admin/materials/pages/{page}/units/{unit}/split/areas",
                     post(split_areas),
                 )
+                .route("/admin/materials/pages/{id}/batch", post(batch_accept))
                 .route("/admin/materials/pages/{id}/primary", post(primary))
                 .route("/admin/materials/sources/{id}/primary", post(primary_pages))
                 .route("/admin/materials/pages/{page}/units/{unit}", post(review))
@@ -155,6 +156,8 @@ struct PageCursor {
     show: Show,
     /// A unit the Owner asked for by link: a tab that would hide it shows `all`.
     unit: i64,
+    /// Units a batch accept just saved (checked before it is announced).
+    batch: i64,
 }
 /// The decision a redirect confirms; only these fixed words are ever rendered.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -424,7 +427,34 @@ struct Editor {
     matching_list: bool,
     matching_rows: Vec<MatchingRow>,
     matching_next: Option<i64>,
+    /// The batch accept form of the agreement bar (an independent page with matching units).
+    batch: Option<BatchOffer>,
+    /// A refused batch: why, and the Owner's rationale text to keep.
+    batch_message: String,
+    batch_text: Option<String>,
+    /// A saved batch (checked before it is announced).
+    batch_notice: String,
 }
+/// What the batch form carries and shows.
+struct BatchOffer {
+    revision: i64,
+    words: i64,
+    /// `id:revision` pairs, comma separated.
+    value: String,
+    ids: Vec<i64>,
+    /// The first [`BATCH_LISTED`] of `ids`, shown as the list of numbers.
+    listed: Vec<i64>,
+    total: usize,
+    more: usize,
+    prefix: &'static str,
+    text: String,
+}
+/// Characters of the Owner's rationale a refused batch gives back (the store's limit).
+const BATCH_ECHO_CHARS: usize = 5_000;
+/// Unit numbers the batch form lists; the hidden field carries them all.
+const BATCH_LISTED: usize = 100;
+/// The Owner's prefilled batch rationale (D2).
+const BATCH_TEXT: &str = "matches the PDF text layer word for word; checked against the page image";
 /// One row of the compact matching list.
 struct MatchingRow {
     id: i64,
@@ -562,7 +592,44 @@ impl Editor {
         self.shown = self
             .agreement
             .diffs(&self.page.units.iter().map(|u| u.id).collect::<Vec<_>>());
+        self.batch = self.batch_offer();
         self
+    }
+    /// The batch form: offered only when the agreement allows it and a unit matches. Sets
+    /// over the atomic bound go in parts, the first part first.
+    fn batch_offer(&self) -> Option<BatchOffer> {
+        use crate::sources::agreement_view::BATCH_MAX_UNITS;
+        if !self.agreement.offers_batch() {
+            return None;
+        }
+        let matching: Vec<_> = self
+            .agreement
+            .units
+            .iter()
+            .filter(|u| AgreementView::in_tab(u, Tab::Matching))
+            .collect();
+        if matching.is_empty() {
+            return None;
+        }
+        let part = &matching[..matching.len().min(BATCH_MAX_UNITS)];
+        Some(BatchOffer {
+            revision: self.agreement.page_revision,
+            words: self.agreement.words_len,
+            value: part
+                .iter()
+                .map(|u| format!("{}:{}", u.id, u.revision))
+                .collect::<Vec<_>>()
+                .join(","),
+            ids: part.iter().map(|u| u.id).collect(),
+            listed: part.iter().take(BATCH_LISTED).map(|u| u.id).collect(),
+            total: matching.len(),
+            more: matching.len() - part.len(),
+            prefix: crate::sources::agreement_view::BATCH_PREFIX,
+            text: self
+                .batch_text
+                .clone()
+                .unwrap_or_else(|| BATCH_TEXT.to_owned()),
+        })
     }
     /// The screen card of a unit shown on this window.
     fn card(&self, unit: i64) -> Option<&crate::sources::review::Card> {
@@ -731,6 +798,10 @@ impl Editor {
             matching_list: false,
             matching_rows: Vec::new(),
             matching_next: None,
+            batch: None,
+            batch_message: String::new(),
+            batch_text: None,
+            batch_notice: String::new(),
         }
     }
 }
@@ -933,6 +1004,7 @@ async fn page(
     editor.matching_rows = matching_rows;
     editor.matching_next = matching_next;
     editor.announce(created, merged, split);
+    editor.batch_notice = verified_batch_notice(&state, &auth, id, c.batch).await;
     html(&editor)
 }
 fn png(bytes: Vec<u8>) -> axum::response::Response {
@@ -1073,14 +1145,9 @@ struct Completion {
     rationale: String,
 }
 /// The redirect after a stored unit decision; only fixed words and numbers are placed in it.
-/// The `show` a redirect carries. While no page offers the batch form, an absent `show` means
-/// `all`, so that tab is left out and the links stay as short as they were.
+/// The `show` a redirect carries (an absent `show` means the page's default tab).
 fn carried(tab: Tab) -> String {
-    if tab == Tab::All && !crate::sources::agreement_view::batch_shipped() {
-        String::new()
-    } else {
-        format!("&show={}", tab.key())
-    }
+    format!("&show={}", tab.key())
 }
 fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext, tab: Tab) -> String {
     let label = Saved::of(state).key();
@@ -1253,6 +1320,146 @@ async fn review(
             // A refused save renders with every unit (so the draft binding and its link stay
             // valid); its agreement bar is computed like any view.
             let view = view_of(&state, editor_auth, page).await;
+            let editor = editor.with_agreement(view, Tab::All, None);
+            trusted_editor(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+/// The notice of a batch the link claims, empty unless the page's latest batch is that size.
+async fn verified_batch_notice(
+    state: &AuthState,
+    auth: &super::RequestAuth,
+    page: i64,
+    count: i64,
+) -> String {
+    if count > 0
+        && state
+            .sessions
+            .store
+            .material_batch_matches(auth.clone(), page, count)
+            .await
+            .unwrap_or(false)
+    {
+        batch_notice(count)
+    } else {
+        String::new()
+    }
+}
+/// The saved-batch notice.
+fn batch_notice(count: i64) -> String {
+    if count == 1 {
+        "Accepted 1 unit that matches the PDF text layer.".to_owned()
+    } else {
+        format!("Accepted {count} units that match the PDF text layer.")
+    }
+}
+/// The batch accept form: the page's revision and stored-words size, the units with their
+/// revisions, and the Owner's rationale (the server writes its prefix).
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchForm {
+    csrf: String,
+    revision: i64,
+    words: i64,
+    units: String,
+    #[serde(deserialize_with = "crate::form_text::lf")]
+    rationale: String,
+}
+/// Bytes of the `units` field: `BATCH_MAX_UNITS` pairs of two 20-character numbers (the widest
+/// `i64`), a colon and a comma.
+const BATCH_FIELD_BYTES: usize = crate::sources::agreement_view::BATCH_MAX_UNITS * 42;
+impl BatchForm {
+    fn parse_units(&self) -> Option<Vec<(i64, i64)>> {
+        if self.units.len() > BATCH_FIELD_BYTES {
+            return None;
+        }
+        let mut units = Vec::new();
+        for pair in self.units.split(',') {
+            let (id, revision) = pair.split_once(':')?;
+            units.push((id.parse().ok()?, revision.parse().ok()?));
+            if units.len() > crate::sources::agreement_view::BATCH_MAX_UNITS {
+                return None;
+            }
+        }
+        Some(units)
+    }
+}
+async fn batch_accept(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Form(form): Form<BatchForm>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = csrf_admission(&session, &form.csrf).await?;
+    let result = match form.parse_units() {
+        None => Err(AppError::Invalid(
+            "The batch form was incomplete or too large; reload the page.",
+        )),
+        Some(units) => {
+            // The verdicts are recomputed from the stored rows, never read from the memo.
+            let request = crate::sources::agreement_view::BatchAccept {
+                page_revision: form.revision,
+                words_len: form.words,
+                units,
+                text: form.rationale.clone(),
+            };
+            match state
+                .sessions
+                .store
+                .material_agreement_fresh(auth.clone(), page)
+                .await
+            {
+                // A read that failed is not a refusal of the form: every error maps as on the
+                // other routes (a timeout is already an unavailable view).
+                Err(e) => return Err(error(&e)),
+                Ok(view) => match view.check_batch(&request) {
+                    Err(reason) => Err(AppError::Invalid(reason)),
+                    Ok(()) => {
+                        state
+                            .sessions
+                            .store
+                            .material_batch_accept_agreeing(auth.clone(), csrf, page, request)
+                            .await
+                    }
+                },
+            }
+        }
+    };
+    match result {
+        Ok(events) => Ok(Redirect::to(&format!(
+            "/admin/materials/pages/{page}?batch={}#agreement-bar",
+            events.len()
+        ))
+        .into_response()),
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let message = match &e {
+                AppError::Invalid(reason) => (*reason).to_owned(),
+                other => other.to_string(),
+            };
+            let data = state
+                .sessions
+                .store
+                .material_page(auth.clone(), page, 0, 0)
+                .await
+                .map_err(|e| error(&e))?;
+            let screen = state
+                .sessions
+                .store
+                .material_screen(
+                    auth.clone(),
+                    page,
+                    data.page.units.iter().map(|u| u.id).collect(),
+                    0,
+                )
+                .await
+                .map_err(|e| error(&e))?;
+            let view = view_of(&state, auth, page).await;
+            let mut editor = Editor::new(data, screen, form.csrf.clone(), PageCursor::default());
+            editor.batch_message = message;
+            // Echo at most the length the store accepts: the field is not checked before.
+            editor.batch_text = Some(form.rationale.chars().take(BATCH_ECHO_CHARS).collect());
             let editor = editor.with_agreement(view, Tab::All, None);
             trusted_editor(&editor, error(&e))
         }

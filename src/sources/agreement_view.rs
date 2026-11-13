@@ -1,4 +1,4 @@
-//! The agreement on the review screen (`docs/source-agreement-plan.md`, slice 3b): reads the
+//! The agreement on the review screen (`docs/sources-and-retrieval.md`, "Agreement"): reads the
 //! page's units, suggestions and stored words, runs the rule of [`super::agreement`] off the
 //! async runtime and returns what the screen shows. An agreement is never a decision and never
 //! evidence (SRC-6); it only orders the Owner's work.
@@ -24,24 +24,6 @@ use super::page_words::{self, PageWord};
 use super::shapes::{self, Shape, ShapeInput};
 use crate::{AppError, Store};
 
-/// Slice 4's batch form is not shipped yet: until it is, no page offers it, so the default tab
-/// stays `all` and `matching` shows full cards. Flipping this is slice 4's change.
-pub(crate) const BATCH_FORM_SHIPPED: bool = false;
-
-#[cfg(test)]
-thread_local! {
-    /// Lets a test act as if slice 4's form shipped (route tests run on their own thread).
-    pub(crate) static FORCE_BATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Whether the batch form is shipped (always, in a test that forces it).
-pub(crate) fn batch_shipped() -> bool {
-    #[cfg(test)]
-    if FORCE_BATCH.get() {
-        return true;
-    }
-    BATCH_FORM_SHIPPED
-}
 /// A non-plain shape scoring this much marks a unit as "looks like a table".
 const SHAPE_SCORE: u32 = 80;
 /// The same text budget as the table proposals.
@@ -139,12 +121,6 @@ pub(crate) const NO_RESULT_NOTICE: &str =
 pub(crate) const HIDDEN_NOTICE: &str =
     "The unit you asked for is not in the chosen view: showing all units around it.";
 
-/// Whether a page offers slice 4's batch form: only an independent reading with a result.
-#[must_use]
-pub(crate) fn batch_offered(kind: Option<ReadingKind>) -> bool {
-    batch_shipped() && batch_rule(kind)
-}
-
 /// D1 (SRC-21): batch accept only for independent readings.
 #[must_use]
 pub(crate) fn batch_rule(kind: Option<ReadingKind>) -> bool {
@@ -180,6 +156,8 @@ pub(crate) fn words_too_large(len: i64) -> bool {
 #[derive(Clone, Debug)]
 pub(crate) struct UnitAgreement {
     pub id: i64,
+    /// The unit's revision when the rows were read (the batch form carries it).
+    pub revision: i64,
     pub position: i64,
     pub state: String,
     pub kind: String,
@@ -209,6 +187,9 @@ pub(crate) struct AgreementView {
     pub units: Vec<UnitAgreement>,
     /// Boxes of the text-layer words inside no unit.
     pub orphans: Vec<[f32; 4]>,
+    /// The page revision and the stored words row's length (`-1`: none) the rows were read at.
+    pub page_revision: i64,
+    pub words_len: i64,
     index: HashMap<i64, usize>,
 }
 
@@ -218,6 +199,8 @@ impl AgreementView {
             status,
             units: Vec::new(),
             orphans: Vec::new(),
+            page_revision: 0,
+            words_len: -1,
             index: HashMap::new(),
         }
     }
@@ -228,6 +211,8 @@ impl AgreementView {
             status: Status::Computed(kind),
             units,
             orphans,
+            page_revision: 0,
+            words_len: -1,
             index,
         }
     }
@@ -244,7 +229,7 @@ impl AgreementView {
     }
 
     pub(crate) fn offers_batch(&self) -> bool {
-        batch_offered(self.kind())
+        batch_rule(self.kind())
     }
 
     pub(crate) fn unit(&self, id: i64) -> Option<&UnitAgreement> {
@@ -528,6 +513,7 @@ impl AgreementView {
 #[derive(Clone, Debug)]
 pub(super) struct UnitRow {
     pub id: i64,
+    pub revision: i64,
     pub position: i64,
     pub kind: String,
     pub origin: String,
@@ -706,6 +692,7 @@ fn assemble(rows: &[UnitRow], pass: &Pass, marked: &HashMap<i64, Exclusion>) -> 
         .zip(verdicts)
         .map(|(row, unit)| UnitAgreement {
             id: row.id,
+            revision: row.revision,
             position: row.position,
             state: row.state.clone(),
             kind: row.kind.clone(),
@@ -745,7 +732,7 @@ struct AgreementRead {
 
 fn read_units(tx: &Connection, page: i64) -> Result<Vec<UnitRow>, AppError> {
     let mut query = tx.prepare(&format!(
-        "{ORDERED_UNITS} SELECT id,position,{},origin,state,{},{} FROM ordered ORDER BY position LIMIT {}",
+        "{ORDERED_UNITS} SELECT id,position,{},origin,state,{},{},revision FROM ordered ORDER BY position LIMIT {}",
         text("kind", 100),
         text("polygon", 65_536),
         text("raw_text", 65_536),
@@ -760,6 +747,7 @@ fn read_units(tx: &Connection, page: i64) -> Result<Vec<UnitRow>, AppError> {
             state: r.get(4)?,
             polygon: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
             text: r.get(6)?,
+            revision: r.get(7)?,
         })
     })?;
     Ok(found.collect::<Result<_, _>>()?)
@@ -767,7 +755,10 @@ fn read_units(tx: &Connection, page: i64) -> Result<Vec<UnitRow>, AppError> {
 
 /// The units targeted by an open suggestion (not dismissed, not applied) and whether the page
 /// has an open page-level `missing_text` or `note`.
-fn read_open_suggestions(tx: &Connection, page: i64) -> Result<(HashSet<i64>, bool), AppError> {
+pub(super) fn read_open_suggestions(
+    tx: &Connection,
+    page: i64,
+) -> Result<(HashSet<i64>, bool), AppError> {
     let (mut open_units, mut page_level) = (HashSet::new(), false);
     let mut query = tx.prepare(&format!(
         "SELECT s.kind,{} FROM source_suggestions s WHERE s.source_id=(SELECT source_id FROM source_pages WHERE id=?1) \
@@ -847,6 +838,7 @@ fn read_inputs(
     tx: &Connection,
     page: i64,
     cache: &super::proposals::ProposalCache,
+    use_memo: bool,
 ) -> Result<AgreementRead, AppError> {
     let (revision, words_len) = tx
         .query_row(
@@ -871,7 +863,7 @@ fn read_inputs(
     let (open_units, page_level) = read_open_suggestions(tx, page)?;
     let source = if words_too_large(words_len) {
         None
-    } else if let Some(memo) = cache.pass_get(&key) {
+    } else if let Some(memo) = use_memo.then(|| cache.pass_get(&key)).flatten() {
         Some(PassSource::Memo(memo))
     } else {
         Some(PassSource::Compute(read_pass_input(tx, page)?))
@@ -894,6 +886,32 @@ impl Store {
         auth: crate::auth::RequestAuth,
         page: i64,
     ) -> Result<AgreementView, AppError> {
+        self.agreement_of(auth, page, true).await
+    }
+
+    /// The agreement recomputed from the stored rows, never read from or written to the memo
+    /// (slice 4's batch accept decides on it). The table proposals still come from their own
+    /// cache, keyed by page revision.
+    ///
+    /// Why cached proposals are sound here: a proposals entry's data is never older than its
+    /// key, and revisions only grow, so form revision <= the handler's proposals key <= the
+    /// entry's data <= this fresh read. The commit-time revision check then forces the form's
+    /// revision to equal the stored one, so all four are equal and the proposals describe the
+    /// rows that were read.
+    pub(crate) async fn material_agreement_fresh(
+        &self,
+        auth: crate::auth::RequestAuth,
+        page: i64,
+    ) -> Result<AgreementView, AppError> {
+        self.agreement_of(auth, page, false).await
+    }
+
+    async fn agreement_of(
+        &self,
+        auth: crate::auth::RequestAuth,
+        page: i64,
+        use_memo: bool,
+    ) -> Result<AgreementView, AppError> {
         let Some(proposals) = self
             .material_table_proposals_checked(auth.clone(), page)
             .await?
@@ -908,7 +926,7 @@ impl Store {
                     let tx = db.transaction()?;
                     auth.recheck_owner(&tx)?;
                     let read = match super::review::read_with_deadline(&tx, "agreement", || {
-                        read_inputs(&tx, page, &cache)
+                        read_inputs(&tx, page, &cache, use_memo)
                     }) {
                         Ok(read) => Some(read),
                         Err(AppError::Invalid(super::review::READ_TIMEOUT)) => None,
@@ -929,7 +947,8 @@ impl Store {
         let Some(source) = read.source else {
             return Ok(AgreementView::unavailable(Status::WordsTooLarge));
         };
-        tokio::task::spawn_blocking(move || {
+        let (revision, words_len) = (read.key.1, read.key.2);
+        let mut view = tokio::task::spawn_blocking(move || {
             let texts = budgeted(&read.rows);
             let pass = match source {
                 PassSource::Memo(pass) => pass,
@@ -943,14 +962,16 @@ impl Store {
                         .filter(|w| !w.is_empty())
                         .map(|words| base_pass(&read.rows, &texts, &words));
                     let shaped = shaped_units(&read.rows, &texts);
-                    cache.pass_put(
-                        read.key,
-                        Pass {
-                            kind,
-                            agreement,
-                            shaped,
-                        },
-                    )
+                    let pass = Pass {
+                        kind,
+                        agreement,
+                        shaped,
+                    };
+                    if use_memo {
+                        cache.pass_put(read.key, pass)
+                    } else {
+                        Arc::new(pass)
+                    }
                 }
             };
             if pass.kind == ReadingKind::Derived {
@@ -970,8 +991,199 @@ impl Store {
             assemble(&read.rows, &pass, &marked)
         })
         .await
-        .map_err(|_| AppError::Worker)
+        .map_err(|_| AppError::Worker)?;
+        view.page_revision = revision;
+        view.words_len = words_len;
+        Ok(view)
     }
+}
+
+/// The most units one batch accepts (the atomic bound of `validate_batch`).
+pub(crate) const BATCH_MAX_UNITS: usize = 1_024;
+
+/// The start of every batch decision's rationale (D2, SRC-21): written by the server, never
+/// taken from a request.
+pub(crate) const BATCH_PREFIX: &str = "agreement-v1; independent:";
+
+/// What the Owner's batch form carried: the page's revision and stored-words size and each
+/// unit with the revision the Owner saw.
+pub(crate) struct BatchAccept {
+    pub page_revision: i64,
+    pub words_len: i64,
+    pub units: Vec<(i64, i64)>,
+    /// The Owner's own text: the server puts [`BATCH_PREFIX`] before it.
+    pub text: String,
+}
+
+impl AgreementView {
+    /// Whether this (freshly computed) view still backs the batch: a comparison exists, the
+    /// reading is independent, the page revision and words size are the form's, and every unit
+    /// is unreviewed, at the form's revision and agrees.
+    pub(crate) fn check_batch(&self, request: &BatchAccept) -> Result<(), &'static str> {
+        if request.units.is_empty() || request.units.len() > BATCH_MAX_UNITS {
+            return Err("Choose 1 to 1,024 units.");
+        }
+        if !self.has_result() {
+            return Err("There is no comparison with the PDF text layer now; reload the page.");
+        }
+        if !self.offers_batch() {
+            return Err("Batch accept is only for pages read independently of the PDF text layer.");
+        }
+        if self.page_revision != request.page_revision {
+            return Err(
+                "The page changed after this form was shown. Reload and check the matching units again.",
+            );
+        }
+        if self.words_len != request.words_len {
+            return Err("The stored PDF text-layer words changed after this form was shown.");
+        }
+        for &(id, revision) in &request.units {
+            let Some(unit) = self.unit(id) else {
+                return Err("A unit of this form is not on this page.");
+            };
+            if unit.revision != revision {
+                return Err("A unit changed after this form was shown. Reload and check again.");
+            }
+            if !unit.unreviewed() {
+                return Err("A unit was reviewed after this form was shown.");
+            }
+            if unit.verdict != Verdict::Agrees {
+                return Err(
+                    "A unit no longer matches the PDF text layer (for example, a suggestion was opened on it).",
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The rationale of a batch decision: the prefix, a space, then the Owner's text.
+pub(crate) fn batch_rationale(text: &str) -> String {
+    format!("{BATCH_PREFIX} {}", text.trim())
+}
+
+impl Store {
+    /// Accepts agreeing units of one page as extracted: one IMMEDIATE transaction, one
+    /// operation id, one `accepted` decision per unit. The caller has already recomputed the
+    /// agreement; this checks that nothing the decision rests on changed since, and refuses the
+    /// whole batch otherwise. Page completion stays a separate action.
+    pub(crate) async fn material_batch_accept_agreeing(
+        &self,
+        auth: crate::auth::RequestAuth,
+        csrf: crate::auth::CsrfAdmission,
+        page: i64,
+        request: BatchAccept,
+    ) -> Result<Vec<i64>, AppError> {
+        let rationale = batch_rationale(&request.text);
+        let decisions: Vec<super::UnitDecision> = request
+            .units
+            .iter()
+            .map(|&(unit, revision)| super::UnitDecision {
+                page,
+                unit,
+                review: super::UnitReview {
+                    revision,
+                    state: "accepted".into(),
+                    correction: String::new(),
+                    actor: format!("account:{}", auth.account_id()),
+                    rationale: rationale.clone(),
+                },
+            })
+            .collect();
+        super::documents::validate_batch(&decisions, &rationale)?;
+        if request.text.trim().is_empty() {
+            return Err(AppError::Invalid(
+                "Write why these units may be accepted (what you checked on the page image).",
+            ));
+        }
+        let operation = super::documents::new_operation_id();
+        self.run_bounded_auth(move |db| {
+            crate::auth::with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                check_batch_unchanged(&tx, page, &request)?;
+                let events = super::documents::review_batch(
+                    &tx,
+                    &decisions,
+                    &operation,
+                    &rationale,
+                    |tx, event| super::materials::audit(tx, &auth, event),
+                )?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                tx.commit()?;
+                Ok(events)
+            })
+        })
+        .await
+    }
+}
+
+/// What a batch rests on, read inside its transaction.
+fn check_batch_unchanged(
+    tx: &Connection,
+    page: i64,
+    request: &BatchAccept,
+) -> Result<(), AppError> {
+    let (revision, words_len) = tx
+        .query_row(
+            "SELECT p.revision,coalesce((SELECT length(words) FROM source_page_words w WHERE w.page_id=p.id),-1) FROM source_pages p WHERE p.id=?1",
+            [page],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
+    if revision != request.page_revision {
+        return Err(AppError::Invalid(
+            "The page changed after this form was shown. Reload and check the matching units again.",
+        ));
+    }
+    if words_len != request.words_len {
+        return Err(AppError::Invalid(
+            "The stored PDF text-layer words changed after this form was shown.",
+        ));
+    }
+    for &(unit, unit_revision) in &request.units {
+        let (state, origin, current) = tx
+            .query_row(
+                "SELECT state,origin,revision FROM source_units WHERE id=?1 AND page_id=?2",
+                [unit, page],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(AppError::Invalid(
+                "A unit of this form is not on this page.",
+            ))?;
+        if current != unit_revision {
+            return Err(AppError::Invalid(
+                "A unit changed after this form was shown. Reload and check again.",
+            ));
+        }
+        if state != "unreviewed" || origin != "extracted" {
+            return Err(AppError::Invalid(
+                "A unit was reviewed after this form was shown.",
+            ));
+        }
+    }
+    // A suggestion opened after the agreement was recomputed excludes its units.
+    let (open_units, page_level) = read_open_suggestions(tx, page)?;
+    if page_level
+        || request
+            .units
+            .iter()
+            .any(|(unit, _)| open_units.contains(unit))
+    {
+        return Err(AppError::Invalid(
+            "A suggestion is open on this page or one of these units.",
+        ));
+    }
+    Ok(())
 }
 
 /// A difference's change, for the tests of the display bound.
@@ -996,6 +1208,7 @@ mod tests {
             state: state.into(),
             polygon: polygon.into(),
             text: Some(text.into()),
+            revision: 1,
         }
     }
 
@@ -1012,6 +1225,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, (id, state, verdict))| UnitAgreement {
+                    revision: 1,
                     id: *id,
                     position: i64::try_from(i).unwrap() + 1,
                     state: (*state).into(),
@@ -1077,9 +1291,10 @@ mod tests {
             assert!(!batch_rule(Some(kind)));
         }
         assert!(!batch_rule(None));
-        // Until slice 4 ships its form, nothing is offered, so the default is `all`.
+        // The sample is an independent page: it offers the form. Without the form (the helper
+        // resolves as a page that does not offer it) the default is `all`.
         let v = sample();
-        assert!(!v.offers_batch());
+        assert!(v.offers_batch());
         assert_eq!(resolve(&v, Show::Absent, false, 0).0, Tab::All);
         assert_eq!(resolve(&v, Show::Unknown, false, 0).0, Tab::All);
         assert_eq!(resolve(&v, Show::Absent, true, 0).0, Tab::All);

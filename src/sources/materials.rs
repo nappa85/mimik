@@ -1033,6 +1033,32 @@ impl Store {
         })
         .await
     }
+    /// Whether the page's latest batch accept decided exactly `count` units (a "saved" notice
+    /// link must be true). It confirms only the size of the latest batch, as a historical
+    /// notice, not that the batch just happened.
+    pub(crate) async fn material_batch_matches(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        count: i64,
+    ) -> Result<bool, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM (SELECT count(*) n FROM source_review_events WHERE page_id=?1 AND operation_id IS NOT NULL AND state='accepted' AND substr(rationale,1,length(?3))=?3 GROUP BY operation_id ORDER BY max(id) DESC LIMIT 1) WHERE n=?2",
+                    params![page, count, super::agreement_view::BATCH_PREFIX],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(found)
+        })
+        .await
+    }
     /// Whether a saved-notice link is true: the unit is on this page (or, for `page`, on another
     /// page of the source), is now in the stated state, and for `done` nothing unreviewed remains
     /// on this page or after it.

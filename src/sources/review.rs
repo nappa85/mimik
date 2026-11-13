@@ -21,8 +21,10 @@ type ScreenAdvice = std::collections::BTreeMap<i64, AdvicePage>;
 /// Worst case: 2,000 orphan boxes at 32 bytes (64 KiB), 200 changes with their wrappers and
 /// 4,096 characters at six escaped bytes (about 48 KiB), 50 verdict spans and three `show`
 /// fields per card (about 25 KiB), 2,000 overlay link suffixes (about 28 KiB), the bar (about
-/// 4 KiB). The worst-case route test holds the page under 2 MiB.
-pub(crate) const AGREEMENT_ALLOWANCE: usize = 192 * 1024;
+/// 4 KiB), the batch form (`BATCH_MAX_UNITS` pairs of two 20-character numbers is 42 KiB,
+/// 100 listed numbers 2 KiB, the rest about 1 KiB: under 50 KiB at any id width). The worst-case route test holds the
+/// page under 2 MiB.
+pub(crate) const AGREEMENT_ALLOWANCE: usize = 224 * 1024;
 
 pub(crate) const READ_TIMEOUT: &str =
     "Review read time limit reached; retry with a smaller page or list.";

@@ -3857,7 +3857,7 @@ async fn material_save_confirms_and_lands_on_the_next_unreviewed_unit() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit#unit-2"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit&show=all#unit-2"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(
@@ -4050,7 +4050,7 @@ async fn material_save_lookup_failure_is_unknown_not_finished() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=1&then=unknown#unit-1"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=1&then=unknown&show=all#unit-1"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(html.contains("The next unit could not be found in time"));
@@ -4110,7 +4110,7 @@ async fn material_save_redirects_with_card_cursor_and_to_the_next_page() {
     .await;
     assert_eq!(
         location(&response),
-        "/admin/materials/pages/1?units=50&saved=accepted&saved_unit=1&to=51&then=unit#unit-51"
+        "/admin/materials/pages/1?units=50&saved=accepted&saved_unit=1&to=51&then=unit&show=all#unit-51"
     );
     store
         .run(|db| {
@@ -4156,7 +4156,7 @@ async fn material_save_moves_to_the_next_page_with_a_true_notice() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/2?saved=accepted&saved_unit=1&then=page#saved-notice"
+        "/admin/materials/pages/2?saved=accepted&saved_unit=1&then=page&show=all#saved-notice"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(html.contains("Saved unit 1: accepted as extracted."));
@@ -6125,7 +6125,7 @@ async fn material_re_decided_unit_stays_while_first_decisions_advance() {
     .await;
     assert_eq!(
         location(&response),
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit#unit-2"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit&show=all#unit-2"
     );
     // Correcting the accepted unit stays on that unit.
     let response = document_at(
@@ -6144,7 +6144,7 @@ async fn material_re_decided_unit_stays_while_first_decisions_advance() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=corrected&saved_unit=1&to=1&then=stay#unit-1"
+        "/admin/materials/pages/1?saved=corrected&saved_unit=1&to=1&then=stay&show=all#unit-1"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(
@@ -6189,7 +6189,7 @@ async fn material_re_decided_unit_stays_while_first_decisions_advance() {
     .await;
     assert_eq!(
         location(&response),
-        "/admin/materials/pages/1?units=50&saved=rejected&saved_unit=51&to=51&then=stay#unit-51"
+        "/admin/materials/pages/1?units=50&saved=rejected&saved_unit=51&to=51&then=stay&show=all#unit-51"
     );
 }
 
