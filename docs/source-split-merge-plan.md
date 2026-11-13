@@ -56,7 +56,7 @@ cursors and table proposal runs change, like after any reordering; each read rec
   unit's revision checked **once, before any write**, against the revisions the Owner saw (the
   form and the preview carry them through and never re-read them); each unit on the page and not
   `rejected`. The owner inserts and decisions then run without re-checking the page revision
-  per write (each write bumps it); `insert_owner` gets a variant that takes the checked state.
+  per write (each write bumps it); `insert_owner` gets a variant that takes the checked state (merge needed none: its owner insert is its first write; split inserts several owner units, so it does).
 - Text per new unit at most 20,000 characters; total text of one write at most 64 KiB, below
   the 320 KiB POST bound, refused with a 422 that keeps the draft. Rationale at most 5,000.
 - 409/422 re-render keeping the draft, as the table form does.
@@ -66,22 +66,9 @@ cursors and table proposal runs change, like after any reordering; each read rec
   replacement rows.
 - The card tick shared by table and merge is labelled "Select".
 
-### Merge
+### Merge (done)
 
-- **Entry:** "Merge selected units" beside "Create table from selected units", in the page and
-  in the bottom bar (same `table-select` form, `formaction` to
-  `/admin/materials/pages/{id}/merges/new`; works without script).
-- **Form:** 2–200 distinct units on the page, none `rejected` (owner units allowed, so split
-  parts can be merged back). Prefilled with their text in reading order (correction where
-  corrected, else extracted text) joined by a newline, bounded at 64 KiB like the table prefill
-  (the form says when it was cut). A warning when the selection includes a `Table` or a kind
-  without text (structure is lost: the result is `Text`), and the table form's covered-units
-  warning when the union box covers unselected units (a run across columns). The crop and the
-  whole page with outlines as on the table form, through the same route renamed
-  `/admin/materials/pages/{id}/selection/image`. Rationale required.
-- **Save** (`POST .../merges`): one owner `Text` unit with the `UnionBox` area, `corrected` with
-  the Owner's text; every selected unit `rejected`; one operation, one rationale, sidecars; a
-  `merge` replacement row anchored at the first unit in reading order.
+See `add_owner_merge` and the merge form; split reuses its selection, crop and save pieces.
 
 ### Split
 
@@ -123,11 +110,6 @@ cursors and table proposal runs change, like after any reordering; each read rec
 
 ## Slices
 
-2. **Merge.** Form, route rename, save, buttons, tick label, history line, redirect. Tests: happy
-   path (events, operation, states, union area, order, history), stale page or unit revision, a
-   rejected or foreign unit, one unit, 201 units, text over the bounds, prefill over 64 KiB, a
-   selection with a `Table`, the covered-units warning, missing rationale, CSRF, non-owner,
-   draft kept on refusal, no-script form.
 3. **Split.** Area function (unit tests: words path exact on an agreeing unit, a hyphenated
    boundary, a bullet unit, a two-column unit and a corrected unit falling back to bands, equal
    token counts with different text falling back to bands; a proptest: one area per part, each
