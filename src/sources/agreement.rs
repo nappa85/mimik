@@ -1,7 +1,7 @@
 //! The agreement rule (`agreement-v1`): whether a unit's text equals, word for word, the stored
 //! words of the PDF text layer that lie inside its polygon. Pure and deterministic; an
 //! agreement is never a decision and never evidence (SRC-6), it only tells the Owner which
-//! units to look at first. See `docs/source-agreement-plan.md`.
+//! units to look at first. See `docs/sources-and-retrieval.md`.
 use std::collections::HashMap;
 
 use serde_json::Value;

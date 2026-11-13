@@ -81,7 +81,7 @@ New decisions:
   C are blacked out inside the box before any reading, and that redaction is recorded with the
   reading's provenance (content the provider never saw gets no rejected-unit history). Stored page images stay
   the original renders (evidence); the review screen shows the region masked.
-- **Batch accept** (owner 2026-10-30): where two readings agree (step 8's alignment rule), the
+- **Batch accept** (owner 2026-10-30): where two readings agree (the agreement rule `agreement-v1`, built: `docs/sources-and-retrieval.md`), the
   owner may accept all agreeing units of a page in one action; each is recorded as its own
   decision and listed. Disagreements stay one by one.
 - **Multi-unit decisions** (merge, exclusion, batch accept): one transaction checks every expected
@@ -150,17 +150,14 @@ valid.
    coverage) move into the job. Bar: the IT reference scores of the prototype route (145/161 with
    the text-layer cross-check).
 7. **Route D: owner text.** Markdown or HTML split into blocks, aligned to a PDF reading by the
-   step-8 rule, giving suggestions only, bound to the
+   agreement rule (`agreement-v1`), giving suggestions only, bound to the
    target source's bundle hash and unit revisions, with the same stale and decision rules.
-8. **Agreement view and batch accept:** own plan, `docs/source-agreement-plan.md` (first
-   against the stored text-layer words; readings of other sources later); both readings stay
-   unreviewed until the owner decides.
 9. **Docs and gate.** `docs/sources-and-retrieval.md` rewritten for the routes,
    `docs/release-scope.md` (route B Linux-only), notices, the prototype tools retired or kept as
    developer tools, limitations updated; migration, browser, hostile-input and unpacked-release
    checks in the gate. Manual-derived fixtures stay local; CI uses synthetic ones.
 
-Order: 1, 2, 3, 4 first (Bare Bones then needs no prototype tools), then 5, 6, 7, 8. Each step is
+Order: 1, 2, 3, 4 first (Bare Bones then needs no prototype tools), then 5, 6, 7 (step 8, agreement and batch accept, is built). Each step is
 its own reviewed change. Results that drive a product decision get an independent review.
 
 ## Risks

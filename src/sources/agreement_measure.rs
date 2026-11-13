@@ -1,5 +1,5 @@
 //! Prototype-tier measurement of the agreement rule on a copy of the Owner's database
-//! (`docs/source-agreement-plan.md`, slice 2). Ignored by default; set `MIMIK_AGREEMENT_DB` to a
+//! (`docs/results.md`, agreement-v1). Ignored by default; set `MIMIK_AGREEMENT_DB` to a
 //! SQLite file. The file is opened read-only and immutable, never migrated and never written.
 //! Prints aggregates only: counts, unit ids, page numbers. No unit, word, correction or
 //! rationale text is ever printed.
