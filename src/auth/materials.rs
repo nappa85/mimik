@@ -52,7 +52,11 @@ pub(super) fn routes() -> Router<AuthState> {
         )
         .route("/admin/materials/pages/{id}/image", get(image))
         .route("/admin/materials/pages/{id}/tables/new", get(table_form))
-        .route("/admin/materials/pages/{id}/tables/image", get(table_image))
+        .route("/admin/materials/pages/{id}/merges/new", get(merge_form))
+        .route(
+            "/admin/materials/pages/{id}/selection/image",
+            get(selection_image),
+        )
         .route(
             "/assets/source-review.js",
             get(|| async {
@@ -82,6 +86,7 @@ pub(super) fn routes() -> Router<AuthState> {
                 .route("/admin/materials/suggestions/{id}/dismiss", post(dismiss))
                 .route("/admin/materials/pages/{id}/owner-units", post(add_owner))
                 .route("/admin/materials/pages/{id}/tables", post(create_table))
+                .route("/admin/materials/pages/{id}/merges", post(create_merge))
                 .route("/admin/materials/pages/{id}/primary", post(primary))
                 .route("/admin/materials/sources/{id}/primary", post(primary_pages))
                 .route("/admin/materials/pages/{page}/units/{unit}", post(review))
@@ -129,6 +134,8 @@ struct PageCursor {
     then: Then,
     /// An owner table the Owner just created (checked before it is announced).
     table: i64,
+    /// An owner merge the Owner just saved (checked before it is announced).
+    merge: i64,
 }
 /// The decision a redirect confirms; only these fixed words are ever rendered.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -557,15 +564,21 @@ async fn page(
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
     let mut created = 0;
-    if c.table > 0
-        && state
-            .sessions
-            .store
-            .material_is_owner_table(auth.clone(), id, c.table)
-            .await
-            .unwrap_or(false)
-    {
-        created = c.table;
+    let mut merged = 0;
+    for (unit, kind, slot) in [
+        (c.table, "table", &mut created),
+        (c.merge, "merge", &mut merged),
+    ] {
+        if unit > 0
+            && state
+                .sessions
+                .store
+                .material_is_owner_replacement(auth.clone(), id, unit, kind)
+                .await
+                .unwrap_or(false)
+        {
+            *slot = unit;
+        }
     }
     if c.saved != Saved::None {
         // A hand-made link must not claim a save that did not happen.
@@ -629,6 +642,12 @@ async fn page(
         );
         editor.notice_unit = created;
     }
+    if merged > 0 {
+        editor.notice = format!(
+            "Merged into unit {merged}; the selected units are rejected and the new unit holds your text as a correction. Check it against the original page."
+        );
+        editor.notice_unit = merged;
+    }
     html(&editor)
 }
 fn png(bytes: Vec<u8>) -> axum::response::Response {
@@ -670,8 +689,9 @@ async fn region(
         .map_err(|e| error(&e))?;
     crop_response(&state, auth, input).await
 }
-/// The table form's reference image: the page cropped to the area the table would cover.
-async fn table_image(
+/// The reference image of the table and merge forms: the page cropped to the area the selected
+/// units would cover.
+async fn selection_image(
     State(state): State<AuthState>,
     session: Session,
     Path(page): Path<i64>,
@@ -686,7 +706,7 @@ async fn table_image(
     let input = state
         .sessions
         .store
-        .material_table_region_data(auth.clone(), page, ids, permit)
+        .material_selection_region_data(auth.clone(), page, ids, permit)
         .await
         .map_err(|e| error(&e))?;
     crop_response(&state, auth, input).await
@@ -1400,6 +1420,33 @@ struct Reference {
     missing: usize,
 }
 
+impl Reference {
+    /// The reference images of a selection (`units`, the ids the crop route takes), from a
+    /// prefill's page size and outlines; none without page geometry.
+    fn of(
+        page: i64,
+        pdf_page: i64,
+        page_size: Option<(f64, f64)>,
+        units: &[(i64, i64)],
+        outlines: &[(i64, String)],
+    ) -> Option<Self> {
+        page_size.map(|(width, height)| {
+            let query: Vec<String> = units.iter().map(|(id, _)| format!("unit={id}")).collect();
+            Self {
+                pdf_page,
+                width,
+                height,
+                crop_url: format!(
+                    "/admin/materials/pages/{page}/selection/image?{}",
+                    query.join("&")
+                ),
+                outlines: outlines.to_vec(),
+                missing: units.len().saturating_sub(outlines.len()),
+            }
+        })
+    }
+}
+
 struct ShapeChoice {
     key: &'static str,
     label: &'static str,
@@ -1430,25 +1477,13 @@ impl TableEditor {
 
     /// The reference images, from the prefill's own unit ids; none without page geometry.
     fn set_outlines(&mut self, prefill: &crate::sources::materials::TablePrefill) {
-        self.reference = prefill.page_size.map(|(width, height)| {
-            let query: Vec<String> = prefill
-                .units
-                .iter()
-                .map(|(id, _)| format!("unit={id}"))
-                .collect();
-            Reference {
-                pdf_page: prefill.pdf_page,
-                width,
-                height,
-                crop_url: format!(
-                    "/admin/materials/pages/{}/tables/image?{}",
-                    self.page,
-                    query.join("&")
-                ),
-                outlines: prefill.outlines.clone(),
-                missing: prefill.units.len().saturating_sub(prefill.outlines.len()),
-            }
-        });
+        self.reference = Reference::of(
+            self.page,
+            prefill.pdf_page,
+            prefill.page_size,
+            &prefill.units,
+            &prefill.outlines,
+        );
     }
 
     /// The plain unit ids (no revisions) the "Read as" form submits back.
@@ -1697,6 +1732,226 @@ async fn create_table(
             editor.message = e.to_string();
             refresh_table_notes(&state, auth, page, &mut editor, shape).await;
             table_editor_response(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+#[derive(Template)]
+#[template(path = "material_merge.html")]
+struct MergeEditor {
+    page: i64,
+    csrf: String,
+    revision: i64,
+    /// Hidden `unit` fields, `id:revision`, in reading order.
+    units: Vec<String>,
+    text: String,
+    rationale: String,
+    message: String,
+    /// Selected units that are tables or hold no text.
+    warnings: Vec<String>,
+    overlaps: String,
+    overlap_unchecked: bool,
+    /// The prefilled text was cut at 64 KiB.
+    cut: bool,
+    /// The prefilled text is over the 20,000 characters a save takes.
+    too_long: bool,
+    reference: Option<Reference>,
+}
+
+impl MergeEditor {
+    fn new(page: i64, csrf: String) -> Self {
+        Self {
+            page,
+            csrf,
+            revision: 0,
+            units: Vec::new(),
+            text: String::new(),
+            rationale: String::new(),
+            message: String::new(),
+            warnings: Vec::new(),
+            overlaps: String::new(),
+            overlap_unchecked: false,
+            cut: false,
+            too_long: false,
+            reference: None,
+        }
+    }
+
+    /// The notes, reference images and revisions a prefill computed; the text stays as it is.
+    fn set_notes(&mut self, prefill: &crate::sources::materials::MergePrefill) {
+        self.reference = Reference::of(
+            self.page,
+            prefill.pdf_page,
+            prefill.page_size,
+            &prefill.units,
+            &prefill.outlines,
+        );
+        self.warnings.clone_from(&prefill.warnings);
+        self.overlaps = overlap_note(&prefill.overlaps);
+        self.overlap_unchecked = !prefill.overlap_checked;
+    }
+}
+
+fn merge_editor_response(editor: &MergeEditor, status: StatusCode) -> AuthResult {
+    let mut response = html(editor)?;
+    *response.status_mut() = status;
+    response.extensions_mut().insert(TrustedDraft);
+    Ok(response)
+}
+
+/// The merge form's query: `unit` (repeated); nothing else is read from the URL.
+fn merge_query(fields: &[(String, String)]) -> (Vec<i64>, Option<&'static str>) {
+    const CHOOSE: &str = "Choose 2-200 different units to merge.";
+    let mut ids = Vec::new();
+    let mut malformed = None;
+    for (key, value) in fields {
+        match (key.as_str(), value.parse::<i64>()) {
+            ("unit", Ok(id)) => ids.push(id),
+            _ => malformed = Some(CHOOSE),
+        }
+    }
+    (ids, malformed)
+}
+
+/// The merge form, prefilled from the units chosen with the cards' checkboxes.
+async fn merge_form(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Query(fields): Query<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
+    let mut editor = MergeEditor::new(page, csrf);
+    let (ids, malformed) = merge_query(&fields);
+    let prefill = match malformed {
+        None => {
+            state
+                .sessions
+                .store
+                .material_merge_prefill(auth, page, ids)
+                .await
+        }
+        Some(message) => Err(AppError::Invalid(message)),
+    };
+    match prefill {
+        Ok(prefill) => {
+            editor.set_notes(&prefill);
+            editor.revision = prefill.page_revision;
+            editor.units = prefill
+                .units
+                .iter()
+                .map(|(u, r)| format!("{u}:{r}"))
+                .collect();
+            editor.cut = prefill.cut;
+            editor.too_long =
+                prefill.text.chars().count() > crate::sources::documents::MAX_MERGE_CHARS;
+            editor.text = prefill.text;
+            html(&editor)
+        }
+        Err(e @ AppError::Invalid(_)) => {
+            editor.message = e.to_string();
+            merge_editor_response(&editor, error(&e))
+        }
+        Err(e) => Err(error(&e)),
+    }
+}
+
+async fn create_merge(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(page): Path<i64>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    let (mut csrf_token, mut revision, mut text, mut rationale) =
+        (None, None, None, None::<String>);
+    let mut units = Vec::new();
+    let mut malformed = false;
+    for (key, value) in fields {
+        let value = crate::form_text::newlines_to_lf(value);
+        match key.as_str() {
+            "csrf" if csrf_token.is_none() => csrf_token = Some(value),
+            "revision" if revision.is_none() => revision = value.parse::<i64>().ok(),
+            "text" if text.is_none() => text = Some(value),
+            "rationale" if rationale.is_none() => rationale = Some(value),
+            "unit" => units.push(value),
+            _ => malformed = true,
+        }
+    }
+    let csrf_token = csrf_token.ok_or(StatusCode::FORBIDDEN)?;
+    let csrf = csrf_admission(&session, &csrf_token).await?;
+    let mut editor = MergeEditor {
+        revision: revision.unwrap_or(0),
+        units,
+        text: text.unwrap_or_default(),
+        rationale: rationale.unwrap_or_default(),
+        ..MergeEditor::new(page, csrf_token)
+    };
+    let sources = editor
+        .units
+        .iter()
+        .map(|unit| {
+            let (id, revision) = unit.split_once(':')?;
+            Some(crate::sources::TableSource {
+                unit: id.parse().ok()?,
+                revision: revision.parse().ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>();
+    let result = match (malformed || revision.is_none(), sources) {
+        (false, Some(sources)) => {
+            state
+                .sessions
+                .store
+                .material_create_merge(
+                    auth.clone(),
+                    csrf,
+                    page,
+                    crate::sources::OwnerMerge {
+                        revision: editor.revision,
+                        sources,
+                        text: editor.text.clone(),
+                        actor: String::new(),
+                        rationale: editor.rationale.clone(),
+                    },
+                )
+                .await
+        }
+        _ => Err(AppError::Invalid(
+            "The merge form was incomplete; reopen it from the page.",
+        )),
+    };
+    match result {
+        Ok((unit, _)) => {
+            let cursor = state
+                .sessions
+                .store
+                .material_unit_cursor(auth, page, unit)
+                .await
+                .unwrap_or(0);
+            Ok(Redirect::to(&format!(
+                "/admin/materials/pages/{page}?units={cursor}&merge={unit}#unit-{unit}"
+            ))
+            .into_response())
+        }
+        Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            editor.message = e.to_string();
+            let ids: Vec<i64> = editor
+                .units
+                .iter()
+                .filter_map(|u| u.split_once(':')?.0.parse().ok())
+                .collect();
+            if let Ok(prefill) = state
+                .sessions
+                .store
+                .material_merge_prefill(auth, page, ids)
+                .await
+            {
+                editor.set_notes(&prefill);
+            }
+            merge_editor_response(&editor, error(&e))
         }
         Err(e) => Err(error(&e)),
     }

@@ -493,8 +493,17 @@ pub(super) fn validate_table(table: &OwnerTable) -> Result<(), AppError> {
 }
 
 fn table_decisions(page: i64, table: &OwnerTable) -> Vec<UnitDecision> {
-    table
-        .sources
+    rejections(page, &table.sources, &table.actor, &table.rationale)
+}
+
+/// One `rejected` decision per selected unit, with the revision the Owner saw.
+fn rejections(
+    page: i64,
+    sources: &[TableSource],
+    actor: &str,
+    rationale: &str,
+) -> Vec<UnitDecision> {
+    sources
         .iter()
         .map(|source| UnitDecision {
             page,
@@ -503,11 +512,42 @@ fn table_decisions(page: i64, table: &OwnerTable) -> Vec<UnitDecision> {
                 revision: source.revision,
                 state: "rejected".into(),
                 correction: String::new(),
-                actor: table.actor.clone(),
-                rationale: table.rationale.clone(),
+                actor: actor.to_owned(),
+                rationale: rationale.to_owned(),
             },
         })
         .collect()
+}
+
+/// The area a table or merge over `sources` covers, read inside the caller's transaction: every
+/// unit must be on `page` at the revision the Owner saw and not rejected. Nothing is written.
+fn selection_polygon(
+    tx: &Transaction<'_>,
+    page: i64,
+    sources: &[TableSource],
+) -> Result<[[f64; 2]; 4], AppError> {
+    let (width, height) = polygon_bounds(tx, page)?;
+    let mut union = UnionBox::new(width, height);
+    for source in sources {
+        let (revision, state, polygon): (i64, String, String) = tx
+            .query_row(
+                "SELECT revision,state,polygon FROM source_units WHERE id=?1 AND page_id=?2",
+                params![source.unit, page],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(AppError::SourceNotFound)?;
+        if revision != source.revision {
+            return Err(AppError::Conflict);
+        }
+        if state == "rejected" {
+            return Err(AppError::Invalid(
+                "A selected unit is already rejected; select the units again.",
+            ));
+        }
+        union.add(&polygon)?;
+    }
+    Ok(union.polygon())
 }
 
 /// The combined box of units' polygons, clamped to the page: the area a table unit covers.
@@ -566,23 +606,7 @@ pub(super) fn add_owner_table(
     mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
 ) -> Result<(i64, Vec<i64>), AppError> {
     validate_table(table)?;
-    let (width, height) = polygon_bounds(tx, page)?;
-    let mut union = UnionBox::new(width, height);
-    for source in &table.sources {
-        let (revision, polygon): (i64, String) = tx
-            .query_row(
-                "SELECT revision,polygon FROM source_units WHERE id=?1 AND page_id=?2",
-                params![source.unit, page],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or(AppError::SourceNotFound)?;
-        if revision != source.revision {
-            return Err(AppError::Conflict);
-        }
-        union.add(&polygon)?;
-    }
-    let polygon = union.polygon();
+    let polygon = selection_polygon(tx, page, &table.sources)?;
     let anchor = first_in_reading_order(tx, page, table.sources.iter().map(|s| s.unit))?;
     let html = super::tables::html(&table.cells, table.header);
     let operation = new_operation_id();
@@ -613,6 +637,97 @@ pub(super) fn add_owner_table(
         params![unit, operation, events[0]],
     )?;
     record_replacement(tx, unit, &operation, "table", anchor, 1)?;
+    Ok((unit, events))
+}
+
+/// Units the Owner merges into one text: the page revision and each unit's revision seen, the
+/// merged text and one rationale for the whole change.
+#[derive(Clone)]
+pub struct OwnerMerge {
+    pub revision: i64,
+    pub sources: Vec<TableSource>,
+    pub text: String,
+    pub actor: String,
+    pub rationale: String,
+}
+
+/// The merged text's byte bound (the 64 KiB display and import contract).
+pub(crate) const MAX_MERGE_BYTES: usize = 65_536;
+/// The most characters the merged text may hold (the correction limit).
+pub(crate) const MAX_MERGE_CHARS: usize = 20_000;
+/// The fewest units a merge takes.
+pub(crate) const MIN_MERGE_SOURCES: usize = 2;
+
+pub(super) fn validate_merge(merge: &OwnerMerge) -> Result<(), AppError> {
+    if merge.sources.len() < MIN_MERGE_SOURCES
+        || merge.sources.len() > super::tables::MAX_TABLE_SOURCES
+    {
+        return Err(AppError::Invalid("Choose 2-200 different units to merge."));
+    }
+    if merge.text.chars().count() > MAX_MERGE_CHARS {
+        return Err(AppError::Invalid(
+            "Merged text is too long: at most 20,000 characters.",
+        ));
+    }
+    if merge.text.len() > MAX_MERGE_BYTES || owner_html(&merge.text).len() > MAX_MERGE_BYTES {
+        return Err(AppError::Invalid(
+            "Merged text is too long: at most 64 KiB, and & < > and quotes count for up to 6 bytes each; shorten it.",
+        ));
+    }
+    validate_batch(&merge_rejections(0, merge), &merge.rationale)?;
+    validate_owner(&merge_unit(merge, [[0.0; 2]; 4]))
+}
+
+fn merge_rejections(page: i64, merge: &OwnerMerge) -> Vec<UnitDecision> {
+    rejections(page, &merge.sources, &merge.actor, &merge.rationale)
+}
+
+fn merge_unit(merge: &OwnerMerge, polygon: [[f64; 2]; 4]) -> OwnerUnit {
+    OwnerUnit {
+        revision: merge.revision,
+        polygon,
+        text: merge.text.clone(),
+        actor: merge.actor.clone(),
+        rationale: merge.rationale.clone(),
+    }
+}
+
+/// Merge the selected units: one owner `Text` unit with the union of their boxes, recorded
+/// `corrected` with the Owner's text, every selected unit `rejected`, all in one operation, then
+/// the `merge` replacement row anchored at the first selected unit in reading order. Every unit
+/// revision is checked before the first write, and the page revision by the owner insert, which
+/// is the first write, so the later per-unit writes (each bumps the page revision) never see a
+/// changed one. Returns the new unit id and every event id (the new unit's first).
+pub(super) fn add_owner_merge(
+    tx: &Transaction<'_>,
+    page: i64,
+    merge: &OwnerMerge,
+    mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
+) -> Result<(i64, Vec<i64>), AppError> {
+    validate_merge(merge)?;
+    let polygon = selection_polygon(tx, page, &merge.sources)?;
+    let anchor = first_in_reading_order(tx, page, merge.sources.iter().map(|s| s.unit))?;
+    let operation = new_operation_id();
+    let created = add_owner_operation(tx, page, &merge_unit(merge, polygon), Some(&operation))?;
+    sidecar(tx, created)?;
+    let unit: i64 = tx.query_row(
+        "SELECT unit_id FROM source_review_events WHERE id=?1",
+        [created],
+        |r| r.get(0),
+    )?;
+    let mut events = vec![created];
+    for decision in merge_rejections(page, merge) {
+        let event = super::store::review_unit_operation(
+            tx,
+            page,
+            decision.unit,
+            &decision.review,
+            Some(&operation),
+        )?;
+        sidecar(tx, event)?;
+        events.push(event);
+    }
+    record_replacement(tx, unit, &operation, "merge", anchor, 1)?;
     Ok((unit, events))
 }
 

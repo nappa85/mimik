@@ -54,7 +54,7 @@
       bar.hidden = n === 0;
       // The bar must not cover the content: pad the page while it shows.
       document.documentElement.classList.toggle('has-table-bar', n > 0);
-      const message = (n === 1 ? '1 unit selected' : `${n} units selected`) + (n > 200 ? ' (at most 200 per table)' : '');
+      const message = (n === 1 ? '1 unit selected' : `${n} units selected`) + (n > 200 ? ' (at most 200)' : '');
       count.textContent = message;
       if (announce) announce.textContent = n === 0 ? '' : message;
     };

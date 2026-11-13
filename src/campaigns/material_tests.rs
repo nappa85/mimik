@@ -6061,7 +6061,7 @@ async fn material_create_table_bar_and_no_script_buttons() {
     assert_eq!(buttons, 2, "one before and one after the cards");
     let after = parsed.select(&css("button[form=table-select]")).count();
     assert!(after >= 1, "the trailing button targets the selection form");
-    // The card's tick is a short "Table" label; the toolbar explains it once.
+    // The card's tick is a short "Select" label; the toolbar explains it once.
     assert_eq!(parsed.select(&css(".tick-hint")).count(), 0);
     let label: String = parsed
         .select(&css("#unit-1 .select-unit label"))
@@ -6069,7 +6069,7 @@ async fn material_create_table_bar_and_no_script_buttons() {
         .unwrap()
         .text()
         .collect();
-    assert!(label.starts_with("Table") && label.contains("select unit 1 for a table"));
+    assert!(label.starts_with("Select") && label.contains("unit 1 for a table or a merge"));
     let toolbar: String = parsed
         .select(&css("form#table-select"))
         .next()
@@ -6918,7 +6918,7 @@ async fn material_table_image_crops_the_combined_area_for_the_owner_only() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth) = two_page_table_fixture("").await;
     let app = crate::auth::app(store.clone()).await.unwrap();
-    let url = "/admin/materials/pages/1/tables/image";
+    let url = "/admin/materials/pages/1/selection/image";
     // BOX1 is 40x90 and BOX2 60x70 starting at (60,20): the union is x 10..120, y 10..100.
     assert_eq!(
         png_size(router_get(&app, &auth[0], &format!("{url}?unit=1&unit=2")).await).await,
@@ -7034,7 +7034,7 @@ async fn material_table_form_shows_the_original_references_only_with_units() {
         assert_eq!(crop.len(), 1);
         assert_eq!(
             crop[0].0.as_deref(),
-            Some("/admin/materials/pages/1/tables/image?unit=1&unit=2")
+            Some("/admin/materials/pages/1/selection/image?unit=1&unit=2")
         );
         assert_eq!(
             whole[0].0.as_deref(),
@@ -7076,7 +7076,7 @@ async fn material_table_form_shows_the_original_references_only_with_units() {
         )
         .await;
         assert!(
-            !html.contains("<img") && !html.contains("tables/image"),
+            !html.contains("<img") && !html.contains("selection/image"),
             "{html}"
         );
         assert!(!html.contains("table-page-reference"));
@@ -7097,7 +7097,7 @@ async fn material_table_image_of_a_union_past_the_page_edge_is_clamped() {
             router_get(
                 &app,
                 &auth[0],
-                "/admin/materials/pages/1/tables/image?unit=3"
+                "/admin/materials/pages/1/selection/image?unit=3"
             )
             .await
         )
@@ -7120,7 +7120,7 @@ async fn material_table_form_without_a_usable_reference_shows_no_images() {
     let html = body(refused).await;
     assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
     assert!(
-        !html.contains("page 0") && !html.contains("tables/image") && !html.contains("<img"),
+        !html.contains("page 0") && !html.contains("selection/image") && !html.contains("<img"),
         "{html}"
     );
     assert!(!html.contains("table-page-reference"));
@@ -7152,9 +7152,12 @@ async fn material_table_form_without_a_usable_reference_shows_no_images() {
     let html = body(response).await;
     assert!(field_value(&html, "textarea[name=cells]").contains('|'));
     assert!(
-        !html.contains("tables/image")
+        !html.contains("selection/image")
             && !html.contains("<img")
             && !html.contains("table-page-reference"),
         "{html}"
     );
 }
+
+#[path = "merge_tests.rs"]
+mod merge_tests;

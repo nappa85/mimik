@@ -38,7 +38,7 @@ pub mod uploads;
 #[cfg(target_os = "linux")]
 pub mod worker;
 pub use documents::{
-    OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision, parse_page_list,
+    OwnerMerge, OwnerTable, OwnerUnit, PrimaryPageState, TableSource, UnitDecision, parse_page_list,
 };
 pub use import::WordsReport;
 #[doc(hidden)]
@@ -122,6 +122,8 @@ pub struct ReviewEvent {
     /// Set on the first event of the batch that created an owner table: the table unit and the
     /// units it replaced, in decision order.
     pub table: Option<(i64, String)>,
+    /// Set on the first event of a merge operation: the merged unit and the units it replaced.
+    pub merge: Option<(i64, String)>,
 }
 
 pub struct UnitView {
