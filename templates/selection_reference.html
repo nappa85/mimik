@@ -1,0 +1,7 @@
+{% if let Some(reference) = reference %}<aside class="table-reference" aria-label="Original PDF reference">
+<figure><img src="{{ reference.crop_url }}" alt="Original PDF page {{ reference.pdf_page }}, area of the selected units" loading="lazy"><figcaption>The area the selected units cover, from the original page. <a href="{{ reference.crop_url }}" target="_blank" rel="noopener">Open full-size crop<span class="sr-only"> (opens in a new tab)</span></a></figcaption></figure>
+<details id="table-page-reference"><summary>Whole page with the selected units outlined</summary>
+{% if reference.missing > 0 %}<p>{{ reference.missing }} selected unit(s) have no outline.</p>{% endif %}
+<div class="review-image"><img src="/admin/materials/pages/{{ page }}/image" alt="Original PDF page {{ reference.pdf_page }} with the selected units outlined" loading="lazy">
+<svg class="table-outline" viewBox="0 0 {{ reference.width }} {{ reference.height }}" aria-label="Selected units in PDF points" role="group">{% for outline in reference.outlines %}<polygon points="{{ outline.1 }}" data-outline-unit="{{ outline.0 }}"><title>Unit {{ outline.0 }}</title></polygon>{% endfor %}</svg></div></details>
+</aside>{% endif %}

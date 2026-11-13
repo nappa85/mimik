@@ -125,10 +125,25 @@ input[type="file"] { max-width: 100%; }
 .evidence-columns > *, .source-original { min-width: 0; }
 ins { background: #d5f5dc; color: #13381d; }
 del { background: #ffdddd; color: #501515; }
-/* Decision form: the dropdown sits on the card heading row; every field shows without script and
-   source-review.js hides the ones the chosen decision does not use. */
-.decision { margin: .5rem 0; min-width: 0; }
-.decision-fields textarea { width: 100%; }
+/* Review header: title, progress and navigation on compact lines. */
+.review-header h1 { margin-bottom: .25rem; }
+.review-header p { margin: .25rem 0; }
+.review-nav { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin: .5rem 0 1rem; }
+/* Compact unit card: one header line, the text, then three actions (Accept, Correct, Reject). */
+.unit-card { padding: 1rem 1.25rem; }
+.unit-kind { color: #555e57; }
+.badge { display: inline-block; padding: .05rem .5rem; border: 1px solid currentColor; border-radius: 1rem; font-size: .85rem; }
+.badge.state-unreviewed { color: #075ba6; }
+.badge.state-accepted { color: #1d6b34; }
+.badge.state-corrected { color: #8a4b00; }
+.badge.state-rejected { color: #8f1d1d; }
+.unit-details, .decision-details, .page-task { margin: .5rem 0; }
+.unit-details > summary, .decision-details > summary, .page-task > summary { cursor: pointer; }
+.page-task > summary { font-weight: 600; }
+.unit-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: .5rem 1.5rem; margin-top: .75rem; }
+.unit-actions .accept-form { margin: 0; }
+.unit-actions .decision-details { flex: 1 1 18rem; min-width: 0; margin: 0; }
+.decision-details textarea { width: 100%; }
 /* A refused save: red text and border, never colour alone (the text says what failed). */
 .field-error { color: #8f1d1d; background: #fdecea; border-left: 4px solid #b42329; padding: .5rem .75rem; font-weight: 600; overflow-wrap: anywhere; }
 .error-summary { border-left: 4px solid #b42329; }
@@ -137,12 +152,10 @@ textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b
 .select-unit { margin: .2rem 0; }
 .select-unit input { display: inline-block; width: auto; }
 .select-unit label { display: inline-block; width: auto; margin: 0 0 0 .4rem; }
-/* Unit card heading row: the kind and state on the left, the decision dropdown on the right. */
-.unit-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1rem; }
-.unit-head h2 { margin: 0; }
-.decision-select { display: flex; align-items: center; gap: .5rem; width: auto; margin: 0; }
-.decision-select select { width: auto; min-width: 14rem; }
-.tick-hint { display: inline; margin-left: .6rem; }
+/* Unit card header line: number, kind, state, and the table tick on the right. */
+.unit-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; }
+.unit-head h2 { margin: 0; font-size: 1.1rem; }
+.unit-head .select-unit { margin-left: auto; }
 /* Create-table bar: fixed to the bottom of the viewport while units are ticked (script shows it). */
 .table-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .5rem 1rem; padding: .5rem 1rem; background: #fffef9; border-top: 3px solid #285d4c; box-shadow: 0 -2px 8px rgb(0 0 0 / 15%); }
 .table-bar[hidden] { display: none; }
@@ -154,3 +167,34 @@ textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b
 /* While the create-table bar shows, keep room for it so it covers nothing (also when jumping to #unit-N). */
 .has-table-bar { scroll-padding-bottom: 5rem; }
 .has-table-bar body { padding-bottom: 5rem; }
+.table-layout { display: grid; gap: 1rem; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.table-reference { min-width: 0; }
+.table-reference figure { margin: 0; }
+.table-reference figure img { display: block; max-width: 100%; height: auto; border: 1px solid #8884; }
+.table-edit { min-width: 0; }
+.table-outline polygon { fill: #075ba622; stroke: #075ba6; stroke-width: 2; stroke-dasharray: 6 4; vector-effect: non-scaling-stroke; }
+@media (min-width: 60rem) {
+  .table-layout { grid-template-columns: minmax(18rem, 2fr) minmax(0, 3fr); }
+  .table-reference { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow: auto; }
+}
+@media (min-width: 60rem) { .table-layout.table-layout-single { grid-template-columns: minmax(0, 1fr); } }
+
+/* Split form: every part's area outlined on the unit's crop; the box being edited is .drawn-region. */
+.split-outline polygon { fill: #075ba622; stroke: #075ba6; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.split-outline polygon.split-other { fill: transparent; stroke-dasharray: 6 4; }
+.split-outline polygon.drawn-region { fill: #f6ba3b55; stroke: #b55b00; stroke-dasharray: none; }
+.split-overview img { max-width: 100%; height: auto; }
+.review-image > img { border: 0; }
+fieldset[data-split-part] details { margin: .5rem 0; }
+.split-link { margin: .5rem 0 0; }
+.split-outline text { fill: #075ba6; font-weight: bold; }
+
+/* Agreement with the PDF text layer (review screen). */
+#review-overlay path.orphan-word, .review-legend .orphan-word { fill: #a1006622; stroke: #a10066; stroke-width: 1.5; stroke-dasharray: 1 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+.review-tabs { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.review-tabs a[aria-current="page"] { font-weight: 700; text-decoration: none; }
+.agreement { margin-left: .5rem; font-size: .9em; }
+.agreement-agrees { color: #1a7f37; }
+.agreement-differs { color: #b42329; }
+.agreement-no-words, .agreement-excluded { color: #5a5a5a; }
+.agreement-diff q { background: #f6ba3b33; }

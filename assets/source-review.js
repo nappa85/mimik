@@ -12,8 +12,10 @@
     });
   }
   list?.addEventListener('keydown', event => {
+    // j / k also work on a card's Accept button (so `a` then `j` moves on); other keys stay its own.
+    const onAccept = event.target.matches('[data-accept-unit]') && (event.key === 'j' || event.key === 'k');
     if (!toggle?.checked || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
-        event.target.closest('input,textarea,select,button,[contenteditable]')) return;
+        (!onAccept && event.target.closest('input,textarea,select,button,[contenteditable]'))) return;
     const card = event.target.closest('[data-unit]');
     if (!card) return;
     const cards = [...list.querySelectorAll('[data-unit]')];
@@ -21,20 +23,24 @@
     let target;
     if (event.key === 'j') target = cards[index + 1];
     if (event.key === 'k') target = cards[index - 1];
-    if (event.key === 'a') target = card.querySelector('[data-accept-rationale]:not(:disabled)');
+    if (event.key === 'a') target = card.querySelector('[data-accept-unit]:not(:disabled)');
     if (target) { event.preventDefault(); target.focus(); }
   });
-  // Decision dropdown: without script every field shows; hide the ones the chosen decision does
-  // not use (accepted: none, corrected: text and rationale, rejected: rationale).
-  document.querySelectorAll('select[name=state][form]').forEach(select => {
-    const form = document.getElementById(select.getAttribute('form'));
-    const fields = form ? [...form.querySelectorAll('[data-decision-fields]')] : [];
-    const apply = () => fields.forEach(field => {
-      field.hidden = !field.dataset.decisionFields.split(' ').includes(select.value);
-    });
-    select.addEventListener('change', apply);
-    apply();
+  // A link into a closed disclosure (page task, details) opens it, so the target is visible.
+  const reveal = (hash = location.hash) => {
+    let target = null;
+    try { target = document.getElementById(decodeURIComponent(hash.slice(1))); } catch (_) { /* Bad escape: nothing to open. */ }
+    for (let node = target?.parentElement?.closest('details'); node; node = node.parentElement?.closest('details')) node.open = true;
+  };
+  window.addEventListener('hashchange', () => reveal());
+  // A same-page link whose hash is already current fires no hashchange: open on click as well.
+  document.addEventListener('click', event => {
+    const link = event.target.closest?.('a[href*="#"]');
+    if (!link) return;
+    const url = new URL(link.href, location.href);
+    if (url.origin === location.origin && url.pathname === location.pathname && url.search === location.search) reveal(url.hash);
   });
+  reveal();
   // Create-table bar: appears at the bottom of the viewport while units are ticked. The plain
   // buttons stay for browsers without script.
   const bar = document.querySelector('#table-bar');
@@ -48,7 +54,7 @@
       bar.hidden = n === 0;
       // The bar must not cover the content: pad the page while it shows.
       document.documentElement.classList.toggle('has-table-bar', n > 0);
-      const message = (n === 1 ? '1 unit selected' : `${n} units selected`) + (n > 200 ? ' (at most 200 per table)' : '');
+      const message = (n === 1 ? '1 unit selected' : `${n} units selected`) + (n > 200 ? ' (at most 200)' : '');
       count.textContent = message;
       if (announce) announce.textContent = n === 0 ? '' : message;
     };

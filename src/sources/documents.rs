@@ -9,6 +9,7 @@ pub(crate) fn rewind_schema(db: &Connection) -> Result<(), AppError> {
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     db.execute_batch(
         "DROP TABLE IF EXISTS source_page_words;
+         DROP TABLE IF EXISTS source_owner_replacements;
          DROP TABLE IF EXISTS source_owner_tables;
          DROP VIEW IF EXISTS source_upload_invalid_exclusion;
          DROP VIEW IF EXISTS source_upload_invalid_inspection;
@@ -391,9 +392,34 @@ pub(super) fn add_owner_operation(
     unit: &OwnerUnit,
     operation: Option<&str>,
 ) -> Result<i64, AppError> {
+    add_owner_with(tx, page, unit, operation, Some(unit.revision), None)
+}
+
+/// Like [`add_owner_operation`] for a caller that inserts several owner units and has checked
+/// the page revision itself, once, before its first write: each write bumps the page revision,
+/// so the revision in `unit` is not compared again. `bounds` is the page's size, read once by
+/// the caller, so the polygon is checked without reading the geometry again.
+pub(super) fn add_owner_operation_checked(
+    tx: &Transaction<'_>,
+    page: i64,
+    unit: &OwnerUnit,
+    operation: &str,
+    bounds: (f64, f64),
+) -> Result<i64, AppError> {
+    add_owner_with(tx, page, unit, Some(operation), None, Some(bounds))
+}
+
+fn add_owner_with(
+    tx: &Transaction<'_>,
+    page: i64,
+    unit: &OwnerUnit,
+    operation: Option<&str>,
+    expected_revision: Option<i64>,
+    bounds: Option<(f64, f64)>,
+) -> Result<i64, AppError> {
     let html = owner_html(&unit.text);
     let raw_text = if operation.is_some() {
-        // A merge's initial owner transcription is the exact plain text approved in
+        // A merge's or split's initial owner transcription is the exact plain text approved in
         // the operation (025 checks equality), not the wrapped display projection.
         unit.text.clone()
     } else {
@@ -407,7 +433,8 @@ pub(super) fn add_owner_operation(
             polygon: &unit.polygon,
             html: &html,
             raw_text,
-            expected_revision: unit.revision,
+            expected_revision,
+            bounds,
         },
     )?;
     super::store::review_unit_operation(tx, page, id, &owner_review(unit), operation)
@@ -424,7 +451,10 @@ struct OwnerRow<'a> {
     polygon: &'a [[f64; 2]; 4],
     html: &'a str,
     raw_text: String,
-    expected_revision: i64,
+    /// The page revision the Owner saw; `None` when the caller checked it already.
+    expected_revision: Option<i64>,
+    /// The page's size when the caller has read it already; else it is read from the database.
+    bounds: Option<(f64, f64)>,
 }
 
 /// Insert one unreviewed owner unit with its search text; the caller records any decision.
@@ -437,11 +467,17 @@ fn insert_owner(tx: &Transaction<'_>, page: i64, row: &OwnerRow<'_>) -> Result<i
         )
         .optional()?
         .ok_or(AppError::SourceNotFound)?;
-    if revision != row.expected_revision {
+    if row
+        .expected_revision
+        .is_some_and(|expected| expected != revision)
+    {
         return Err(AppError::Conflict);
     }
     super::store::next_revision(revision)?;
-    validate_polygon(tx, page, row.polygon)?;
+    match row.bounds {
+        Some((width, height)) => validate_polygon_bounds(width, height, row.polygon)?,
+        None => validate_polygon(tx, page, row.polygon)?,
+    }
     let (html, raw_text) = (row.html, &row.raw_text);
     let search = super::search::search_text(html)?;
     // SQL may have inserted a reserved ordinal ahead of the allocator; never reuse it.
@@ -492,8 +528,17 @@ pub(super) fn validate_table(table: &OwnerTable) -> Result<(), AppError> {
 }
 
 fn table_decisions(page: i64, table: &OwnerTable) -> Vec<UnitDecision> {
-    table
-        .sources
+    rejections(page, &table.sources, &table.actor, &table.rationale)
+}
+
+/// One `rejected` decision per selected unit, with the revision the Owner saw.
+fn rejections(
+    page: i64,
+    sources: &[TableSource],
+    actor: &str,
+    rationale: &str,
+) -> Vec<UnitDecision> {
+    sources
         .iter()
         .map(|source| UnitDecision {
             page,
@@ -502,11 +547,86 @@ fn table_decisions(page: i64, table: &OwnerTable) -> Vec<UnitDecision> {
                 revision: source.revision,
                 state: "rejected".into(),
                 correction: String::new(),
-                actor: table.actor.clone(),
-                rationale: table.rationale.clone(),
+                actor: actor.to_owned(),
+                rationale: rationale.to_owned(),
             },
         })
         .collect()
+}
+
+/// The area a table or merge over `sources` covers, read inside the caller's transaction: every
+/// unit must be on `page` at the revision the Owner saw and not rejected. Nothing is written.
+fn selection_polygon(
+    tx: &Transaction<'_>,
+    page: i64,
+    sources: &[TableSource],
+) -> Result<[[f64; 2]; 4], AppError> {
+    let (width, height) = polygon_bounds(tx, page)?;
+    let mut union = UnionBox::new(width, height);
+    for source in sources {
+        let (revision, state, polygon): (i64, String, String) = tx
+            .query_row(
+                "SELECT revision,state,polygon FROM source_units WHERE id=?1 AND page_id=?2",
+                params![source.unit, page],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(AppError::SourceNotFound)?;
+        if revision != source.revision {
+            return Err(AppError::Conflict);
+        }
+        if state == "rejected" {
+            return Err(AppError::Invalid(
+                "A selected unit is already rejected; select the units again.",
+            ));
+        }
+        union.add(&polygon)?;
+    }
+    Ok(union.polygon())
+}
+
+/// The combined box of units' polygons, clamped to the page: the area a table unit covers.
+/// Shared by saving a table and by the table form's reference crop.
+pub(super) struct UnionBox {
+    width: f64,
+    height: f64,
+    bounds: [f64; 4],
+}
+
+impl UnionBox {
+    pub(super) fn new(width: f64, height: f64) -> Self {
+        Self {
+            width,
+            height,
+            bounds: [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
+        }
+    }
+
+    pub(super) fn add(&mut self, polygon: &str) -> Result<(), AppError> {
+        let unusable = AppError::Invalid("A selected unit has no usable region.");
+        let points: Vec<[f64; 2]> = serde_json::from_str(polygon)
+            .ok()
+            .filter(|p: &Vec<[f64; 2]>| !p.is_empty() && p.len() <= 1024)
+            .ok_or(unusable)?;
+        for [x, y] in points {
+            if !x.is_finite() || !y.is_finite() {
+                return Err(AppError::Invalid("A selected unit has no usable region."));
+            }
+            let (x, y) = (x.clamp(0.0, self.width), y.clamp(0.0, self.height));
+            self.bounds = [
+                self.bounds[0].min(x),
+                self.bounds[1].min(y),
+                self.bounds[2].max(x),
+                self.bounds[3].max(y),
+            ];
+        }
+        Ok(())
+    }
+
+    pub(super) fn polygon(&self) -> [[f64; 2]; 4] {
+        let [x0, y0, x1, y1] = self.bounds;
+        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+    }
 }
 
 /// Reject the selected units in one operation and add one owner `Table` unit whose box is
@@ -521,35 +641,8 @@ pub(super) fn add_owner_table(
     mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
 ) -> Result<(i64, Vec<i64>), AppError> {
     validate_table(table)?;
-    let (width, height) = polygon_bounds(tx, page)?;
-    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for source in &table.sources {
-        let (revision, polygon): (i64, String) = tx
-            .query_row(
-                "SELECT revision,polygon FROM source_units WHERE id=?1 AND page_id=?2",
-                params![source.unit, page],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-            .ok_or(AppError::SourceNotFound)?;
-        if revision != source.revision {
-            return Err(AppError::Conflict);
-        }
-        let points: Vec<[f64; 2]> = serde_json::from_str(&polygon)
-            .ok()
-            .filter(|p: &Vec<[f64; 2]>| !p.is_empty() && p.len() <= 1024)
-            .ok_or(AppError::Invalid("A selected unit has no usable region."))?;
-        for [x, y] in points {
-            if !x.is_finite() || !y.is_finite() {
-                return Err(AppError::Invalid("A selected unit has no usable region."));
-            }
-            x0 = x0.min(x.clamp(0.0, width));
-            x1 = x1.max(x.clamp(0.0, width));
-            y0 = y0.min(y.clamp(0.0, height));
-            y1 = y1.max(y.clamp(0.0, height));
-        }
-    }
-    let polygon = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    let polygon = selection_polygon(tx, page, &table.sources)?;
+    let anchor = first_in_reading_order(tx, page, table.sources.iter().map(|s| s.unit))?;
     let html = super::tables::html(&table.cells, table.header);
     let operation = new_operation_id();
     let owner = OwnerRow {
@@ -557,7 +650,8 @@ pub(super) fn add_owner_table(
         polygon: &polygon,
         raw_text: super::tables::plain(&table.cells),
         html: &html,
-        expected_revision: table.revision,
+        expected_revision: Some(table.revision),
+        bounds: None,
     };
     let unit = insert_owner(tx, page, &owner)?;
     let mut events = Vec::with_capacity(table.sources.len());
@@ -572,12 +666,426 @@ pub(super) fn add_owner_table(
         sidecar(tx, event)?;
         events.push(event);
     }
+    // first_event_id keeps the first rejection in submitted order; the replacement anchor below
+    // is the first replaced unit in reading order.
     tx.execute(
         "INSERT INTO source_owner_tables(unit_id,operation_id,first_event_id) VALUES(?1,?2,?3)",
         params![unit, operation, events[0]],
     )?;
+    record_replacement(tx, unit, &operation, "table", anchor, 1)?;
     Ok((unit, events))
 }
+
+/// Units the Owner merges into one text: the page revision and each unit's revision seen, the
+/// merged text and one rationale for the whole change.
+#[derive(Clone)]
+pub struct OwnerMerge {
+    pub revision: i64,
+    pub sources: Vec<TableSource>,
+    pub text: String,
+    pub actor: String,
+    pub rationale: String,
+}
+
+/// The merged text's byte bound (the 64 KiB display and import contract).
+pub(crate) const MAX_MERGE_BYTES: usize = 65_536;
+/// The most characters the merged text may hold (the correction limit).
+pub(crate) const MAX_MERGE_CHARS: usize = 20_000;
+/// The fewest units a merge takes.
+pub(crate) const MIN_MERGE_SOURCES: usize = 2;
+
+/// The length bounds of one owner text (a merge's, or a split part's): at most 20,000
+/// characters, and at most 64 KiB raw and once escaped as HTML. The messages are the caller's.
+fn check_text_bounds(
+    text: &str,
+    too_many_chars: &'static str,
+    too_many_bytes: &'static str,
+) -> Result<(), AppError> {
+    if text.chars().count() > MAX_MERGE_CHARS {
+        return Err(AppError::Invalid(too_many_chars));
+    }
+    if text.len() > MAX_MERGE_BYTES || owner_html(text).len() > MAX_MERGE_BYTES {
+        return Err(AppError::Invalid(too_many_bytes));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_merge(merge: &OwnerMerge) -> Result<(), AppError> {
+    if merge.sources.len() < MIN_MERGE_SOURCES
+        || merge.sources.len() > super::tables::MAX_TABLE_SOURCES
+    {
+        return Err(AppError::Invalid("Choose 2-200 different units to merge."));
+    }
+    check_text_bounds(
+        &merge.text,
+        "Merged text is too long: at most 20,000 characters.",
+        "Merged text is too long: at most 64 KiB, and & < > and quotes count for up to 6 bytes each; shorten it.",
+    )?;
+    validate_batch(&merge_rejections(0, merge), &merge.rationale)?;
+    validate_owner(&merge_unit(merge, [[0.0; 2]; 4]))
+}
+
+fn merge_rejections(page: i64, merge: &OwnerMerge) -> Vec<UnitDecision> {
+    rejections(page, &merge.sources, &merge.actor, &merge.rationale)
+}
+
+fn merge_unit(merge: &OwnerMerge, polygon: [[f64; 2]; 4]) -> OwnerUnit {
+    OwnerUnit {
+        revision: merge.revision,
+        polygon,
+        text: merge.text.clone(),
+        actor: merge.actor.clone(),
+        rationale: merge.rationale.clone(),
+    }
+}
+
+/// Merge the selected units: one owner `Text` unit with the union of their boxes, recorded
+/// `corrected` with the Owner's text, every selected unit `rejected`, all in one operation, then
+/// the `merge` replacement row anchored at the first selected unit in reading order. Every unit
+/// revision is checked before the first write, and the page revision by the owner insert, which
+/// is the first write, so the later per-unit writes (each bumps the page revision) never see a
+/// changed one. Returns the new unit id and every event id (the new unit's first).
+pub(super) fn add_owner_merge(
+    tx: &Transaction<'_>,
+    page: i64,
+    merge: &OwnerMerge,
+    mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
+) -> Result<(i64, Vec<i64>), AppError> {
+    validate_merge(merge)?;
+    let polygon = selection_polygon(tx, page, &merge.sources)?;
+    let anchor = first_in_reading_order(tx, page, merge.sources.iter().map(|s| s.unit))?;
+    let operation = new_operation_id();
+    let created = add_owner_operation(tx, page, &merge_unit(merge, polygon), Some(&operation))?;
+    sidecar(tx, created)?;
+    let unit: i64 = tx.query_row(
+        "SELECT unit_id FROM source_review_events WHERE id=?1",
+        [created],
+        |r| r.get(0),
+    )?;
+    let mut events = vec![created];
+    for decision in merge_rejections(page, merge) {
+        let event = super::store::review_unit_operation(
+            tx,
+            page,
+            decision.unit,
+            &decision.review,
+            Some(&operation),
+        )?;
+        sidecar(tx, event)?;
+        events.push(event);
+    }
+    record_replacement(tx, unit, &operation, "merge", anchor, 1)?;
+    Ok((unit, events))
+}
+
+/// The most parts a split makes, and the fewest.
+pub(crate) const MAX_SPLIT_PARTS: usize = 20;
+pub(crate) const MIN_SPLIT_PARTS: usize = 2;
+
+/// A unit the Owner splits: the page revision and the unit's revision seen, the text with `---`
+/// lines between the parts, the parts' boxes (computed on save when `None`) and one rationale.
+#[derive(Clone)]
+pub struct OwnerSplit {
+    pub revision: i64,
+    pub unit: TableSource,
+    pub text: String,
+    pub boxes: Option<Vec<[[f64; 2]; 4]>>,
+    pub actor: String,
+    pub rationale: String,
+}
+
+/// Whether a line is a part marker: exactly `---` once trimmed (a CR before the newline included).
+pub(crate) fn is_split_marker(line: &str) -> bool {
+    line.trim() == "---"
+}
+
+/// The parts of `text`: a part starts after each marker line. Parts are trimmed.
+#[must_use]
+pub(crate) fn split_parts(text: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    for line in text.lines() {
+        if is_split_marker(line) {
+            parts.push(String::new());
+        } else {
+            let part = parts.last_mut().expect("one part at least");
+            if !part.is_empty() {
+                part.push('\n');
+            }
+            part.push_str(line);
+        }
+    }
+    parts.into_iter().map(|p| p.trim().to_owned()).collect()
+}
+
+/// The parts of a split text, checked: 2-20, none empty, each within the text bounds. Nothing
+/// is read from the database.
+pub(crate) fn check_split_text(text: &str) -> Result<Vec<String>, AppError> {
+    if text.len() > MAX_MERGE_BYTES {
+        return Err(AppError::Invalid(
+            "The text is too long: at most 64 KiB in all.",
+        ));
+    }
+    let parts = split_parts(text);
+    if parts.len() < MIN_SPLIT_PARTS || parts.len() > MAX_SPLIT_PARTS {
+        return Err(AppError::Invalid(
+            "Split into 2-20 parts: put a line with only --- between the parts.",
+        ));
+    }
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            return Err(AppError::Invalid(PART_EMPTY[index]));
+        }
+        check_text_bounds(
+            part,
+            "A part is too long: at most 20,000 characters.",
+            "A part is too long: at most 64 KiB, and & < > and quotes count for up to 6 bytes each; shorten it.",
+        )?;
+    }
+    Ok(parts)
+}
+
+/// Check the text, boxes and rationale of a split and return its parts; nothing is read from
+/// the database.
+pub(super) fn validate_split(split: &OwnerSplit) -> Result<Vec<String>, AppError> {
+    let parts = check_split_text(&split.text)?;
+    if let Some(boxes) = &split.boxes
+        && boxes.len() != parts.len()
+    {
+        return Err(AppError::Invalid(
+            "The number of parts changed after the areas were shown; show the areas again.",
+        ));
+    }
+    validate_batch(&split_rejection(0, split), &split.rationale)?;
+    for part in &parts {
+        validate_owner(&split_unit(split, part, [[0.0; 2]; 4]))?;
+    }
+    Ok(parts)
+}
+
+/// The refusal for an empty part, naming it (`AppError::Invalid` takes static text).
+const PART_EMPTY: [&str; 20] = [
+    "Part 1 is empty.",
+    "Part 2 is empty.",
+    "Part 3 is empty.",
+    "Part 4 is empty.",
+    "Part 5 is empty.",
+    "Part 6 is empty.",
+    "Part 7 is empty.",
+    "Part 8 is empty.",
+    "Part 9 is empty.",
+    "Part 10 is empty.",
+    "Part 11 is empty.",
+    "Part 12 is empty.",
+    "Part 13 is empty.",
+    "Part 14 is empty.",
+    "Part 15 is empty.",
+    "Part 16 is empty.",
+    "Part 17 is empty.",
+    "Part 18 is empty.",
+    "Part 19 is empty.",
+    "Part 20 is empty.",
+];
+
+fn split_rejection(page: i64, split: &OwnerSplit) -> Vec<UnitDecision> {
+    rejections(
+        page,
+        std::slice::from_ref(&split.unit),
+        &split.actor,
+        &split.rationale,
+    )
+}
+
+fn split_unit(split: &OwnerSplit, text: &str, polygon: [[f64; 2]; 4]) -> OwnerUnit {
+    OwnerUnit {
+        revision: split.revision,
+        polygon,
+        text: text.to_owned(),
+        actor: split.actor.clone(),
+        rationale: split.rationale.clone(),
+    }
+}
+
+/// A box `[x0, y0, x1, y1]` as the four corners an owner unit stores.
+#[must_use]
+pub(crate) fn box_polygon(b: [f64; 4]) -> [[f64; 2]; 4] {
+    [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]
+}
+
+/// What the split areas are computed from: the unit's stored box and the page's size and words.
+pub(super) fn split_areas_for(
+    db: &Connection,
+    page: i64,
+    polygon: &str,
+    parts: &[&str],
+) -> Result<super::split_areas::Areas, AppError> {
+    let size = polygon_bounds(db, page)?;
+    let stored: Option<Vec<u8>> = db
+        .query_row(
+            &format!(
+                "SELECT CASE WHEN length(words)<={} THEN words END FROM source_page_words WHERE page_id=?1",
+                super::page_words::MAX_ROW_BYTES
+            ),
+            [page],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten();
+    let words = stored.and_then(|bytes| super::page_words::decode(&bytes).ok());
+    super::split_areas::areas(parts, polygon, words.as_deref(), size).ok_or(AppError::Invalid(
+        "The unit has no usable region, so the parts' areas cannot be computed.",
+    ))
+}
+
+/// Split one unit: one owner `Text` unit per part, each recorded `corrected` with its text, the
+/// unit `rejected`, all in one operation, then the `split` replacement rows (parts 1..n,
+/// anchored at the unit). The page revision and the unit's revision are checked once, before the
+/// first write; the owner inserts then skip the page revision check, which each write bumps.
+/// Returns the new unit ids in part order and every event id (the parts' first).
+pub(super) fn add_owner_split(
+    tx: &Transaction<'_>,
+    page: i64,
+    split: &OwnerSplit,
+    mut sidecar: impl FnMut(&Transaction<'_>, i64) -> Result<(), AppError>,
+) -> Result<(Vec<i64>, Vec<i64>), AppError> {
+    let parts = validate_split(split)?;
+    let page_revision: i64 = tx
+        .query_row(
+            "SELECT revision FROM source_pages WHERE id=?1",
+            [page],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
+    if page_revision != split.revision {
+        return Err(AppError::Conflict);
+    }
+    let (revision, state, kind, polygon, text_bytes): (i64, String, String, String, i64) = tx
+        .query_row(
+            "SELECT revision,state,kind,polygon,coalesce(length(CAST(CASE WHEN state='corrected' THEN correction ELSE raw_text END AS BLOB)),0) FROM source_units WHERE id=?1 AND page_id=?2",
+            params![split.unit.unit, page],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
+    if revision != split.unit.revision {
+        return Err(AppError::Conflict);
+    }
+    if state == "rejected" {
+        return Err(AppError::Invalid(
+            "This unit is already rejected; it cannot be split.",
+        ));
+    }
+    if kind != "Text" {
+        return Err(AppError::Invalid("Only text units can be split."));
+    }
+    // The form cuts a longer text at 64 KiB; what was cut cannot be kept in any part.
+    if usize::try_from(text_bytes).is_ok_and(|bytes| bytes > MAX_MERGE_BYTES) {
+        return Err(AppError::Invalid(
+            "The unit holds more than 64 KiB of text, which the form cut; it cannot be split here.",
+        ));
+    }
+    let bounds = polygon_bounds(tx, page)?;
+    let boxes: Vec<[[f64; 2]; 4]> = if let Some(boxes) = &split.boxes {
+        boxes.clone()
+    } else {
+        let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+        split_areas_for(tx, page, &polygon, &refs)?
+            .boxes
+            .into_iter()
+            .map(box_polygon)
+            .collect()
+    };
+    for polygon in &boxes {
+        validate_polygon_bounds(bounds.0, bounds.1, polygon).map_err(|_| {
+            AppError::Invalid("Every part's box must be inside the page and not empty.")
+        })?;
+    }
+    let operation = new_operation_id();
+    let mut units = Vec::with_capacity(parts.len());
+    let mut events = Vec::with_capacity(parts.len() + 1);
+    for (text, polygon) in parts.iter().zip(&boxes) {
+        let event = add_owner_operation_checked(
+            tx,
+            page,
+            &split_unit(split, text, *polygon),
+            &operation,
+            bounds,
+        )?;
+        sidecar(tx, event)?;
+        units.push(tx.query_row(
+            "SELECT unit_id FROM source_review_events WHERE id=?1",
+            [event],
+            |r| r.get::<_, i64>(0),
+        )?);
+        events.push(event);
+    }
+    for decision in split_rejection(page, split) {
+        let event = super::store::review_unit_operation(
+            tx,
+            page,
+            decision.unit,
+            &decision.review,
+            Some(&operation),
+        )?;
+        sidecar(tx, event)?;
+        events.push(event);
+    }
+    for (part, unit) in (1..).zip(&units) {
+        record_replacement(tx, *unit, &operation, "split", split.unit.unit, part)?;
+    }
+    Ok((units, events))
+}
+
+/// The first of `units` (all on `page`) in reading order, computed inside the caller's
+/// transaction rather than taken from the submitted order.
+pub(super) fn first_in_reading_order(
+    tx: &Transaction<'_>,
+    page: i64,
+    units: impl Iterator<Item = i64>,
+) -> Result<i64, AppError> {
+    let list = serde_json::to_string(&units.collect::<Vec<_>>())
+        .map_err(|_| AppError::Invalid("Unit list failed."))?;
+    tx.query_row(
+        &format!(
+            "{} SELECT id FROM ordered WHERE id IN (SELECT value FROM json_each(?2)) ORDER BY position LIMIT 1",
+            super::materials::ORDERED_UNITS
+        ),
+        params![page, list],
+        |r| r.get(0),
+    )
+    .optional()?
+    .ok_or(AppError::SourceNotFound)
+}
+
+/// Insert the replacement row of an owner unit created by a table, merge or split `operation`
+/// (`kind` is `table`, `merge` or `split`), anchored at `anchor`. The order key is computed in
+/// SQL from the anchor with the expression the migration's insert trigger recomputes, so a
+/// merge or split writer cannot store a different key.
+pub(super) fn record_replacement(
+    tx: &Transaction<'_>,
+    unit: i64,
+    operation: &str,
+    kind: &str,
+    anchor: i64,
+    part: i64,
+) -> Result<(), AppError> {
+    let inserted = tx.execute(
+        REPLACEMENT_INSERT,
+        params![unit, operation, kind, anchor, part],
+    )?;
+    if inserted == 1 {
+        Ok(())
+    } else {
+        Err(AppError::SourceNotFound)
+    }
+}
+
+pub(super) const REPLACEMENT_INSERT: &str = concat!(
+    "INSERT INTO source_owner_replacements(unit_id,operation_id,kind,anchor_unit_id,part,order_key) \
+     SELECT ?1,?2,?3,anc.id,?5,",
+    unit_sort_key!("anc"),
+    "||'.'||printf('%04d',?5) FROM source_units anc WHERE anc.id=?4"
+);
 
 /// A fresh 128-bit identifier naming one batch; callers cannot choose or reuse it.
 pub(super) fn new_operation_id() -> String {

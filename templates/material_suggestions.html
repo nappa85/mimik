@@ -1,4 +1,4 @@
 {% extends "material_base.html" %}
-{% block content %}<h1>Suggestions for unit #{{ unit }}</h1><a href="/admin/materials/pages/{{ page }}?units={{ cursor }}#unit-{{ unit }}">Back to unit</a>
+{% block content %}<h1>Suggestions for unit #{{ unit }}</h1><a href="/admin/materials/pages/{{ page }}?units={{ cursor }}&amp;unit={{ unit }}#unit-{{ unit }}">Back to unit</a>
 {% for advice in rows %}<section id="{{ advice.anchor }}" data-suggestion="{{ advice.id }}"><h2><a href="/admin/materials/suggestions/{{ advice.id }}">{{ advice.kind }} #{{ advice.id }} — {{ advice.state }}</a></h2><p>Claimed origin: {{ advice.origin }} · {% if let Some(report) = advice.report %}report #{{ report }}{% else %}no report{% endif %}</p><p>{{ advice.rationale }}</p>{% include "material_difference.html" %}<p><a href="/admin/materials/suggestions/{{ advice.id }}">Full bounded texts and review actions</a></p></section>{% endfor %}
 {% if let Some(next) = next %}<a href="?after={{ next }}">Next 20 suggestions</a>{% endif %}{% endblock %}

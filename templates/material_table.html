@@ -3,7 +3,7 @@
 <a href="/admin/materials/pages/{{ page }}">← Back to the page</a>
 <h1>Create a table from selected units</h1>
 {% if !message.is_empty() %}<div class="panel field-error" id="table-error" role="alert" tabindex="-1" autofocus data-save-error><p>The table was not saved: {{ message }}</p>{% if !units.is_empty() %}<p>Your cells and rationale are kept below. If the page changed, <a href="/admin/materials/pages/{{ page }}">reload the page</a> and select the units again.</p>{% endif %}</div>
-{% endif %}{% if units.is_empty() %}{% if message.is_empty() %}<p>No units are selected. Tick the "Select unit N for a table" box on the unit cards (1 to 200 units among the cards shown, 50 per window), then choose "Create table from selected units".</p>{% endif %}
+{% endif %}{% if units.is_empty() %}{% if message.is_empty() %}<p>No units are selected. Tick the "Select" box on the unit cards (1 to 200 units among the cards shown, 50 per window), then choose "Create table from selected units".</p>{% endif %}
 {% else %}
 <p>Mimik drafted the cells below from the selected units, in reading order (corrected text where it was corrected). The draft is only a suggestion: check it against the page and edit it. Edit the cells below: <strong>one row per line, cells separated by <code>|</code></strong>. Write <code>\|</code> for a literal bar and <code>\\</code> for a literal backslash. Empty lines are dropped and short rows are padded with empty cells. At most 200 rows by 16 columns, 1,000 characters per cell.</p>
 {% if !overlaps.is_empty() %}<div class="panel" role="status" id="table-overlap"><p>Not selected, but inside the area this table will cover: {{ overlaps }} (a run across page columns?). Saving does not touch them; go back and select them too, or check the result against the page.</p></div>{% endif %}
@@ -15,6 +15,9 @@
 {% if !problems.is_empty() %}<div class="panel" role="status" id="table-problems"><p>The draft has problems to check; none was fixed automatically:</p><ul>{% for problem in problems %}<li>{{ problem }}</li>{% endfor %}</ul></div>{% endif %}
 {% if !words_note.is_empty() %}<p role="status" id="table-words-note">{{ words_note }}</p>{% endif %}
 {% if overlap_unchecked %}<p role="status" id="table-overlap-unchecked">This page has too many units to check whether the table would cover unselected ones; the overlap check was not done.</p>{% endif %}
+<div class="table-layout{% if reference.is_none() %} table-layout-single{% endif %}">
+{% include "selection_reference.html" %}
+<div class="table-edit">
 <p>Saving rejects the {{ units.len() }} selected unit(s) with your rationale and adds one table unit covering their combined area. It stays unreviewed until you check it against the original page. The original units and the raw extraction stay as they are.</p>
 <form method="post" action="/admin/materials/pages/{{ page }}/tables" data-form="table" data-target="{{ page }}">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ revision }}">{% if !shape_key.is_empty() %}<input type="hidden" name="shape" value="{{ shape_key }}">{% endif %}
@@ -24,5 +27,6 @@
 <label>Rationale / what you checked (required; at most 5,000 Unicode characters)<textarea name="rationale" required maxlength="5000" {% if !message.is_empty() && rationale.trim().is_empty() %}aria-invalid="true" aria-describedby="table-error"{% endif %}>{{ "\n" }}{{ rationale }}</textarea></label>
 <p>Reviewer identity is recorded from your signed-in Owner account.</p><button>Create table</button>
 </form>
+</div></div>
 {% endif %}
 {% endblock %}

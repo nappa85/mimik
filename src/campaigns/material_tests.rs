@@ -203,6 +203,13 @@ async fn material_final_unchanged_cr_suggestion_is_accepted() {
     );
 }
 
+/// The budgeted part of the review screen: from the card list through the page lookup panel.
+fn budgeted_len(html: &str) -> usize {
+    let after = html.split_once("<section id=\"review-list\"").unwrap().1;
+    let lookup = after.find("id=\"lookup-panel\"").unwrap();
+    lookup + after[lookup..].find("</section>").unwrap()
+}
+
 #[tokio::test]
 async fn material_final_invalid_state_copies_fit_budget() {
     let _lock = crate::auth::test_resource_lock().await;
@@ -244,23 +251,16 @@ async fn material_final_invalid_state_copies_fit_budget() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let html = body(response).await;
     let parsed = scraper::Html::parse_document(&html);
-    let bytes = html
-        .split_once("<section id=\"review-list\"")
-        .unwrap()
-        .1
-        .split_once("<section class=\"panel\" id=\"add-text\"")
-        .unwrap()
-        .0
-        .len();
+    let bytes = budgeted_len(&html);
     eprintln!(
         "invalid-state budgeted sections: {bytes}; full page: {}",
         html.len()
     );
-    // The submitted invalid decision is shown in full; no radio claims to be chosen.
+    // The submitted invalid decision is shown (bounded) at card level; no disclosure opens.
     assert!(html.contains("Submitted invalid decision: &#34;&#34;&#34;"));
     assert!(
         parsed
-            .select(&scraper::Selector::parse("#unit-1 option[selected]:not([value=''])").unwrap())
+            .select(&scraper::Selector::parse("#unit-1 details[open].decision-details").unwrap())
             .next()
             .is_none()
     );
@@ -295,14 +295,7 @@ async fn material_final_maximum_suggestion_markup_fits_budget() {
         "fixture must exercise row rendering"
     );
     let parsed = scraper::Html::parse_document(&html);
-    let bytes = html
-        .split_once("<section id=\"review-list\"")
-        .unwrap()
-        .1
-        .split_once("<section class=\"panel\" id=\"add-text\"")
-        .unwrap()
-        .0
-        .len();
+    let bytes = budgeted_len(&html);
     let rows = parsed
         .select(&scraper::Selector::parse(".suggestion").unwrap())
         .count();
@@ -1551,7 +1544,7 @@ async fn material_owner_and_primary_drafts_on_conflict_and_validation() {
             "\nchecked original"
         );
         assert!(
-            html.contains("?units=0#add-text"),
+            html.contains("?units=0&#38;show=all#add-text"),
             "link to the matching draft panel"
         );
     }
@@ -1577,7 +1570,7 @@ async fn material_owner_and_primary_drafts_on_conflict_and_validation() {
             field_value(&html, "[data-form=primary] textarea"),
             rationale
         );
-        assert!(html.contains("?units=0#primary"));
+        assert!(html.contains("?units=0&#38;show=all#primary"));
     }
 }
 
@@ -1786,7 +1779,7 @@ async fn material_suggestion_handler_drafts_authority_and_stored_text() {
         field_value(&html, "[data-form=accept] textarea[name=rationale]"),
         "\nkept acceptance"
     );
-    assert!(html.contains("?units=50#unit-51"));
+    assert!(html.contains("?units=50&#38;unit=51#unit-51"));
     assert_missing_edit_choice_keeps_draft(&app, &auth[0], &path).await;
     let response = document_at(
         &app,
@@ -1804,7 +1797,7 @@ async fn material_suggestion_handler_drafts_authority_and_stored_text() {
         response.headers()["location"]
             .to_str()
             .unwrap()
-            .contains("?units=50#unit-51")
+            .contains("?units=50&unit=51#unit-51")
     );
     let response = document_at(
         &app,
@@ -2363,17 +2356,15 @@ async fn material_document_conflict_validation_and_nul_retain_escaped_drafts() {
         );
         assert!(html.contains("checked original"));
         let parsed = scraper::Html::parse_document(&html);
-        let checked = parsed
-            .select(
-                &scraper::Selector::parse("#unit-1 select[name=state] option[selected]").unwrap(),
-            )
-            .map(|option| option.value().attr("value").unwrap())
+        let opened = parsed
+            .select(&scraper::Selector::parse("#unit-1 details[open].decision-details").unwrap())
+            .map(|node| node.value().attr("data-decision").unwrap())
             .collect::<Vec<_>>();
         if state == "invalid" {
-            assert_eq!(checked, [""]);
+            assert_eq!(opened, [] as [&str; 0]);
             assert!(html.contains("Submitted invalid decision: invalid."));
         } else {
-            assert_eq!(checked, [state]);
+            assert_eq!(opened, [state]);
         }
     }
     let mut form = decision(1);
@@ -3824,15 +3815,30 @@ async fn material_accept_as_extracted_needs_no_rationale_but_keeps_the_audit_eve
         );
     }
     let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
-    assert!(
-        !scraper::Html::parse_document(&html)
+    // Correct and Reject are separate forms, so their fields are browser-required and cite SRC-4.
+    let parsed = scraper::Html::parse_document(&html);
+    for (form, fields) in [("corrected", 2), ("rejected", 1)] {
+        let selector = format!("#unit-1 details[data-decision={form}] form textarea[required]");
+        assert_eq!(
+            parsed
+                .select(&scraper::Selector::parse(&selector).unwrap())
+                .count(),
+            fields,
+            "{form}"
+        );
+        let label: String = parsed
             .select(
-                &scraper::Selector::parse("[data-form=unit] textarea[name=rationale][required]")
-                    .unwrap()
+                &scraper::Selector::parse(&format!(
+                    "#unit-1 details[data-decision={form}] label:has(textarea[name=rationale])"
+                ))
+                .unwrap(),
             )
-            .any(|_| true),
-        "the rationale field is not browser-required"
-    );
+            .next()
+            .unwrap()
+            .text()
+            .collect();
+        assert!(label.contains("SRC-4"), "{form}");
+    }
 }
 
 #[tokio::test]
@@ -3851,7 +3857,7 @@ async fn material_save_confirms_and_lands_on_the_next_unreviewed_unit() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit#unit-2"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit&show=all#unit-2"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(
@@ -4044,7 +4050,7 @@ async fn material_save_lookup_failure_is_unknown_not_finished() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&then=unknown#unit-1"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=1&then=unknown&show=all#unit-1"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(html.contains("The next unit could not be found in time"));
@@ -4104,7 +4110,7 @@ async fn material_save_redirects_with_card_cursor_and_to_the_next_page() {
     .await;
     assert_eq!(
         location(&response),
-        "/admin/materials/pages/1?units=50&saved=accepted&saved_unit=1&to=51&then=unit#unit-51"
+        "/admin/materials/pages/1?units=50&saved=accepted&saved_unit=1&to=51&then=unit&show=all#unit-51"
     );
     store
         .run(|db| {
@@ -4150,7 +4156,7 @@ async fn material_save_moves_to_the_next_page_with_a_true_notice() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/2?saved=accepted&saved_unit=1&then=page#saved-notice"
+        "/admin/materials/pages/2?saved=accepted&saved_unit=1&then=page&show=all#saved-notice"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(html.contains("Saved unit 1: accepted as extracted."));
@@ -4525,7 +4531,7 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                "DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;
@@ -5153,75 +5159,614 @@ async fn material_refused_unit_save_shows_error_beside_unit_summary_and_focus_ta
     assert!(include_str!("../../assets/source-review.js").contains("[data-save-error]"));
 }
 
+/// The fields a browser would submit for the form matching `selector` (hidden inputs and
+/// textareas; the button is not a named field).
+fn form_fields(html: &str, selector: &str) -> Vec<(String, String)> {
+    let parsed = scraper::Html::parse_document(html);
+    let form = parsed
+        .select(&scraper::Selector::parse(selector).unwrap())
+        .next()
+        .unwrap_or_else(|| panic!("no form {selector}"));
+    let fields = scraper::Selector::parse("input[name], textarea[name]").unwrap();
+    form.select(&fields)
+        .map(|field| {
+            let name = field.value().attr("name").unwrap().to_owned();
+            let value = if field.value().name() == "textarea" {
+                field.text().collect::<String>()
+            } else {
+                field.value().attr("value").unwrap_or_default().to_owned()
+            };
+            (name, value)
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn material_unit_form_shows_only_the_fields_each_decision_needs() {
+async fn material_card_has_three_forms_that_post_without_script() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
     seed(&store).await;
     let app = crate::auth::app(store.clone()).await.unwrap();
     let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
     let parsed = scraper::Html::parse_document(&html);
-    let select = |css: &str| scraper::Selector::parse(css).unwrap();
-    let form = parsed
-        .select(&select("#unit-1 form[data-form=unit]"))
-        .next()
-        .unwrap();
-    // One dropdown, on the heading row, tied to the form by id; no radios.
-    assert!(
-        form.select(&select("input[type=radio]")).next().is_none(),
-        "no radios any more"
-    );
-    let form_id = form.value().attr("id").expect("the form has an id");
-    let dropdown = parsed
-        .select(&select("#unit-1 .unit-head select[name=state]"))
-        .next()
-        .expect("the decision dropdown is on the heading row");
-    assert_eq!(dropdown.value().attr("form"), Some(form_id));
-    assert!(dropdown.value().attr("required").is_some());
-    let values: Vec<_> = dropdown
-        .select(&select("option"))
-        .map(|r| r.value().attr("value").unwrap())
+    let forms: Vec<_> = parsed
+        .select(&css("#unit-1 form[data-form=unit]"))
         .collect();
-    assert_eq!(values, ["", "accepted", "corrected", "rejected"]);
-    assert_eq!(parsed.select(&select("#unit-1 select")).count(), 1);
-    // Accepted has no field of its own: both text fields live in containers that only
-    // `corrected` / `rejected` reveal, and the rationale label says SRC-4 requires it.
-    assert!(
-        form.select(&select(
-            "[data-decision-fields=corrected] textarea[name=correction]"
-        ))
-        .next()
-        .is_some()
+    assert_eq!(forms.len(), 3, "Accept, Correct and Reject");
+    assert_eq!(
+        parsed.select(&css("#unit-1 select")).count(),
+        0,
+        "no dropdown"
+    );
+    // Each form has its own CSRF, revision and a fixed hidden decision.
+    let states: Vec<_> = forms
+        .iter()
+        .map(|form| {
+            assert_eq!(form.select(&css("input[name=csrf]")).count(), 1);
+            assert_eq!(form.select(&css("input[name=revision]")).count(), 1);
+            let state = form
+                .select(&css("input[type=hidden][name=state]"))
+                .next()
+                .unwrap();
+            state.value().attr("value").unwrap()
+        })
+        .collect();
+    assert_eq!(states, ["accepted", "corrected", "rejected"]);
+    // Correct and Reject live in closed disclosures; Accept is a plain button.
+    assert_eq!(
+        parsed
+            .select(&css(
+                "#unit-1 details.decision-details form[data-form=unit]"
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        parsed
+            .select(&css("#unit-1 details.decision-details[open]"))
+            .count(),
+        0
     );
     assert!(
-        form.select(&select(
-            "[data-decision-fields~=rejected] textarea[name=rationale]"
-        ))
-        .next()
-        .is_some()
+        parsed
+            .select(&css("#unit-1 form.accept-form button[data-accept-unit]"))
+            .next()
+            .is_some()
     );
-    assert_eq!(form.select(&select("textarea")).count(), 2);
-    assert!(form.html().contains("SRC-4"));
-    assert!(
-        !form.select(&select("textarea[required]")).any(|_| true),
-        "hidden fields must not block submit"
+    // The Accept form sends empty correction and rationale.
+    let accept = form_fields(&html, "#unit-1 form.accept-form");
+    assert!(accept.contains(&("correction".into(), String::new())));
+    assert!(accept.contains(&("rationale".into(), String::new())));
+    // Each form posts as the browser would send it, and stores its own decision.
+    for (unit, selector, extra, state) in [
+        (1, "#unit-1 form.accept-form", vec![], "accepted"),
+        (
+            2,
+            "#unit-2 details[data-decision=corrected] form",
+            vec![("rationale", "checked")],
+            "corrected",
+        ),
+        (
+            3,
+            "#unit-3 details[data-decision=rejected] form",
+            vec![("rationale", "not evidence")],
+            "rejected",
+        ),
+    ] {
+        let mut fields = form_fields(&html, selector);
+        for (name, value) in extra {
+            fields.iter_mut().find(|field| field.0 == name).unwrap().1 = value.into();
+        }
+        let response = document_at(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/units/{unit}"),
+            fields,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{state}");
+    }
+    let stored: Vec<(String, String, String)> = store
+        .run(|db| {
+            Ok(db
+                .prepare(
+                    "SELECT state,correction,rationale FROM source_review_events ORDER BY unit_id",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        stored,
+        [
+            ("accepted".into(), String::new(), String::new()),
+            ("corrected".into(), "Fixture".into(), "checked".into()),
+            ("rejected".into(), String::new(), "not evidence".into()),
+        ]
     );
-    // Without script every field shows (nothing is hidden by the sheet); the script hides the
-    // fields the chosen decision does not use.
-    let css = include_str!("../../assets/app.css");
-    assert!(!css.contains(".decision-fields { display: none; }"));
-    assert!(!css.contains(":checked ~ .fields-"));
-    let js = include_str!("../../assets/source-review.js");
-    assert!(js.contains("data-decision-fields") && js.contains("select[name=state]"));
 }
 
 #[tokio::test]
-async fn material_unused_decision_fields_are_ignored_and_a_corrected_unit_preselects() {
+async fn material_unchanged_prefilled_correction_is_saved_as_before() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
     seed(&store).await;
     let app = crate::auth::app(store.clone()).await.unwrap();
-    let select = |css: &str| scraper::Selector::parse(css).unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    // The prefill is the extracted text; posting it back unchanged is not refused.
+    assert_eq!(
+        field_value(
+            &html,
+            "#unit-1 details[data-decision=corrected] textarea[name=correction]"
+        )
+        .trim(),
+        "Fixture"
+    );
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        review_form(&[
+            ("revision", "1"),
+            ("state", "corrected"),
+            ("correction", "Fixture"),
+            ("rationale", "Checked, no change"),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn material_error_card_carries_the_submitted_revision_on_all_three_forms() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    // A stale revision is refused; the stored revision is 1.
+    for (state, open) in [
+        ("corrected", "corrected"),
+        ("rejected", "rejected"),
+        ("accepted", ""),
+    ] {
+        let response = document_at(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/units/1",
+            review_form(&[
+                ("revision", "0"),
+                ("state", state),
+                ("correction", "<draft text>"),
+                ("rationale", "<draft rationale>"),
+            ]),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{state}");
+        let html = body(response).await;
+        let parsed = scraper::Html::parse_document(&html);
+        for form in parsed.select(&css("#unit-1 form[data-form=unit]")) {
+            let revision = form.select(&css("input[name=revision]")).next().unwrap();
+            assert_eq!(revision.value().attr("value"), Some("0"), "{state}");
+        }
+        let opened: Vec<_> = parsed
+            .select(&css("#unit-1 details[open].decision-details"))
+            .map(|node| node.value().attr("data-decision").unwrap())
+            .collect();
+        assert_eq!(opened.join(","), open, "{state}");
+        // Other cards keep their stored revision.
+        let other = parsed
+            .select(&css("#unit-2 input[name=revision]"))
+            .next()
+            .unwrap();
+        assert_eq!(other.value().attr("value"), Some("1"));
+        if state == "corrected" {
+            assert_eq!(
+                field_value(
+                    &html,
+                    "#unit-1 details[data-decision=corrected] textarea[name=correction]"
+                )
+                .trim(),
+                "<draft text>"
+            );
+        }
+    }
+    // A missing rationale marks only the submitted decision's fields.
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        review_form(&[
+            ("revision", "1"),
+            ("state", "rejected"),
+            ("correction", ""),
+            ("rationale", " "),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let parsed = scraper::Html::parse_document(&body(response).await);
+    assert_eq!(
+        parsed
+            .select(&css("#unit-1 textarea[aria-invalid=true]"))
+            .count(),
+        1
+    );
+    assert!(
+        parsed
+            .select(&css(
+                "#unit-1 details[data-decision=rejected] textarea[aria-invalid=true]"
+            ))
+            .next()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn material_forged_state_error_shows_at_card_level() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1",
+        review_form(&[
+            ("revision", "1"),
+            ("state", "approved"),
+            ("correction", ""),
+            ("rationale", ""),
+        ]),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(html.contains("Submitted invalid decision: approved."));
+    assert!(
+        parsed
+            .select(&css("#unit-1 > [data-forged-state]"))
+            .next()
+            .is_some()
+    );
+    assert!(
+        parsed
+            .select(&css("#unit-1 details [data-forged-state]"))
+            .next()
+            .is_none()
+    );
+    assert!(
+        parsed
+            .select(&css("#unit-1 details[open].decision-details"))
+            .next()
+            .is_none()
+    );
+    assert!(html.contains("Your submitted text was put in the Correct… form."));
+    // The card's header keeps the stored state, not the forged one.
+    assert!(
+        parsed
+            .select(&css("#unit-1 .badge.state-unreviewed"))
+            .next()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn material_prefill_bytes_are_reserved_and_only_the_correct_form_is_omitted() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            db.execute(
+                "UPDATE source_units SET raw_text=?1",
+                [&"\"".repeat(60_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let screen = store
+        .material_screen(auth[0].clone(), 1, (1..=50).collect(), 0)
+        .await
+        .unwrap();
+    assert!(
+        !screen.cards[0].form_omitted,
+        "the first card is never omitted"
+    );
+    assert!(
+        screen.cards.iter().any(|card| card.form_omitted),
+        "60,000 escaped quotes per card must exhaust the 2 MB budget"
+    );
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let bytes: usize = parsed
+        .select(&css(
+            "#review-list pre.evidence-text, [data-form=unit] textarea",
+        ))
+        .map(|node| node.html().len())
+        .sum();
+    assert!(bytes <= 2 * 1024 * 1024, "prefilled sections: {bytes}");
+    let omitted = screen
+        .cards
+        .iter()
+        .find(|card| card.form_omitted)
+        .unwrap()
+        .unit;
+    let card = format!("#unit-{omitted}");
+    assert_eq!(
+        parsed
+            .select(&css(&format!("{card} textarea[name=correction]")))
+            .count(),
+        0
+    );
+    assert!(
+        parsed
+            .select(&css(&format!("{card} form.accept-form")))
+            .next()
+            .is_some()
+    );
+    assert!(
+        parsed
+            .select(&css(&format!(
+                "{card} details[data-decision=rejected] form"
+            )))
+            .next()
+            .is_some()
+    );
+    assert!(html.contains(&format!("Open the full decision form for unit {omitted}")));
+    assert!(
+        parsed
+            .select(&css("#unit-1 textarea[name=correction]"))
+            .next()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn material_region_editor_uses_a_scoped_selection_hook() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let js = include_str!("../../assets/source-regions.js");
+    assert!(js.contains("[data-region-selected]"));
+    assert!(
+        !js.contains("querySelector('input[type=\"checkbox\"]')"),
+        "the first checkbox in the root is a card's table tick"
+    );
+    // The upload editor's checkbox carries the hook; the review page's table ticks do not.
+    assert!(include_str!("../../templates/upload_exclusion.html").contains("data-region-selected"));
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(
+        parsed
+            .select(&css("[data-region-editor] input[type=checkbox]"))
+            .next()
+            .is_some()
+    );
+    assert_eq!(parsed.select(&css("[data-region-selected]")).count(), 0);
+    // "Add missing text" stays inside the editor root.
+    assert!(
+        parsed
+            .select(&css("[data-region-editor] details.page-task #add-text"))
+            .next()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn material_reduced_screen_keeps_the_first_cards_three_forms_and_no_progress() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    store
+        .force_read_deadline("screen", std::time::Duration::ZERO)
+        .await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(html.contains("Screen read deadline reached"), "{html}");
+    let parsed = scraper::Html::parse_document(&html);
+    assert!(parsed.select(&css("#review-progress")).next().is_none());
+    assert_eq!(
+        parsed.select(&css("#unit-1 form[data-form=unit]")).count(),
+        3
+    );
+    assert_eq!(
+        parsed.select(&css("#unit-2 form[data-form=unit]")).count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn material_header_progress_details_and_page_tasks() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let progress: String = parsed
+        .select(&css("#review-progress"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert!(progress.contains("0 of 51 units reviewed"), "{progress}");
+    assert!(!html.contains("Not evidence yet."));
+    // The details disclosure holds the crop, identifier, coordinates, revision.
+    let details = parsed
+        .select(&css("#unit-1 details.unit-details"))
+        .next()
+        .unwrap();
+    assert!(
+        details
+            .select(&css("figure.source-region img[loading=lazy]"))
+            .next()
+            .is_some()
+    );
+    let text: String = details.text().collect();
+    assert!(text.contains("unit-1") && text.contains("Stored unit revision 1"));
+    assert_eq!(
+        parsed
+            .select(&css("#unit-1 details.unit-details[open]"))
+            .count(),
+        0
+    );
+    // Page tasks are disclosures; completeness is closed while units remain.
+    assert_eq!(parsed.select(&css("details.page-task")).count(), 6);
+    assert!(
+        parsed
+            .select(&css("details.page-task[open] #complete"))
+            .next()
+            .is_none()
+    );
+    // Every unit reviewed: completeness opens and the progress says so.
+    accept_all_but_first(&store, &auth[0]).await;
+    store
+        .material_review_unit(
+            auth[0].clone(),
+            auth[0].csrf_fixture(),
+            1,
+            1,
+            crate::sources::UnitReview {
+                revision: 1,
+                state: "accepted".into(),
+                correction: String::new(),
+                actor: String::new(),
+                rationale: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    let parsed = scraper::Html::parse_document(&html);
+    let progress: String = parsed
+        .select(&css("#review-progress"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert!(progress.contains("51 of 51 units reviewed"), "{progress}");
+    assert!(
+        parsed
+            .select(&css("details.page-task[open] #complete"))
+            .next()
+            .is_some()
+    );
+    assert!(
+        parsed
+            .select(&css("details.page-task[open] #add-text"))
+            .next()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn material_keyboard_help_names_the_accept_button() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
+    assert!(
+        html.contains("a focuses the current card&#39;s Accept button and never submits")
+            || html.contains("a focuses the current card's Accept button and never submits")
+    );
+    assert!(!html.contains("focuses an acceptance rationale"));
+    let js = include_str!("../../assets/source-review.js");
+    assert!(js.contains("[data-accept-unit]") && !js.contains("data-accept-rationale"));
+    assert!(
+        !js.contains("select[name=state]"),
+        "the dropdown script is gone"
+    );
+    // The suggestion accept form keeps its rationale field reachable by Tab.
+    let parsed = scraper::Html::parse_document(&html);
+    let field = parsed
+        .select(&css("#unit-1 textarea[data-accept-rationale]"))
+        .next()
+        .unwrap();
+    assert!(field.value().attr("tabindex").is_none());
+    // j / k work from the Accept button; a same-page link into a closed disclosure opens it.
+    assert!(js.contains("onAccept") && js.contains("a[href*=\"#\"]"));
+}
+
+#[tokio::test]
+async fn material_oversized_extracted_text_is_not_prefilled_and_the_page_renders() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            db.execute(
+                "UPDATE source_units SET raw_text=?1 WHERE id=1",
+                [&"x".repeat(70_000)],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let response = router_get(&app, &auth[0], "/admin/materials/pages/1").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    let parsed = scraper::Html::parse_document(&html);
+    assert_eq!(
+        field_value(
+            &html,
+            "#unit-1 details[data-decision=corrected] textarea[name=correction]"
+        )
+        .trim(),
+        ""
+    );
+    assert!(html.contains("too long to prefill"));
+    assert_eq!(
+        parsed.select(&css("#unit-1 form[data-form=unit]")).count(),
+        3
+    );
+    assert!(
+        !parsed
+            .select(&css("#unit-2"))
+            .next()
+            .unwrap()
+            .html()
+            .contains("too long to prefill")
+    );
+}
+
+#[tokio::test]
+async fn material_ordinary_prose_keeps_every_correct_form() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let prose = "Il veleno è <forte> & l'antidoto \"raro\". ".repeat(28);
+    store
+        .run(move |db| {
+            db.execute("UPDATE source_units SET raw_text=?1", [&prose])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let screen = store
+        .material_screen(auth[0].clone(), 1, (1..=50).collect(), 0)
+        .await
+        .unwrap();
+    assert_eq!(screen.cards.len(), 50);
+    assert!(screen.cards.iter().all(|card| !card.form_omitted));
+}
+
+#[tokio::test]
+async fn material_unused_decision_fields_are_ignored_and_a_corrected_unit_prefills() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
     // Fields that the chosen decision does not use are ignored, not refused or stored.
     for (state, unit) in [("accepted", 1), ("rejected", 2)] {
         let response = document_at(
@@ -5260,7 +5805,7 @@ async fn material_unused_decision_fields_are_ignored_and_a_corrected_unit_presel
             )
         ]
     );
-    // A corrected unit pre-selects its option on the next view.
+    // A corrected unit's Correct form is prefilled with the stored correction on the next view.
     let response = document_at(
         &app,
         &auth[0],
@@ -5275,11 +5820,22 @@ async fn material_unused_decision_fields_are_ignored_and_a_corrected_unit_presel
     .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let html = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=2").await).await;
-    assert!(
-        scraper::Html::parse_document(&html)
-            .select(&select("#unit-3 option[value=corrected][selected]"))
-            .next()
-            .is_some()
+    assert_eq!(
+        field_value(
+            &html,
+            "#unit-3 form[data-form=unit] textarea[name=correction]"
+        )
+        .trim(),
+        "fixed"
+    );
+    assert_eq!(
+        field_value(
+            &html,
+            "#unit-4 form[data-form=unit] textarea[name=correction]"
+        )
+        .trim(),
+        "Fixture",
+        "an undecided unit is prefilled with its extracted text"
     );
 }
 
@@ -5350,7 +5906,8 @@ async fn material_table_history_notice_reselect_and_accepted_lookup_end_to_end()
         )
         .await
         .unwrap();
-    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1?units=50").await).await;
+    // The table sits at its anchor (unit 1), inside the first card window.
+    let page = body(router_get(&app, &auth[0], "/admin/materials/pages/1").await).await;
     let lookup = field_value(&page, &format!("pre[data-lookup-unit='{unit}']"));
     assert!(
         lookup.contains("Sword") && lookup.contains("d6"),
@@ -5504,13 +6061,23 @@ async fn material_create_table_bar_and_no_script_buttons() {
     assert_eq!(buttons, 2, "one before and one after the cards");
     let after = parsed.select(&css("button[form=table-select]")).count();
     assert!(after >= 1, "the trailing button targets the selection form");
-    // Each card says what the tick does.
-    assert!(
-        parsed
-            .select(&css("#unit-1 .select-unit .tick-hint"))
-            .next()
-            .is_some()
-    );
+    // The card's tick is a short "Select" label; the toolbar explains it once.
+    assert_eq!(parsed.select(&css(".tick-hint")).count(), 0);
+    let label: String = parsed
+        .select(&css("#unit-1 .select-unit label"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert!(label.starts_with("Select") && label.contains("unit 1 for a table or a merge"));
+    let toolbar: String = parsed
+        .select(&css("form#table-select"))
+        .next()
+        .unwrap()
+        .text()
+        .collect();
+    assert!(toolbar.contains("Ticking only selects"));
+    assert_eq!(toolbar.matches("Ticking only selects").count(), 1);
     // The GET contract is unchanged.
     let form = parsed.select(&css("form#table-select")).next().unwrap();
     assert_eq!(form.value().attr("method"), Some("get"));
@@ -5558,7 +6125,7 @@ async fn material_re_decided_unit_stays_while_first_decisions_advance() {
     .await;
     assert_eq!(
         location(&response),
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit#unit-2"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=2&then=unit&show=all#unit-2"
     );
     // Correcting the accepted unit stays on that unit.
     let response = document_at(
@@ -5577,7 +6144,7 @@ async fn material_re_decided_unit_stays_while_first_decisions_advance() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=corrected&saved_unit=1&to=1&then=stay#unit-1"
+        "/admin/materials/pages/1?saved=corrected&saved_unit=1&to=1&then=stay&show=all#unit-1"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(
@@ -5622,7 +6189,7 @@ async fn material_re_decided_unit_stays_while_first_decisions_advance() {
     .await;
     assert_eq!(
         location(&response),
-        "/admin/materials/pages/1?units=50&saved=rejected&saved_unit=51&to=51&then=stay#unit-51"
+        "/admin/materials/pages/1?units=50&saved=rejected&saved_unit=51&to=51&then=stay&show=all#unit-51"
     );
 }
 
@@ -5682,10 +6249,10 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
         .map(|a| a.value().attr("href").unwrap())
         .collect();
     assert_eq!(links.len(), 50);
-    assert_eq!(links[0], "/admin/materials/pages/1#unit-2");
+    assert_eq!(links[0], "/admin/materials/pages/1?unit=2#unit-2");
     assert_eq!(
         *links.last().unwrap(),
-        "/admin/materials/pages/1?units=50#unit-51"
+        "/admin/materials/pages/1?units=50&unit=51#unit-51"
     );
     // Units outside the default card window link with their window cursor.
     // Page 3 has no unreviewed unit left and is not listed; the foreign source never appears.
@@ -5701,7 +6268,7 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
             .select(&css("a[data-more-link]"))
             .next()
             .and_then(|a| a.value().attr("href")),
-        Some("/admin/materials/pages/2?units=100#unit-2101")
+        Some("/admin/materials/pages/2?units=100&unit=2101#unit-2101")
     );
     // Unit text is escaped.
     assert!(!html.contains("<b>"));
@@ -6286,3 +6853,331 @@ async fn material_fresh_page_trims_a_label_list_from_the_prose_after_it() {
     assert_eq!(found[0].units, [3, 4, 5, 6]);
     assert_eq!(found[0].shape, crate::sources::shapes::Shape::Label);
 }
+
+// ---- Table form: original-page references (crop of the combined area, whole page outlined) ----
+
+/// A grey RGB page image at one pixel per PDF point (the fixture page is 200 by 300 points).
+fn grey_page_png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 200, 300);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&vec![128; 200 * 300 * 3])
+            .unwrap();
+    }
+    bytes
+}
+
+async fn png_size(response: axum::response::Response) -> (u32, u32) {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    let reader = png::Decoder::new(std::io::Cursor::new(bytes.to_vec()))
+        .read_info()
+        .unwrap();
+    (reader.info().width, reader.info().height)
+}
+
+/// The table fixture with a second page (unit 900) in the same finalized source.
+async fn two_page_table_fixture(
+    extra: &'static str,
+) -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    sized_two_page_fixture(
+        extra,
+        BOX1,
+        (serde_json::json!(200), serde_json::json!(300)),
+    )
+    .await
+}
+
+/// [`two_page_table_fixture`] with the first unit's box and the first page's size given.
+async fn sized_two_page_fixture(
+    extra: &'static str,
+    box1: &'static str,
+    (width, height): (serde_json::Value, serde_json::Value),
+) -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
+    let (dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    let image = grey_page_png();
+    store
+        .run(move |db| {
+            db.execute_batch(PAGE_TWO)?;
+            db.execute_batch(extra)?;
+            db.execute("UPDATE source_pages SET png=?1 WHERE id=1", [image])?;
+            for (id, polygon) in [(1, box1), (2, BOX2)] {
+                db.execute("UPDATE source_units SET polygon=?1 WHERE id=?2", params![polygon, id])?;
+            }
+            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":width,"height_points":height},{"pdf_page":2,"width_points":200,"height_points":300}]});
+            db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64), serde_json::to_vec(&prepared)?])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)", ["c".repeat(64)])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(2,1,?1)", ["d".repeat(64)])?;
+            db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)", params!["a".repeat(64), "b".repeat(64)])?;
+            crate::sources::documents::register_import(db, 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    (dir, store, auth)
+}
+
+#[tokio::test]
+async fn material_table_image_crops_the_combined_area_for_the_owner_only() {
+    use tower::ServiceExt;
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = two_page_table_fixture("").await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let url = "/admin/materials/pages/1/selection/image";
+    // BOX1 is 40x90 and BOX2 60x70 starting at (60,20): the union is x 10..120, y 10..100.
+    assert_eq!(
+        png_size(router_get(&app, &auth[0], &format!("{url}?unit=1&unit=2")).await).await,
+        (110, 90)
+    );
+    assert_eq!(
+        png_size(router_get(&app, &auth[0], &format!("{url}?unit=2&unit=1&shape=roll")).await)
+            .await,
+        (110, 90)
+    );
+    let unit_route = "/admin/materials/pages/1/units/1/image";
+    assert_eq!(
+        png_size(router_get(&app, &auth[0], &format!("{url}?unit=1")).await).await,
+        png_size(router_get(&app, &auth[0], unit_route).await).await
+    );
+    // A non-owner and a signed-out request are refused as the unit image route refuses them.
+    assert_eq!(
+        router_get(&app, &auth[1], &format!("{url}?unit=1"))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        router_get(&app, &auth[1], unit_route).await.status(),
+        StatusCode::FORBIDDEN
+    );
+    let anonymous = |path: String| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .header("host", "127.0.0.1:3000")
+                    .header("accept", "text/html")
+                    .header("sec-fetch-mode", "navigate")
+                    .header("sec-fetch-dest", "document")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+    let signed_out = anonymous(unit_route.to_owned()).await;
+    assert_ne!(signed_out, StatusCode::OK);
+    assert_eq!(anonymous(format!("{url}?unit=1")).await, signed_out);
+    // Refused like the table form: no units, repeats, malformed ids, extra fields, too many.
+    let many: Vec<String> = (1..=201).map(|u| format!("unit={u}")).collect();
+    for (query, status) in [
+        (String::new(), StatusCode::UNPROCESSABLE_ENTITY),
+        ("?unit=x".to_owned(), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            "?unit=1&unit=1".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "?unit=1&other=1".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("?unit=1&unit=900".to_owned(), StatusCode::FORBIDDEN),
+        ("?unit=9999".to_owned(), StatusCode::FORBIDDEN),
+        (
+            format!("?{}", many.join("&")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let form = router_get(
+            &app,
+            &auth[0],
+            &format!("/admin/materials/pages/1/tables/new{query}"),
+        )
+        .await
+        .status();
+        let image = router_get(&app, &auth[0], &format!("{url}{query}"))
+            .await
+            .status();
+        assert_eq!(image, status, "{query:.40}");
+        assert_eq!(image, form, "{query:.40}");
+    }
+}
+
+#[tokio::test]
+async fn material_table_form_shows_the_original_references_only_with_units() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = table_fixture_with(SHAPE_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let references = |html: &str| {
+        let parsed = scraper::Html::parse_document(html);
+        let select = |css: &str| {
+            parsed
+                .select(&scraper::Selector::parse(css).unwrap())
+                .map(|e| {
+                    (
+                        e.value().attr("src").map(str::to_owned),
+                        e.value().attr("data-outline-unit").map(str::to_owned),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        (
+            select("aside.table-reference figure img"),
+            select("details#table-page-reference img"),
+            select("details#table-page-reference svg polygon"),
+        )
+    };
+    let check = |html: &str| {
+        // The URL is HTML-escaped in the page and decodes to the plain query.
+        assert!(!html.contains("image?unit=1&unit=2"), "{html}");
+        assert!(html.contains("Open full-size crop"));
+        assert!(html.contains("alt=\"Original PDF page 1, area of the selected units\""));
+        let (crop, whole, outlines) = references(html);
+        assert_eq!(crop.len(), 1);
+        assert_eq!(
+            crop[0].0.as_deref(),
+            Some("/admin/materials/pages/1/selection/image?unit=1&unit=2")
+        );
+        assert_eq!(
+            whole[0].0.as_deref(),
+            Some("/admin/materials/pages/1/image")
+        );
+        let units: Vec<_> = outlines.iter().map(|o| o.1.clone().unwrap()).collect();
+        assert_eq!(units.len(), 2);
+        assert!(units.contains(&"1".to_owned()) && units.contains(&"2".to_owned()));
+        assert!(
+            html.contains("points=\"10,10 50,10 50,100 10,100\""),
+            "{html}"
+        );
+    };
+    let html = body(
+        router_get(
+            &app,
+            &auth[0],
+            "/admin/materials/pages/1/tables/new?unit=2&unit=1",
+        )
+        .await,
+    )
+    .await;
+    check(&html);
+    // A refused save keeps the references (and the typed cells).
+    let refused = table_post(&app, &auth[0], table_fields(&["1:1", "2:1"], "a | b", "")).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
+    check(&html);
+    // No units: no images.
+    for query in ["", "?unit=x"] {
+        let html = body(
+            router_get(
+                &app,
+                &auth[0],
+                &format!("/admin/materials/pages/1/tables/new{query}"),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            !html.contains("<img") && !html.contains("selection/image"),
+            "{html}"
+        );
+        assert!(!html.contains("table-page-reference"));
+    }
+}
+
+#[tokio::test]
+async fn material_table_image_of_a_union_past_the_page_edge_is_clamped() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // Unit 3 hangs over the page's right and bottom edges (the page is 200 by 300 points).
+    let (_dir, store, auth) = two_page_table_fixture(
+        "UPDATE source_units SET polygon='[[150,250],[260,250],[260,350],[150,350]]' WHERE id=3;",
+    )
+    .await;
+    let app = crate::auth::app(store).await.unwrap();
+    assert_eq!(
+        png_size(
+            router_get(
+                &app,
+                &auth[0],
+                "/admin/materials/pages/1/selection/image?unit=3"
+            )
+            .await
+        )
+        .await,
+        (50, 50)
+    );
+}
+
+#[tokio::test]
+async fn material_table_form_without_a_usable_reference_shows_no_images() {
+    let _lock = crate::auth::test_resource_lock().await;
+    // A refused save whose notes cannot be recomputed (201 units): the cells stay, and no
+    // reference shows "page 0" or a crop that cannot load.
+    let (_dir, store, auth) = table_fixture_with(SHAPE_UNITS).await;
+    let app = crate::auth::app(store.clone()).await.unwrap();
+    let many: Vec<String> = (1..=201).map(|u| format!("{u}:1")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let refused = table_post(&app, &auth[0], table_fields(&refs, "a | b", "checked")).await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let html = body(refused).await;
+    assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
+    assert!(
+        !html.contains("page 0") && !html.contains("selection/image") && !html.contains("<img"),
+        "{html}"
+    );
+    assert!(!html.contains("table-page-reference"));
+    // A page without usable geometry (width outside the accepted range): no crop, no outlines.
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    store
+        .run(|db| {
+            for (id, polygon) in [(1, BOX1), (2, BOX2)] {
+                db.execute("UPDATE source_units SET polygon=?1 WHERE id=?2", params![polygon, id])?;
+            }
+            let prepared = serde_json::json!({"contract_version":1,"extraction_sha256":"b".repeat(64),"pages":[{"pdf_page":1,"width_points":5000,"height_points":300}]});
+            db.execute("UPDATE sources SET bundle_hash=?1,prepared_json=?2 WHERE id=1", params!["a".repeat(64), serde_json::to_vec(&prepared)?])?;
+            db.execute("INSERT INTO source_page_hashes VALUES(1,1,?1)", ["c".repeat(64)])?;
+            db.execute("INSERT INTO source_finalizations VALUES(1,?1,?2)", params!["a".repeat(64), "b".repeat(64)])?;
+            crate::sources::documents::register_import(db, 1)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = crate::auth::app(store).await.unwrap();
+    let response = router_get(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/tables/new?unit=1&unit=2",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body(response).await;
+    assert!(field_value(&html, "textarea[name=cells]").contains('|'));
+    assert!(
+        !html.contains("selection/image")
+            && !html.contains("<img")
+            && !html.contains("table-page-reference"),
+        "{html}"
+    );
+}
+
+#[path = "merge_tests.rs"]
+mod merge_tests;
+
+#[path = "split_tests.rs"]
+mod split_tests;
+
+#[path = "agreement_screen_tests.rs"]
+mod agreement_screen_tests;

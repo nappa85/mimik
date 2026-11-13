@@ -20,9 +20,14 @@ pub(crate) enum ReviewNext {
     Unknown,
 }
 
-// Extracted rows retain bundle insertion order. Merge owners precede their first
-// target; other owner units sort last. Cursors are ordinals in this stable order.
-pub(super) const ORDERED_UNITS: &str = "WITH ordered AS (SELECT u.*,row_number() OVER (ORDER BY CASE WHEN u.origin='extracted' THEN u.id ELSE coalesce((SELECT min(json_extract(t.value,'$.unit')) FROM source_suggestion_applications a JOIN source_suggestions s ON s.id=a.suggestion_id,json_each(s.targets,'$.targets') t WHERE a.owner_unit_id=u.id AND s.kind='merge'),9223372036854775807) END,CASE u.origin WHEN 'owner' THEN 0 ELSE 1 END,u.id) position FROM source_units u WHERE u.page_id=?1)";
+// Reading order is the TEXT sort key of `unit_sort_key!` (extracted id, replacement anchor,
+// merge-suggestion first target, else the end), then owner before extracted, then id. Cursors
+// are ordinals in this stable order.
+pub(super) const ORDERED_UNITS: &str = concat!(
+    "WITH ordered AS (SELECT u.*,row_number() OVER (ORDER BY ",
+    unit_sort_key!("u"),
+    ",CASE u.origin WHEN 'owner' THEN 0 ELSE 1 END,u.id) position FROM source_units u WHERE u.page_id=?1)"
+);
 
 pub(super) const LOOKUP_TEXT: &str = "CASE u.state WHEN 'accepted' THEN coalesce(t.search_text,'') WHEN 'corrected' THEN u.correction WHEN 'unreviewed' THEN coalesce(t.search_text,'') ELSE '' END";
 
@@ -47,6 +52,14 @@ pub(crate) struct Material {
     pub imported: i64,
     pub complete: i64,
     pub finalized: bool,
+}
+/// Which units a card window lists (the review screen's tab).
+pub(crate) enum WindowFilter {
+    All,
+    /// Units already decided.
+    Reviewed,
+    /// Exactly these unit ids.
+    Ids(Vec<i64>),
 }
 pub(crate) struct MaterialPage {
     pub page: PageView,
@@ -104,11 +117,14 @@ impl ReviewUnit {
     pub(crate) fn link(&self, page: i64) -> String {
         if self.cursor > 0 {
             format!(
-                "/admin/materials/pages/{page}?units={}#unit-{}",
-                self.cursor, self.id
+                "/admin/materials/pages/{page}?units={}&unit={}#unit-{}",
+                self.cursor, self.id, self.id
             )
         } else {
-            format!("/admin/materials/pages/{page}#unit-{}", self.id)
+            format!(
+                "/admin/materials/pages/{page}?unit={}#unit-{}",
+                self.id, self.id
+            )
         }
     }
 }
@@ -177,6 +193,19 @@ impl Store {
         .await
     }
 
+    /// The page cropped to the area a table or merge over `units` would cover: a reference image, the
+    /// same crop code and input bounds as one unit's region. Nothing is stored.
+    pub(crate) async fn material_selection_region_data(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        units: Vec<i64>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<super::region::RegionInput, AppError> {
+        check_table_units(&units)?;
+        self.table_region_data(auth, page, units, permit).await
+    }
+
     /// The draft grid for the selected units, read as `shape` or, without one, as the best
     /// fitting shape (corrected text where a unit was corrected, the extraction otherwise).
     /// The draft is a suggestion for the editor; it records nothing.
@@ -187,48 +216,40 @@ impl Store {
         units: Vec<i64>,
         shape: Option<Shape>,
     ) -> Result<TablePrefill, AppError> {
-        if units.is_empty()
-            || units.len() > super::tables::MAX_TABLE_SOURCES
-            || units
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != units.len()
-        {
-            return Err(AppError::Invalid(
-                "Choose 1-200 different units for a table.",
-            ));
-        }
+        check_table_units(&units)?;
         self.run_bounded_auth(move |db| {
             let tx = db.transaction()?;
             auth.recheck_owner(&tx)?;
-            let revision: i64 = tx
-                .query_row("SELECT revision FROM source_pages WHERE id=?1", [page], |r| r.get(0))
+            let (revision, pdf_page): (i64, i64) = tx
+                .query_row("SELECT revision,pdf_page FROM source_pages WHERE id=?1", [page], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?
                 .ok_or(AppError::SourceNotFound)?;
             let sql = format!(
-                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END,{},state='corrected' FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
-                text("correction", 65_536),
+                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END,{},state='corrected',state='rejected' FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
+                text("correction", 80_000),
                 text("raw_text", 65_536),
                 text("polygon", 65_536)
-            );
-            let geometry_sql = format!(
-                "{ORDERED_UNITS} SELECT id,polygon,state FROM ordered ORDER BY position LIMIT {}",
-                GEOMETRY_LIMIT + 1
             );
             let mut rows = Vec::with_capacity(units.len());
             let mut boxes = Vec::new();
             let mut polygons = Vec::new();
+            let mut outlines = Vec::new();
             let mut any_corrected = false;
             let mut stored = None;
             let mut total = 0_usize;
             super::review::read_with_deadline(&tx, "table", || {
                 let mut query = tx.prepare(&sql)?;
                 let found = query.query_map(params![page, serde_json::to_string(&units)?], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?, read_text(r, 4)?, r.get::<_, bool>(5)?))
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?, read_text(r, 4)?, r.get::<_, bool>(5)?, r.get::<_, bool>(6)?))
                 })?;
                 for item in found {
-                    let (position, unit, unit_revision, text, polygon, corrected) = item?;
+                    let (position, unit, unit_revision, text, polygon, corrected, rejected) = item?;
+                    if rejected {
+                        return Err(AppError::Invalid("A selected unit is already rejected; select other units."));
+                    }
+                    if let Ok(quad) = serde_json::from_str::<[[f64; 2]; 4]>(&polygon) {
+                        outlines.push((unit, super::review::points(&quad)));
+                    }
                     polygons.push(polygon);
                     any_corrected |= corrected;
                     total += text.len();
@@ -253,17 +274,11 @@ impl Store {
                         |r| r.get::<_, Option<Vec<u8>>>(0),
                     )
                     .optional()?;
-                let mut query = tx.prepare(&geometry_sql)?;
-                let all = query.query_map([page], |r| {
-                    Ok((r.get::<_, i64>(0)?, read_text(r, 1)?, read_text(r, 2)?))
-                })?;
-                for item in all {
-                    let (unit, polygon, state) = item?;
-                    boxes.push((unit, polygon, state));
-                }
+                boxes = read_geometry(&tx, page)?;
                 Ok(())
             })?;
             rows.sort_unstable();
+            let page_size = usable_page_size(&tx, page)?;
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             let texts: Vec<&str> = rows.iter().map(|r| r.3.as_str()).collect();
@@ -273,6 +288,7 @@ impl Store {
             let (overlap_checked, overlaps) = overlap_check(&boxes, &units);
             Ok(TablePrefill {
                 page_revision: revision,
+                pdf_page,
                 units: rows.iter().map(|r| (r.1, r.2)).collect(),
                 grid: super::tables::format_grid(&chosen.rows),
                 header: chosen.header,
@@ -282,6 +298,230 @@ impl Store {
                 words: words_state,
                 overlap_checked,
                 overlaps,
+                outlines,
+                page_size,
+            })
+        })
+        .await
+    }
+
+    /// The prefill for merging `units`: their text in reading order (correction where corrected),
+    /// joined by newlines and bounded at 64 KiB, with the checks the form shows. Records nothing.
+    pub(crate) async fn material_merge_prefill(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        units: Vec<i64>,
+    ) -> Result<MergePrefill, AppError> {
+        check_merge_units(&units)?;
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let (revision, pdf_page): (i64, i64) = tx
+                .query_row("SELECT revision,pdf_page FROM source_pages WHERE id=?1", [page], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            let sql = format!(
+                "{ORDERED_UNITS} SELECT position,id,revision,CASE WHEN state='corrected' THEN {} ELSE {} END,{},state,kind FROM ordered WHERE id IN (SELECT value FROM json_each(?2))",
+                text("correction", 80_000),
+                text("raw_text", 65_536),
+                text("polygon", 65_536)
+            );
+            let mut rows = Vec::with_capacity(units.len());
+            let mut outlines = Vec::new();
+            let mut boxes = Vec::new();
+            super::review::read_with_deadline(&tx, "merge", || {
+                let mut query = tx.prepare(&sql)?;
+                let found = query.query_map(params![page, serde_json::to_string(&units)?], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, read_text(r, 3)?, read_text(r, 4)?, read_text(r, 5)?, read_text(r, 6)?))
+                })?;
+                for item in found {
+                    rows.push(item?);
+                }
+                if rows.len() != units.len() {
+                    return Err(AppError::SourceNotFound);
+                }
+                boxes = read_geometry(&tx, page)?;
+                Ok(())
+            })?;
+            rows.sort_unstable();
+            if rows.iter().any(|r| r.5 == "rejected") {
+                return Err(AppError::Invalid(
+                    "A selected unit is already rejected; select other units.",
+                ));
+            }
+            let page_size = usable_page_size(&tx, page)?;
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            let mut warnings = Vec::new();
+            let mut joined = String::new();
+            let mut cut = false;
+            for (index, (_, unit, _, text, polygon, _, kind)) in rows.iter().enumerate() {
+                if let Ok(quad) = serde_json::from_str::<[[f64; 2]; 4]>(polygon) {
+                    outlines.push((*unit, super::review::points(&quad)));
+                }
+                if kind == "Table" {
+                    warnings.push(format!("Unit {unit} is a table: its structure is lost and its cells become plain text in the merged unit."));
+                } else if text.trim().is_empty() {
+                    warnings.push(format!("Unit {unit} ({kind}) has no text to merge."));
+                }
+                if cut {
+                    continue;
+                }
+                let separator = usize::from(index > 0);
+                if joined.len() + separator > super::documents::MAX_MERGE_BYTES {
+                    // Not even the separator fits: push nothing.
+                    cut = true;
+                    continue;
+                }
+                let room = super::documents::MAX_MERGE_BYTES - joined.len() - separator;
+                if index > 0 {
+                    joined.push('\n');
+                }
+                if text.len() > room {
+                    joined.push_str(cut_at(text, room));
+                    cut = true;
+                } else {
+                    joined.push_str(text);
+                }
+            }
+            let (overlap_checked, overlaps) = overlap_check(&boxes, &units);
+            Ok(MergePrefill {
+                page_revision: revision,
+                pdf_page,
+                units: rows.iter().map(|r| (r.1, r.2)).collect(),
+                text: joined,
+                cut,
+                warnings: cap_problems(warnings),
+                overlaps,
+                overlap_checked,
+                page_size,
+                outlines,
+            })
+        })
+        .await
+    }
+
+    /// Merge selected units: one immediate transaction rechecks the Owner, CSRF, page revision and
+    /// every unit revision, adds the merged unit (corrected with the Owner's text) and rejects the
+    /// originals.
+    pub(crate) async fn material_create_merge(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        page: i64,
+        mut merge: super::OwnerMerge,
+    ) -> Result<(i64, Vec<i64>), AppError> {
+        merge.actor = format!("account:{}", auth.account_id());
+        super::documents::validate_merge(&merge)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let created = super::documents::add_owner_merge(&tx, page, &merge, |tx, event| {
+                    audit(tx, &auth, event)
+                })?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                tx.commit()?;
+                Ok(created)
+            })
+        })
+        .await
+    }
+
+    /// What the split form needs for `unit`: its text (correction where corrected, else the
+    /// extraction), revisions, box and the page size, and with `parts` the areas computed for
+    /// them. A rejected or non-text unit is refused. Records nothing.
+    pub(crate) async fn material_split_read(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        unit: i64,
+        parts: Option<Vec<String>>,
+    ) -> Result<SplitRead, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let (page_revision, pdf_page): (i64, i64) = tx
+                .query_row("SELECT revision,pdf_page FROM source_pages WHERE id=?1", [page], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            let sql = format!(
+                "SELECT revision,state,kind,CASE WHEN state='corrected' THEN {} ELSE {} END,{} FROM source_units WHERE id=?1 AND page_id=?2",
+                text("correction", 80_000),
+                text("raw_text", 65_536),
+                text("polygon", 65_536)
+            );
+            let (unit_revision, state, kind, whole, polygon) = super::review::read_with_deadline(&tx, "split", || {
+                tx.query_row(&sql, params![unit, page], |r| {
+                    Ok((r.get::<_, i64>(0)?, read_text(r, 1)?, read_text(r, 2)?, read_text(r, 3)?, read_text(r, 4)?))
+                })
+                .optional()?
+                .ok_or(AppError::SourceNotFound)
+            })?;
+            if state == "rejected" {
+                return Err(AppError::Invalid("This unit is already rejected; it cannot be split."));
+            }
+            if kind != "Text" {
+                return Err(AppError::Invalid("Only text units can be split."));
+            }
+            let page_size = usable_page_size(&tx, page)?;
+            let areas = match (&parts, page_size) {
+                (Some(parts), Some(_)) => {
+                    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+                    Some(super::documents::split_areas_for(&tx, page, &polygon, &refs)?)
+                }
+                _ => None,
+            };
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            let cut = whole.len() > super::documents::MAX_MERGE_BYTES;
+            let text = if cut { cut_at(&whole, super::documents::MAX_MERGE_BYTES).to_owned() } else { whole };
+            let crop = page_size.and_then(|size| {
+                let b = super::table_words::Region::parse(&polygon)?.bounds();
+                let b = [b[0].clamp(0.0, size.0), b[1].clamp(0.0, size.1), b[2].clamp(0.0, size.0), b[3].clamp(0.0, size.1)];
+                (b[0] < b[2] && b[1] < b[3]).then_some(b)
+            });
+            Ok(SplitRead {
+                page_revision,
+                unit_revision,
+                pdf_page,
+                has_marker: text.lines().any(super::documents::is_split_marker),
+                text,
+                cut,
+                page_size,
+                crop,
+                areas,
+            })
+        })
+        .await
+    }
+
+    /// Split a unit: one immediate transaction rechecks the Owner, CSRF, page revision and the
+    /// unit's revision, adds one corrected owner unit per part and rejects the unit.
+    pub(crate) async fn material_create_split(
+        &self,
+        auth: RequestAuth,
+        csrf: CsrfAdmission,
+        page: i64,
+        mut split: super::OwnerSplit,
+    ) -> Result<(Vec<i64>, Vec<i64>), AppError> {
+        split.actor = format!("account:{}", auth.account_id());
+        super::documents::validate_split(&split)?;
+        self.run_bounded_auth(move |db| {
+            with_domain_request(auth.clone(), || {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                let created = super::documents::add_owner_split(&tx, page, &split, |tx, event| {
+                    audit(tx, &auth, event)
+                })?;
+                auth.recheck_owner(&tx)?;
+                csrf.recheck_owner_write(&tx, &auth)?;
+                tx.commit()?;
+                Ok(created)
             })
         })
         .await
@@ -296,6 +536,19 @@ impl Store {
         auth: RequestAuth,
         page: i64,
     ) -> Result<std::sync::Arc<Vec<super::proposals::Proposal>>, AppError> {
+        Ok(self
+            .material_table_proposals_checked(auth, page)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// As [`Self::material_table_proposals`], but `None` when the read timed out, so a caller
+    /// that must not mistake "none found" for "not read" (the agreement) can tell.
+    pub(crate) async fn material_table_proposals_checked(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+    ) -> Result<Option<std::sync::Arc<Vec<super::proposals::Proposal>>>, AppError> {
         let cache = std::sync::Arc::clone(&self.2);
         let key = self
             .run_bounded_auth({
@@ -318,7 +571,7 @@ impl Store {
             })
             .await?;
         if let Some(found) = cache.get(key) {
-            return Ok(found);
+            return Ok(Some(found));
         }
         // The read: the units' boxes and (within a text budget) their text, and the stored words.
         let read = self
@@ -381,7 +634,7 @@ impl Store {
             .await?;
         let Some((units, stored)) = read else {
             // A timed-out read is not remembered, so the next view tries again.
-            return Ok(std::sync::Arc::default());
+            return Ok(None);
         };
         // The recognisers run outside the database closure.
         let found = tokio::task::spawn_blocking(move || {
@@ -392,7 +645,7 @@ impl Store {
         })
         .await
         .map_err(|_| AppError::Worker)?;
-        Ok(cache.put(key, found))
+        Ok(Some(cache.put(key, found)))
     }
 
     /// Create an owner table from selected units: one immediate transaction rechecks the Owner,
@@ -565,16 +818,39 @@ impl Store {
         units: i64,
         history: i64,
     ) -> Result<MaterialPage, AppError> {
+        self.material_page_filtered(auth, id, units, history, WindowFilter::All)
+            .await
+    }
+    /// The card window of the units that pass `filter` (the review screen's tab), keyed by the
+    /// same position cursor.
+    pub(crate) async fn material_page_filtered(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        units: i64,
+        history: i64,
+        filter: WindowFilter,
+    ) -> Result<MaterialPage, AppError> {
         cursor(units)?;
         cursor(history)?;
+        let ids = match &filter {
+            WindowFilter::Ids(ids) => serde_json::to_string(ids)?,
+            _ => String::new(),
+        };
+        let clause = match filter {
+            WindowFilter::All => "",
+            WindowFilter::Reviewed => " AND state<>'unreviewed'",
+            WindowFilter::Ids(_) => " AND id IN (SELECT value FROM json_each(?3))",
+        };
         self.run_bounded_auth(move|db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
             let result=super::review::read_with_deadline(&tx,"page",|| {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
-            let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000)))?;
-                q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
-            let events={let mut q=tx.prepare(&format!("SELECT id,unit_id,{},{},{},{},{},previous_revision,operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=source_review_events.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=source_review_events.operation_id AND source_review_events.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)) FROM source_review_events WHERE page_id=?1 AND id>?2 ORDER BY id LIMIT 51",text("created_at",64),text("actor",400),text("state",32),text("rationale",20000),text("correction",80000)))?;
-                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?)})))?.collect::<Result<Vec<_>,_>>()?};
+            let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position,{} FROM ordered WHERE position>?2{clause} ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000),text("raw_text",65536)))?;
+                let bound: &[&dyn rusqlite::ToSql] = if ids.is_empty() { &[&id,&units] } else { &[&id,&units,&ids] };
+                q.query_map(bound,|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,raw_text:r.get::<_,Option<String>>(9)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
+            let events={let mut q=tx.prepare(&format!("SELECT e.id,e.unit_id,{},{},{},{},{},e.previous_revision,e.operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=e.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=e.operation_id AND e.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)),CASE WHEN r.kind='merge' THEN r.unit_id END,CASE WHEN r.kind='merge' THEN (SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=e.operation_id AND o.state='rejected' ORDER BY o.id)) END,CASE WHEN r.kind='split' THEN r.anchor_unit_id END,CASE WHEN r.kind='split' THEN (SELECT group_concat(unit_id,', ') FROM (SELECT p.unit_id FROM source_owner_replacements p WHERE p.operation_id=e.operation_id ORDER BY p.part)) END FROM source_review_events e LEFT JOIN (SELECT operation_id,min(id) AS first_id FROM source_review_events WHERE page_id=?1 GROUP BY operation_id) f ON f.first_id=e.id LEFT JOIN source_owner_replacements r ON r.operation_id=f.operation_id AND r.part=1 WHERE e.page_id=?1 AND e.id>?2 ORDER BY e.id LIMIT 51",text("e.created_at",64),text("e.actor",400),text("e.state",32),text("e.rationale",20000),text("e.correction",80000)))?;
+                q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?),merge:r.get::<_,Option<i64>>(11)?.zip(r.get::<_,Option<String>>(12)?),split:r.get::<_,Option<i64>>(13)?.zip(r.get::<_,Option<String>>(14)?)})))?.collect::<Result<Vec<_>,_>>()?};
             let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);
             page.units=units.rows.into_iter().map(|r|r.1).collect();page.events=events.rows.into_iter().map(|r|r.1).collect();
             Ok(MaterialPage{page,units_next:units.next,history_next:events.next})
@@ -757,6 +1033,32 @@ impl Store {
         })
         .await
     }
+    /// Whether the page's latest batch accept decided exactly `count` units (a "saved" notice
+    /// link must be true). It confirms only the size of the latest batch, as a historical
+    /// notice, not that the batch just happened.
+    pub(crate) async fn material_batch_matches(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+        count: i64,
+    ) -> Result<bool, AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            let found = tx
+                .query_row(
+                    "SELECT 1 FROM (SELECT count(*) n FROM source_review_events WHERE page_id=?1 AND operation_id IS NOT NULL AND state='accepted' AND substr(rationale,1,length(?3))=?3 GROUP BY operation_id ORDER BY max(id) DESC LIMIT 1) WHERE n=?2",
+                    params![page, count, super::agreement_view::BATCH_PREFIX],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(found)
+        })
+        .await
+    }
     /// Whether a saved-notice link is true: the unit is on this page (or, for `page`, on another
     /// page of the source), is now in the stated state, and for `done` nothing unreviewed remains
     /// on this page or after it.
@@ -785,20 +1087,22 @@ impl Store {
         })
         .await
     }
-    /// Whether `unit` is an owner table on `page` (a "created" notice link must be true).
-    pub(crate) async fn material_is_owner_table(
+    /// Whether `unit` is an owner unit of replacement `kind` (`table`, `merge` or `split`) on
+    /// `page` (a "created" notice link must be true).
+    pub(crate) async fn material_is_owner_replacement(
         &self,
         auth: RequestAuth,
         page: i64,
         unit: i64,
+        kind: &'static str,
     ) -> Result<bool, AppError> {
         self.run_bounded_auth(move |db| {
             let tx = db.transaction()?;
             auth.recheck_owner(&tx)?;
             let found = tx
                 .query_row(
-                    "SELECT 1 FROM source_owner_tables t JOIN source_units u ON u.id=t.unit_id WHERE u.id=?1 AND u.page_id=?2",
-                    params![unit, page],
+                    "SELECT 1 FROM source_owner_replacements r JOIN source_units u ON u.id=r.unit_id WHERE u.id=?1 AND u.page_id=?2 AND r.kind=?3",
+                    params![unit, page, kind],
                     |_| Ok(()),
                 )
                 .optional()?
@@ -881,6 +1185,7 @@ pub(super) fn audit(db: &Connection, auth: &RequestAuth, event: i64) -> Result<(
 /// the shapes found.
 pub(crate) struct TablePrefill {
     pub page_revision: i64,
+    pub pdf_page: i64,
     /// Selected units in reading order with the revision the Owner saw.
     pub units: Vec<(i64, i64)>,
     pub grid: String,
@@ -898,6 +1203,111 @@ pub(crate) struct TablePrefill {
     pub overlaps: Vec<i64>,
     /// False when the page has too many units for the overlap check; it was not done.
     pub overlap_checked: bool,
+    /// The page size in PDF points and the selected units' outlines (unit, SVG points), for the
+    /// whole-page reference; empty when the page has no usable geometry.
+    pub page_size: Option<(f64, f64)>,
+    pub outlines: Vec<(i64, String)>,
+}
+
+/// 1-200 different units, as a table takes them.
+fn check_table_units(units: &[i64]) -> Result<(), AppError> {
+    if units.is_empty()
+        || units.len() > super::tables::MAX_TABLE_SOURCES
+        || units
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != units.len()
+    {
+        return Err(AppError::Invalid(
+            "Choose 1-200 different units for a table.",
+        ));
+    }
+    Ok(())
+}
+
+/// The page size in PDF points when the page has usable geometry, else `None`.
+fn usable_page_size(db: &Connection, page: i64) -> Result<Option<(f64, f64)>, AppError> {
+    match super::documents::polygon_bounds(db, page) {
+        Ok((w, h)) if (1.0..=4000.0).contains(&w) && (1.0..=4000.0).contains(&h) => {
+            Ok(Some((w, h)))
+        }
+        Ok(_) | Err(AppError::Invalid("Page geometry is missing or invalid.")) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// `(unit, polygon, state)` of the page's units in reading order, one past [`GEOMETRY_LIMIT`]
+/// so a caller can tell the page is too big for the overlap check.
+fn read_geometry(db: &Connection, page: i64) -> Result<Vec<(i64, String, String)>, AppError> {
+    let mut query = db.prepare(&format!(
+        "{ORDERED_UNITS} SELECT id,polygon,state FROM ordered ORDER BY position LIMIT {}",
+        GEOMETRY_LIMIT + 1
+    ))?;
+    let all = query.query_map([page], |r| {
+        Ok((r.get::<_, i64>(0)?, read_text(r, 1)?, read_text(r, 2)?))
+    })?;
+    Ok(all.collect::<Result<_, _>>()?)
+}
+
+/// What the merge form needs: the tokens to submit back, the prefilled text and the checks.
+pub(crate) struct MergePrefill {
+    pub page_revision: i64,
+    pub pdf_page: i64,
+    /// Selected units in reading order with the revision the Owner saw.
+    pub units: Vec<(i64, i64)>,
+    /// The units' text in reading order, joined by newlines, at most 64 KiB.
+    pub text: String,
+    /// The text was cut at 64 KiB.
+    pub cut: bool,
+    /// One line per selected unit that is a `Table` or has no text (its structure is lost).
+    pub warnings: Vec<String>,
+    /// Unselected units inside the union box (see [`TablePrefill::overlaps`]).
+    pub overlaps: Vec<i64>,
+    pub overlap_checked: bool,
+    pub page_size: Option<(f64, f64)>,
+    pub outlines: Vec<(i64, String)>,
+}
+
+/// What the split form shows for one unit.
+pub(crate) struct SplitRead {
+    pub page_revision: i64,
+    pub unit_revision: i64,
+    pub pdf_page: i64,
+    /// The unit's text, cut at 64 KiB.
+    pub text: String,
+    pub cut: bool,
+    /// The text already has a line that is exactly `---`.
+    pub has_marker: bool,
+    pub page_size: Option<(f64, f64)>,
+    /// The unit's box clamped to the page, `[x0, y0, x1, y1]`: what its crop shows.
+    pub crop: Option<[f64; 4]>,
+    /// The parts' areas, when parts were given and the page has usable geometry.
+    pub areas: Option<super::split_areas::Areas>,
+}
+
+/// `text` cut to at most `limit` bytes on a character boundary.
+fn cut_at(text: &str, limit: usize) -> &str {
+    let mut end = limit.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// 2-200 different units, as a merge takes them.
+fn check_merge_units(units: &[i64]) -> Result<(), AppError> {
+    if units.len() < super::documents::MIN_MERGE_SOURCES
+        || units.len() > super::tables::MAX_TABLE_SOURCES
+        || units
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != units.len()
+    {
+        return Err(AppError::Invalid("Choose 2-200 different units to merge."));
+    }
+    Ok(())
 }
 
 /// Units of one page read for the overlap check.

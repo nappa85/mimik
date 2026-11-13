@@ -12,7 +12,8 @@ impl Store {
         unit: i64,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<super::region::RegionInput, AppError> {
-        self.region_data(None, page, unit, permit).await
+        self.region_data(None, page, vec![unit], false, permit)
+            .await
     }
 
     pub(crate) async fn material_region_data(
@@ -22,20 +23,35 @@ impl Store {
         unit: i64,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<super::region::RegionInput, AppError> {
-        self.region_data(Some(auth), page, unit, permit).await
+        self.region_data(Some(auth), page, vec![unit], false, permit)
+            .await
+    }
+
+    /// The crop input for the area a table over `units` would cover (their combined box).
+    pub(super) async fn table_region_data(
+        &self,
+        auth: crate::auth::RequestAuth,
+        page: i64,
+        units: Vec<i64>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<super::region::RegionInput, AppError> {
+        self.region_data(Some(auth), page, units, true, permit)
+            .await
     }
 
     async fn region_data(
         &self,
         auth: Option<crate::auth::RequestAuth>,
         page: i64,
-        unit: i64,
+        units: Vec<i64>,
+        combined: bool,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<super::region::RegionInput, AppError> {
         self.run_bounded_auth(move |db| {
             struct RawRegion { image: Option<Vec<u8>>, prepared: Option<Vec<u8>>, pdf_page: i64, polygon: Option<String> }
             let tx = db.transaction()?;
             if let Some(auth) = &auth { auth.recheck_owner(&tx)?; }
+            let unit = *units.first().ok_or(AppError::SourceNotFound)?;
             let limit = i64::try_from(super::region::INPUT_LIMIT).map_err(|_| AppError::Invalid("Region input limit invalid."))?;
             // CASE prevents oversized blobs being copied out of SQLite; the joined
             // statement binds all immutable artifacts to the same page/unit.
@@ -44,9 +60,22 @@ impl Store {
                 params![page, unit, limit], |row| Ok(RawRegion { image: row.get(0)?, prepared: row.get(1)?, pdf_page: row.get(2)?, polygon: row.get(3)? }),
             ).optional()?;
             let data = data.ok_or(AppError::SourceNotFound)?;
+            // A table's area: the union of every unit's polygon, built as saving a table builds it.
+            let polygon = if combined {
+                let (width, height) = super::documents::polygon_bounds(&tx, page)?;
+                let mut union = super::documents::UnionBox::new(width, height);
+                for unit in &units {
+                    let stored: Option<Option<String>> = tx.query_row(
+                        "SELECT CASE WHEN typeof(polygon)='text' AND length(CAST(polygon AS BLOB))<=65536 THEN polygon END FROM source_units WHERE id=?1 AND page_id=?2",
+                        params![unit, page], |row| row.get(0),
+                    ).optional()?;
+                    union.add(&stored.ok_or(AppError::SourceNotFound)?.ok_or(AppError::Invalid("A selected unit has no usable region."))?)?;
+                }
+                Some(serde_json::to_string(&union.polygon())?)
+            } else { data.polygon };
             if let Some(auth) = &auth { auth.recheck_owner(&tx)?; }
             tx.commit()?;
-            Ok(super::region::RegionInput { image: data.image.ok_or(AppError::Invalid("Region image type or size invalid; inspect full page."))?, prepared: data.prepared.ok_or(AppError::Invalid("Region metadata type or size invalid; inspect full page."))?, pdf_page: data.pdf_page, polygon: data.polygon.ok_or(AppError::Invalid("Region coordinates type or byte size invalid; inspect full page."))?, permit })
+            Ok(super::region::RegionInput { image: data.image.ok_or(AppError::Invalid("Region image type or size invalid; inspect full page."))?, prepared: data.prepared.ok_or(AppError::Invalid("Region metadata type or size invalid; inspect full page."))?, pdf_page: data.pdf_page, polygon: polygon.ok_or(AppError::Invalid("Region coordinates type or byte size invalid; inspect full page."))?, permit })
         }).await
     }
 
@@ -74,10 +103,10 @@ impl Store {
     pub async fn source_page(&self, id: i64) -> Result<PageView, AppError> {
         self.run(move |db| {
             let mut page = db.query_row("SELECT p.id,s.id,s.title,s.edition,p.pdf_page,p.printed_label,p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1", [id], |row| Ok(PageView { id: row.get(0)?, source_id: row.get(1)?, title: row.get(2)?, edition: row.get(3)?, pdf_page: row.get(4)?, printed_label: row.get(5)?, complete: row.get(6)?, revision: row.get(7)?, units: Vec::new(), events: Vec::new() })).optional()?.ok_or(AppError::SourceNotFound)?;
-            let mut query = db.prepare("SELECT id,block_id,kind,polygon,raw_html,state,correction,revision FROM source_units WHERE page_id=?1 ORDER BY id")?;
-            page.units = query.query_map([id], |row| { let raw: String = row.get(4)?; let clean = sanitized(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?; Ok(UnitView { id: row.get(0)?, block_id: row.get(1)?, kind: row.get(2)?, polygon: row.get(3)?, sanitized_html: clean, state: row.get(5)?, correction: row.get(6)?, revision: row.get(7)? }) })?.collect::<Result<Vec<_>, _>>()?;
+            let mut query = db.prepare("SELECT id,block_id,kind,polygon,raw_html,state,correction,revision,raw_text FROM source_units WHERE page_id=?1 ORDER BY id")?;
+            page.units = query.query_map([id], |row| { let raw: String = row.get(4)?; let clean = sanitized(&raw).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?; Ok(UnitView { id: row.get(0)?, block_id: row.get(1)?, kind: row.get(2)?, polygon: row.get(3)?, sanitized_html: clean, state: row.get(5)?, correction: row.get(6)?, raw_text: Some(row.get(8)?), revision: row.get(7)? }) })?.collect::<Result<Vec<_>, _>>()?;
             let mut history = db.prepare("SELECT unit_id,created_at,actor,state,rationale,correction,previous_revision,operation_id FROM source_review_events WHERE page_id=?1 ORDER BY id DESC LIMIT 100")?;
-            page.events = history.query_map([id], |row| Ok(ReviewEvent { unit_id: row.get(0)?, created_at: row.get(1)?, actor: row.get(2)?, state: row.get(3)?, rationale: row.get(4)?, correction: row.get(5)?, previous_revision: row.get(6)?, operation_id: row.get(7)?, table: None }))?.collect::<Result<Vec<_>, _>>()?;
+            page.events = history.query_map([id], |row| Ok(ReviewEvent { unit_id: row.get(0)?, created_at: row.get(1)?, actor: row.get(2)?, state: row.get(3)?, rationale: row.get(4)?, correction: row.get(5)?, previous_revision: row.get(6)?, operation_id: row.get(7)?, table: None, merge: None, split: None }))?.collect::<Result<Vec<_>, _>>()?;
             Ok(page)
         }).await
     }

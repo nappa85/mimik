@@ -57,13 +57,13 @@ impl WordsState {
 /// Polygons with more points than this are tested by their bounding box (a bound on the work).
 const MAX_EXACT_POINTS: usize = 64;
 
-struct Region {
+pub(crate) struct Region {
     points: Vec<[f64; 2]>,
     bounds: [f64; 4],
 }
 
 impl Region {
-    fn parse(polygon: &str) -> Option<Region> {
+    pub(crate) fn parse(polygon: &str) -> Option<Region> {
         let points: Vec<[f64; 2]> = serde_json::from_str(polygon).ok()?;
         if points.is_empty()
             || points.len() > 1024
@@ -79,7 +79,7 @@ impl Region {
         Some(Region { points, bounds })
     }
 
-    fn contains(&self, x: f64, y: f64) -> bool {
+    pub(crate) fn contains(&self, x: f64, y: f64) -> bool {
         let b = self.bounds;
         if x < b[0] || x > b[2] || y < b[1] || y > b[3] {
             return false;
@@ -100,6 +100,11 @@ impl Region {
             previous = point;
         }
         inside
+    }
+
+    /// The polygon's bounding box, `[x0, y0, x1, y1]`.
+    pub(crate) fn bounds(&self) -> [f64; 4] {
+        self.bounds
     }
 }
 

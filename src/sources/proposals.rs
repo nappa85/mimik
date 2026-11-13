@@ -311,8 +311,17 @@ pub(super) type CacheKey = (i64, i64, i64);
 #[derive(Default)]
 pub(crate) struct ProposalCache {
     entries: Mutex<Vec<(CacheKey, Arc<Vec<Proposal>>)>>,
+    /// The agreement pass without the caller's exclusions, beside the proposals.
+    passes: Mutex<
+        Vec<(
+            super::agreement_view::PassKey,
+            Arc<super::agreement_view::Pass>,
+        )>,
+    >,
     #[cfg(test)]
     computed: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    passes_computed: std::sync::atomic::AtomicUsize,
 }
 
 impl ProposalCache {
@@ -338,6 +347,41 @@ impl ProposalCache {
         }
         entries.push((key, Arc::clone(&value)));
         value
+    }
+
+    pub(super) fn pass_get(
+        &self,
+        key: &super::agreement_view::PassKey,
+    ) -> Option<Arc<super::agreement_view::Pass>> {
+        let passes = self.passes.lock().unwrap_or_else(PoisonError::into_inner);
+        passes
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| Arc::clone(v))
+    }
+
+    pub(super) fn pass_put(
+        &self,
+        key: super::agreement_view::PassKey,
+        value: super::agreement_view::Pass,
+    ) -> Arc<super::agreement_view::Pass> {
+        let value = Arc::new(value);
+        #[cfg(test)]
+        self.passes_computed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut passes = self.passes.lock().unwrap_or_else(PoisonError::into_inner);
+        passes.retain(|(k, _)| k.0 != key.0);
+        if passes.len() >= CACHE_ENTRIES {
+            passes.remove(0);
+        }
+        passes.push((key, Arc::clone(&value)));
+        value
+    }
+
+    #[cfg(test)]
+    pub(crate) fn passes_computed(&self) -> usize {
+        self.passes_computed
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]

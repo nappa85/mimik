@@ -77,7 +77,7 @@
     if (!svg || !draw || !keyboard || !rectangle || !handles) continue;
     const width = Number(root.dataset.width), height = Number(root.dataset.height);
     let drawing = false, start = null, corners = null;
-    const selected = root.querySelector('input[type="checkbox"]');
+    const selected = root.querySelector('[data-region-selected]');
     const extension = root.closest('form')?.querySelector('[name="extend_absent"]');
     const grips = [0, 2].map(corner => {
       const grip = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
