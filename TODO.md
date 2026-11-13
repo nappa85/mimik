@@ -10,9 +10,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `agreement`, not merged: slices 1 (core), 2 (measurement), 3a (work-queue layout, owner
   browser-checked) and the table form reference images are committed; split/merge (SRC-22,
   migration 030) is done on the same branch (377ce24..b40cd65, reviewed per slice, full suite
-  green). Owed: the owner's browser check of the table reference images, one merge and one
-  split (build the branch, back up `data/mimik.sqlite3` first: migration 030 runs on open).
-  Next: agreement 3b (verdicts on cards, summary, "needs attention" filter), then 4 (batch
+  green; owner browser-checked 2026-11-13 with the table reference images). Next: agreement 3b (verdicts on cards, summary, "needs attention" filter), then 4 (batch
   accept) and 5 (docs, SRC-20 change), then merge to master and remove the worktree and the
   `mimik-agree-*` volumes.
 
@@ -96,6 +94,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
 
 ## Next steps
+
+- **Review-screen UX revamp (owner, 2026-11-13):** the materials review screen (cards, table
+  form, merge, split) works but has UX issues; a bigger revamp comes later, after the agreement
+  branch lands. Collect the owner's points when it starts.
 
 - **mupdf-rs release:** PR messense/mupdf-rs#280 merged upstream 2026-11-08 (dd46f0e); its text
   API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
