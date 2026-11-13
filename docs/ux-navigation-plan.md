@@ -7,16 +7,13 @@ unauthenticated local mode (`web::app`: `/characters`, `/sources`) is not change
 
 ## Owner decisions (2026-11-13)
 
-- One menu for everyone; its entries depend on the role. With the development owner-play flag
-  the Owner also sees the player entries.
+- One menu for everyone; its entries depend on the role.
 - Menus by logical concept: few menus, one sub-level at most.
 - Home: quick links, what changed since the previous login, and what is pending. The Owner sees
   materials waiting for review; a player sees the campaigns they play in; a Master also sees
   their campaigns with the latest edited sheets.
 - Opening a menu never loads a page.
-- AUTH-3 says `--dev-owner-play` is to be removed; the owner's request keeps it as a
-  development-only flag for now. Slice 1 updates AUTH-3 (development only, never in a release
-  build's defaults; removal when the Master view lets the owner test with player accounts).
+- `--dev-owner-play` is removed in slice 1, as AUTH-3 already requires: the Owner never plays.
 - Swapping page content without a full load (htmx boost) is not built: the most used pages
   (materials review, upload) run under the strict sheet CSP, which forbids htmx's swaps, so a
   boost would only cover the light list pages, at the cost of private pages in htmx's history
@@ -29,7 +26,7 @@ unauthenticated local mode (`web::app`: `/characters`, `/sources`) is not change
   that today writes its own document or extends `material_base.html` extends it;
   `material_base.html`'s link row goes. Template blocks: title, head (page scripts), content.
 - Menu (entries shown per role; a menu with no entries is not shown):
-  - **Play** (player, or Owner with owner-play): Campaigns, My sheets.
+  - **Play** (player accounts): Campaigns, My sheets.
   - **Materials** (Owner): Sources and review, Upload PDF, Rulesets.
   - **Administration** (Owner): Accounts, Assistant.
   - **Account** (everyone, right side, labelled with the display name): Switch account,
@@ -52,10 +49,12 @@ unauthenticated local mode (`web::app`: `/characters`, `/sources`) is not change
 - Sheet pages keep `SHEET_CSP` unchanged; the layout adds no inline code anywhere.
 - After login, `/` is the destination (players and Owner alike). `/auth/session` redirects to
   `/`; its "Signed in" page and template go, and the links to it (`admin.html`,
-  `campaigns.html`, `script_tests.rs`, the browser navigation test) are updated. The development owner-play badge moves to the
-  account menu.
+  `campaigns.html`, `script_tests.rs`, the browser navigation test) are updated.
+- `--dev-owner-play` and everything behind it go (`src/main.rs`, `src/auth/mod.rs`,
+  `src/campaigns/domain.rs`, `snapshots.rs`, their tests, `tools/smoke_release.py`, the docs);
+  AUTH-3 loses its "to be removed" clause.
 - Tests: every authenticated page renders the menu with the role's entries (table test over
-  the routes, Owner / player / Owner with owner-play); sheet pages keep their CSP header and
+  the routes, Owner / player); sheet pages keep their CSP header and
   carry no inline script or style; Sign out still requires CSRF; no entry leaks a page the
   role cannot open (each entry's route answers 200 for that role); `/auth/session` redirects
   to `/`.
@@ -91,8 +90,8 @@ unauthenticated local mode (`web::app`: `/characters`, `/sources`) is not change
 - Every home query is bounded and indexed and runs within the request deadline.
 - Tests: each section for each role on a seeded database, including empty states, no mark
   yet, the 10-row bound, the mark never moving backwards or past what was shown, a player
-  never seeing another player's sheet or an Owner-only count, and the Owner without
-  owner-play never running a campaign query.
+  never seeing another player's sheet or an Owner-only count, and the Owner's home never
+  running a campaign query.
 
 ## Order
 
