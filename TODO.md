@@ -6,13 +6,13 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Agreement view and batch accept** (`docs/source-agreement-plan.md`, reviewed, SRC-21), branch
-  `agreement`, not merged: slices 1 (core), 2 (measurement), 3a (work-queue layout, owner
-  browser-checked) and the table form reference images are committed; split/merge (SRC-22,
-  migration 030) is done on the same branch (377ce24..b40cd65, reviewed per slice, full suite
-  green; owner browser-checked 2026-11-13 with the table reference images). Next: agreement 3b (verdicts on cards, summary, "needs attention" filter), then 4 (batch
-  accept) and 5 (docs, SRC-20 change), then merge to master and remove the worktree and the
-  `mimik-agree-*` volumes.
+- **Agreement view and batch accept** (SRC-21, `docs/sources-and-retrieval.md` on the branch),
+  branch `agreement`, not merged: all slices done (agreement core, measurement, work-queue
+  layout, table reference images, split/merge SRC-22, 3b agreement on the screen 224570e, 4
+  batch accept 50d4384, 5 docs 8f73f8d; each reviewed, full suite green, 2034 passed). Owed:
+  the owner's browser check of the agreement bar/tabs and of one batch accept on an
+  independent page (build the branch, back up `data/mimik.sqlite3` first: migration 030 runs
+  on open). Then merge to master and remove the worktree and the `mimik-agree-*` volumes.
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
