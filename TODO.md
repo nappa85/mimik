@@ -6,9 +6,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Current work
 
-- **Agreement view and batch accept** (`docs/source-agreement-plan.md`, reviewed, SRC-21): slice 1
-  (agreement core) committed on branch `agreement` (b60a411); slice 2 (measurement on a copy of
-  the owner database, `/media/data/mimik/agreement/`) in progress.
+- **Agreement view and batch accept** (`docs/source-agreement-plan.md`, reviewed, SRC-21), branch
+  `agreement`, not merged: slices 1 (core), 2 (measurement), 3a (work-queue layout, owner
+  browser-checked) and the table form reference images are committed; split/merge (SRC-22,
+  migration 030) is done on the same branch (377ce24..b40cd65, reviewed per slice, full suite
+  green). Owed: the owner's browser check of the table reference images, one merge and one
+  split (build the branch, back up `data/mimik.sqlite3` first: migration 030 runs on open).
+  Next: agreement 3b (verdicts on cards, summary, "needs attention" filter), then 4 (batch
+  accept) and 5 (docs, SRC-20 change), then merge to master and remove the worktree and the
+  `mimik-agree-*` volumes.
 
 - **Assisted-sheet MVP** (`docs/assisted-sheet-plan.md`). Steps 1, 2a, 2b, 2c-1, 2c-2a (the CPU
   runtime at level 1 only, ASSIST-43, `docs/model-runtime.md`) and the Rust 1.99.1 / rig-core
@@ -95,17 +101,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
   a release ships: pin it from crates.io, drop `vendor/mupdf`, the `[patch.crates-io]` entry and
   the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
-
-- **Review-screen usability (owner, 2026-11-07, first real review of the IT pages):**
-  - Unit restructuring actions (owner, 2026-11-08), each rejecting the original units in one
-    batch with the reason and adding owner units (originals and raw stay intact). Create table
-    is done (`docs/sources-and-retrieval.md`, "Owner-built tables"); still open:
-    1. **Merge units:** several selected units become one text unit (box = their union, text
-       joined in reading order).
-    2. **Split unit:** one unit covering several columns or blocks becomes several units, the
-       owner drawing or adjusting each part's box and text.
-    Merge and split replace typing four corners by hand in "Add missing text"; they need a design
-    pass before implementation (owner units may be `Text` or `Table` since migration 028).
 
 - **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
   (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
