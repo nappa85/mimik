@@ -87,9 +87,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-- **Review-screen UX revamp (owner, 2026-11-13):** the materials review screen (cards, table
-  form, merge, split) works but has UX issues; a bigger revamp comes next, now that the agreement
-  branch is merged (2026-11-13). Collect the owner's points when it starts.
+- **UX revamp (owner, 2026-11-13):** `docs/ux-navigation-plan.md`, branch `navigation`
+  (worktree `../mimik-wt/navigation`, volumes `mimik-nav-reg`/`mimik-nav-target`). Slice 1
+  (shared layout and menu, `--dev-owner-play` removed) committed b269454, reviewed, gate green;
+  owner browser check owed. Next: slice 2 (home page). Then collect the owner's points on the
+  review screen (cards, table form, merge, split).
 
 - **mupdf-rs release:** PR messense/mupdf-rs#280 merged upstream 2026-11-08 (dd46f0e); its text
   API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
@@ -203,7 +205,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - Kept entries lose control characters in single-line inputs (ASSIST-L13): cell inputs, and
   a lone CR in a refused quick-add entry (switch to a textarea on any control character but
   tab).
-- Remove `--dev-owner-play` (AUTH-L10), with its own security review.
 - Replace capacity caps with safety-only limits (RR-L2).
 - Catalogues step 5 for the merged steps 1–3: local-data inventory entries, the D12 CI check
   (no non-synthetic catalogue rows in fixtures or packages), the R15 note in
