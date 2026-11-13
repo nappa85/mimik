@@ -1544,7 +1544,7 @@ async fn material_owner_and_primary_drafts_on_conflict_and_validation() {
             "\nchecked original"
         );
         assert!(
-            html.contains("?units=0#add-text"),
+            html.contains("?units=0&#38;show=all#add-text"),
             "link to the matching draft panel"
         );
     }
@@ -1570,7 +1570,7 @@ async fn material_owner_and_primary_drafts_on_conflict_and_validation() {
             field_value(&html, "[data-form=primary] textarea"),
             rationale
         );
-        assert!(html.contains("?units=0#primary"));
+        assert!(html.contains("?units=0&#38;show=all#primary"));
     }
 }
 
@@ -1779,7 +1779,7 @@ async fn material_suggestion_handler_drafts_authority_and_stored_text() {
         field_value(&html, "[data-form=accept] textarea[name=rationale]"),
         "\nkept acceptance"
     );
-    assert!(html.contains("?units=50#unit-51"));
+    assert!(html.contains("?units=50&#38;unit=51#unit-51"));
     assert_missing_edit_choice_keeps_draft(&app, &auth[0], &path).await;
     let response = document_at(
         &app,
@@ -1797,7 +1797,7 @@ async fn material_suggestion_handler_drafts_authority_and_stored_text() {
         response.headers()["location"]
             .to_str()
             .unwrap()
-            .contains("?units=50#unit-51")
+            .contains("?units=50&unit=51#unit-51")
     );
     let response = document_at(
         &app,
@@ -4050,7 +4050,7 @@ async fn material_save_lookup_failure_is_unknown_not_finished() {
     let target = location(&response);
     assert_eq!(
         target,
-        "/admin/materials/pages/1?saved=accepted&saved_unit=1&then=unknown#unit-1"
+        "/admin/materials/pages/1?saved=accepted&saved_unit=1&to=1&then=unknown#unit-1"
     );
     let html = body(router_get(&app, &auth[0], &target).await).await;
     assert!(html.contains("The next unit could not be found in time"));
@@ -6249,10 +6249,10 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
         .map(|a| a.value().attr("href").unwrap())
         .collect();
     assert_eq!(links.len(), 50);
-    assert_eq!(links[0], "/admin/materials/pages/1#unit-2");
+    assert_eq!(links[0], "/admin/materials/pages/1?unit=2#unit-2");
     assert_eq!(
         *links.last().unwrap(),
-        "/admin/materials/pages/1?units=50#unit-51"
+        "/admin/materials/pages/1?units=50&unit=51#unit-51"
     );
     // Units outside the default card window link with their window cursor.
     // Page 3 has no unreviewed unit left and is not listed; the foreign source never appears.
@@ -6268,7 +6268,7 @@ async fn material_review_list_groups_unreviewed_units_by_page_within_the_source(
             .select(&css("a[data-more-link]"))
             .next()
             .and_then(|a| a.value().attr("href")),
-        Some("/admin/materials/pages/2?units=100#unit-2101")
+        Some("/admin/materials/pages/2?units=100&unit=2101#unit-2101")
     );
     // Unit text is escaped.
     assert!(!html.contains("<b>"));
@@ -7178,3 +7178,6 @@ mod merge_tests;
 
 #[path = "split_tests.rs"]
 mod split_tests;
+
+#[path = "agreement_screen_tests.rs"]
+mod agreement_screen_tests;

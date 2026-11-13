@@ -16,6 +16,14 @@ use std::{
 type AdvicePage = (Vec<Advice>, Option<i64>);
 type ScreenAdvice = std::collections::BTreeMap<i64, AdvicePage>;
 
+/// Bytes of response the agreement's display may use, reserved before any card or lookup text
+/// and taken out of the 512 KiB structure reservation (the total reserved is unchanged).
+/// Worst case: 2,000 orphan boxes at 32 bytes (64 KiB), 200 changes with their wrappers and
+/// 4,096 characters at six escaped bytes (about 48 KiB), 50 verdict spans and three `show`
+/// fields per card (about 25 KiB), 2,000 overlay link suffixes (about 28 KiB), the bar (about
+/// 4 KiB). The worst-case route test holds the page under 2 MiB.
+pub(crate) const AGREEMENT_ALLOWANCE: usize = 192 * 1024;
+
 pub(crate) const READ_TIMEOUT: &str =
     "Review read time limit reached; retry with a smaller page or list.";
 
@@ -273,8 +281,8 @@ impl Advice {
     pub(crate) fn back_link(&self) -> String {
         if let Some(target) = targets(&self.target).first() {
             format!(
-                "/admin/materials/pages/{}?units={}#unit-{}",
-                self.page, self.cursor, target.unit
+                "/admin/materials/pages/{}?units={}&unit={}#unit-{}",
+                self.page, self.cursor, target.unit, target.unit
             )
         } else {
             format!(
@@ -745,8 +753,14 @@ impl Store {
             }
             let mut budget=Budget::default();
             let mut advice=screen_advice(&tx,page,&units,notes_after)?;
-             // Screen structure, unit controls and bounded overlay data.
-             budget.reserve(512 * 1024);
+             // Screen structure, unit controls and bounded overlay data, less the agreement's
+             // display, which is charged on its own: the total reserved here is what it always was
+             // (it fixes the 32 suggestion rows the remaining space holds).
+             budget.reserve(512 * 1024 - AGREEMENT_ALLOWANCE);
+             // The agreement's display: the bar and tabs, verdict spans, at most 200 shown changes
+             // and 4,096 characters of them, 2,000 orphan boxes in one path, and the short overlay
+             // links. Its worst case is fixed (see `AGREEMENT_ALLOWANCE`).
+             budget.reserve(AGREEMENT_ALLOWANCE);
              // Reserve the first retained form and suggestion markup before any
              // optional lookup text or additional correction controls consume space.
              budget.reserve(1280 * 1024);

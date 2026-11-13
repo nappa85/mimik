@@ -53,6 +53,14 @@ pub(crate) struct Material {
     pub complete: i64,
     pub finalized: bool,
 }
+/// Which units a card window lists (the review screen's tab).
+pub(crate) enum WindowFilter {
+    All,
+    /// Units already decided.
+    Reviewed,
+    /// Exactly these unit ids.
+    Ids(Vec<i64>),
+}
 pub(crate) struct MaterialPage {
     pub page: PageView,
     pub units_next: Option<i64>,
@@ -109,11 +117,14 @@ impl ReviewUnit {
     pub(crate) fn link(&self, page: i64) -> String {
         if self.cursor > 0 {
             format!(
-                "/admin/materials/pages/{page}?units={}#unit-{}",
-                self.cursor, self.id
+                "/admin/materials/pages/{page}?units={}&unit={}#unit-{}",
+                self.cursor, self.id, self.id
             )
         } else {
-            format!("/admin/materials/pages/{page}#unit-{}", self.id)
+            format!(
+                "/admin/materials/pages/{page}?unit={}#unit-{}",
+                self.id, self.id
+            )
         }
     }
 }
@@ -525,6 +536,19 @@ impl Store {
         auth: RequestAuth,
         page: i64,
     ) -> Result<std::sync::Arc<Vec<super::proposals::Proposal>>, AppError> {
+        Ok(self
+            .material_table_proposals_checked(auth, page)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// As [`Self::material_table_proposals`], but `None` when the read timed out, so a caller
+    /// that must not mistake "none found" for "not read" (the agreement) can tell.
+    pub(crate) async fn material_table_proposals_checked(
+        &self,
+        auth: RequestAuth,
+        page: i64,
+    ) -> Result<Option<std::sync::Arc<Vec<super::proposals::Proposal>>>, AppError> {
         let cache = std::sync::Arc::clone(&self.2);
         let key = self
             .run_bounded_auth({
@@ -547,7 +571,7 @@ impl Store {
             })
             .await?;
         if let Some(found) = cache.get(key) {
-            return Ok(found);
+            return Ok(Some(found));
         }
         // The read: the units' boxes and (within a text budget) their text, and the stored words.
         let read = self
@@ -610,7 +634,7 @@ impl Store {
             .await?;
         let Some((units, stored)) = read else {
             // A timed-out read is not remembered, so the next view tries again.
-            return Ok(std::sync::Arc::default());
+            return Ok(None);
         };
         // The recognisers run outside the database closure.
         let found = tokio::task::spawn_blocking(move || {
@@ -621,7 +645,7 @@ impl Store {
         })
         .await
         .map_err(|_| AppError::Worker)?;
-        Ok(cache.put(key, found))
+        Ok(Some(cache.put(key, found)))
     }
 
     /// Create an owner table from selected units: one immediate transaction rechecks the Owner,
@@ -794,14 +818,37 @@ impl Store {
         units: i64,
         history: i64,
     ) -> Result<MaterialPage, AppError> {
+        self.material_page_filtered(auth, id, units, history, WindowFilter::All)
+            .await
+    }
+    /// The card window of the units that pass `filter` (the review screen's tab), keyed by the
+    /// same position cursor.
+    pub(crate) async fn material_page_filtered(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        units: i64,
+        history: i64,
+        filter: WindowFilter,
+    ) -> Result<MaterialPage, AppError> {
         cursor(units)?;
         cursor(history)?;
+        let ids = match &filter {
+            WindowFilter::Ids(ids) => serde_json::to_string(ids)?,
+            _ => String::new(),
+        };
+        let clause = match filter {
+            WindowFilter::All => "",
+            WindowFilter::Reviewed => " AND state<>'unreviewed'",
+            WindowFilter::Ids(_) => " AND id IN (SELECT value FROM json_each(?3))",
+        };
         self.run_bounded_auth(move|db|{
             let tx=db.transaction()?;auth.recheck_owner(&tx)?;
             let result=super::review::read_with_deadline(&tx,"page",|| {
             let mut page=tx.query_row(&format!("SELECT p.id,s.id,{},{},p.pdf_page,{},p.complete,p.revision FROM source_pages p JOIN sources s ON s.id=p.source_id WHERE p.id=?1",text("s.title",200),text("s.edition",400),text("p.printed_label",200)),[id],|r|Ok(PageView{id:r.get(0)?,source_id:r.get(1)?,title:read_text(r,2)?,edition:read_text(r,3)?,pdf_page:r.get(4)?,printed_label:read_text(r,5)?,complete:r.get(6)?,revision:r.get(7)?,units:Vec::new(),events:Vec::new()})).optional()?.ok_or(AppError::SourceNotFound)?;
-            let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position,{} FROM ordered WHERE position>?2 ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000),text("raw_text",65536)))?;
-                q.query_map(params![id,units],|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,raw_text:r.get::<_,Option<String>>(9)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
+            let rows={let mut q=tx.prepare(&format!("{ORDERED_UNITS} SELECT id,{},{},{},{},{},{},revision,position,{} FROM ordered WHERE position>?2{clause} ORDER BY position LIMIT 51",text("block_id",512),text("kind",100),text("polygon",1024),text("raw_html",65536),text("state",32),text("correction",80000),text("raw_text",65536)))?;
+                let bound: &[&dyn rusqlite::ToSql] = if ids.is_empty() { &[&id,&units] } else { &[&id,&units,&ids] };
+                q.query_map(bound,|r|{let raw=read_text(r,4)?;let clean=sanitized(&raw).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?;Ok((r.get::<_,i64>(8)?,UnitView{id:r.get(0)?,block_id:read_text(r,1)?,kind:read_text(r,2)?,polygon:read_text(r,3)?,sanitized_html:clean,state:read_text(r,5)?,correction:read_text(r,6)?,raw_text:r.get::<_,Option<String>>(9)?,revision:r.get(7)?}))})?.collect::<Result<Vec<_>,_>>()?};
             let events={let mut q=tx.prepare(&format!("SELECT e.id,e.unit_id,{},{},{},{},{},e.previous_revision,e.operation_id,(SELECT t.unit_id FROM source_owner_tables t WHERE t.first_event_id=e.id),(SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=e.operation_id AND e.id IN (SELECT first_event_id FROM source_owner_tables) ORDER BY o.id)),CASE WHEN r.kind='merge' THEN r.unit_id END,CASE WHEN r.kind='merge' THEN (SELECT group_concat(unit_id,', ') FROM (SELECT o.unit_id FROM source_review_events o WHERE o.operation_id=e.operation_id AND o.state='rejected' ORDER BY o.id)) END,CASE WHEN r.kind='split' THEN r.anchor_unit_id END,CASE WHEN r.kind='split' THEN (SELECT group_concat(unit_id,', ') FROM (SELECT p.unit_id FROM source_owner_replacements p WHERE p.operation_id=e.operation_id ORDER BY p.part)) END FROM source_review_events e LEFT JOIN (SELECT operation_id,min(id) AS first_id FROM source_review_events WHERE page_id=?1 GROUP BY operation_id) f ON f.first_id=e.id LEFT JOIN source_owner_replacements r ON r.operation_id=f.operation_id AND r.part=1 WHERE e.page_id=?1 AND e.id>?2 ORDER BY e.id LIMIT 51",text("e.created_at",64),text("e.actor",400),text("e.state",32),text("e.rationale",20000),text("e.correction",80000)))?;
                 q.query_map(params![id,history],|r|Ok((r.get::<_,i64>(0)?,ReviewEvent{unit_id:r.get(1)?,created_at:read_text(r,2)?,actor:read_text(r,3)?,state:read_text(r,4)?,rationale:read_text(r,5)?,correction:read_text(r,6)?,previous_revision:r.get(7)?,operation_id:r.get(8)?,table:r.get::<_,Option<i64>>(9)?.zip(r.get::<_,Option<String>>(10)?),merge:r.get::<_,Option<i64>>(11)?.zip(r.get::<_,Option<String>>(12)?),split:r.get::<_,Option<i64>>(13)?.zip(r.get::<_,Option<String>>(14)?)})))?.collect::<Result<Vec<_>,_>>()?};
             let units=Listing::new(rows,|r|r.0);let events=Listing::new(events,|r|r.0);

@@ -1,5 +1,6 @@
 //! Owner-only source comparison and explicitly attributed review forms.
 use super::{AuthResult, AuthState, csrf_admission, owner_auth};
+use crate::sources::agreement_view::{AgreementView, Show, Status, Tab};
 use crate::sources::shapes::Shape;
 use crate::{
     AppError,
@@ -150,6 +151,10 @@ struct PageCursor {
     merge: i64,
     /// The first unit of a split the Owner just saved (checked before it is announced).
     split: i64,
+    /// The filter tab (`attention`, `matching`, `reviewed`, `all`).
+    show: Show,
+    /// A unit the Owner asked for by link: a tab that would hide it shows `all`.
+    unit: i64,
 }
 /// The decision a redirect confirms; only these fixed words are ever rendered.
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -406,8 +411,159 @@ struct Editor {
     proposals: Vec<(String, String)>,
     /// A page-notes window past the first was asked for: keep that task open.
     notes_open: bool,
+    /// The agreement with the PDF text layer (an unavailable one when not computed).
+    agreement: AgreementView,
+    /// The tab the cards show, and why it is not the requested one.
+    tab: Tab,
+    tab_notice: Option<&'static str>,
+    /// The bounded differences of the cards shown.
+    shown: std::collections::BTreeMap<i64, crate::sources::agreement_view::ShownDiff>,
+    /// The header's next-unit target on a filtered tab (unit, window cursor).
+    next_override: Option<(i64, i64)>,
+    /// The matching tab is a compact list, not cards.
+    matching_list: bool,
+    matching_rows: Vec<MatchingRow>,
+    matching_next: Option<i64>,
+}
+/// One row of the compact matching list.
+struct MatchingRow {
+    id: i64,
+    kind: String,
+    first_line: String,
+    link: String,
+}
+/// A tab link of the agreement bar.
+struct TabLink {
+    label: &'static str,
+    href: String,
+    count: Option<usize>,
+    current: bool,
 }
 impl Editor {
+    /// The summary counts of the agreement bar.
+    fn counts(&self) -> crate::sources::agreement_view::Counts {
+        self.agreement.counts()
+    }
+    fn kind_label(&self) -> &'static str {
+        self.agreement
+            .kind()
+            .map_or("", crate::sources::agreement_view::kind_label)
+    }
+    fn no_result(&self) -> &'static str {
+        crate::sources::agreement_view::status_reason(self.agreement.status).unwrap_or("")
+    }
+    fn tabs(&self) -> Vec<TabLink> {
+        let counted = !self.screen.reads_reduced();
+        let mut tabs = Vec::new();
+        let mut push = |tab: Tab, count: Option<usize>| {
+            tabs.push(TabLink {
+                label: tab.label(),
+                href: format!("/admin/materials/pages/{}?show={}", self.page.id, tab.key()),
+                count: count.filter(|_| counted),
+                current: self.tab == tab,
+            });
+        };
+        if self.agreement.has_result() {
+            push(
+                Tab::Attention,
+                Some(self.agreement.tab_count(Tab::Attention)),
+            );
+            push(Tab::Matching, Some(self.agreement.tab_count(Tab::Matching)));
+        }
+        push(
+            Tab::Reviewed,
+            usize::try_from(self.screen.units_reviewed).ok(),
+        );
+        push(Tab::All, usize::try_from(self.screen.units_total).ok());
+        tabs
+    }
+    /// The text-layer words in no unit as one path of at most 2,000 boxes (about 30 bytes each,
+    /// so the drawing's worst case is fixed and small).
+    fn orphan_path(&self) -> String {
+        use std::fmt::Write;
+        let mut path = String::new();
+        for o in self
+            .agreement
+            .orphans
+            .iter()
+            .take(crate::sources::agreement_view::MAX_ORPHANS_DRAWN)
+        {
+            let _ = write!(
+                path,
+                "M{:.1} {:.1}h{:.1}v{:.1}h-{:.1}z",
+                o[0],
+                o[1],
+                o[2] - o[0],
+                o[3] - o[1],
+                o[2] - o[0]
+            );
+        }
+        path
+    }
+    fn orphans_drawn(&self) -> usize {
+        self.agreement
+            .orphans
+            .len()
+            .min(crate::sources::agreement_view::MAX_ORPHANS_DRAWN)
+    }
+    fn diff_too_long(&self, unit: i64) -> bool {
+        self.agreement.diff_too_long(unit)
+    }
+    fn orphans_not_drawn(&self) -> usize {
+        self.agreement
+            .orphans
+            .len()
+            .saturating_sub(crate::sources::agreement_view::MAX_ORPHANS_DRAWN)
+    }
+    /// Verdict class and text of a card's header (none for a decided unit).
+    fn verdict(&self, unit: i64) -> Option<(&'static str, &'static str)> {
+        self.agreement.label(unit)
+    }
+    fn diff(&self, unit: i64) -> Option<&crate::sources::agreement_view::ShownDiff> {
+        self.shown.get(&unit)
+    }
+    /// The header's next-unit link: the tab's own next unit, else the next unreviewed one.
+    fn next_link(&self) -> Option<String> {
+        self.next_override
+            .or(self.screen.next_unit)
+            .map(|target| self.unit_link(&target))
+    }
+    /// The notice of an owner table, merge or split just saved (each already verified).
+    fn announce(&mut self, created: i64, merged: i64, split: i64) {
+        if created > 0 {
+            self.notice = format!(
+                "Created table unit {created}; the selected units are rejected. Check the new table against the original page before accepting it."
+            );
+            self.notice_unit = created;
+        }
+        if merged > 0 {
+            self.notice = format!(
+                "Merged into unit {merged}; the selected units are rejected and the new unit holds your text as a correction. Check it against the original page."
+            );
+            self.notice_unit = merged;
+        }
+        if split > 0 {
+            self.notice = format!(
+                "Split: unit {split} is the first of the new units; the original unit is rejected and each new unit holds your text as a correction. Check them against the original page."
+            );
+            self.notice_unit = split;
+        }
+    }
+    /// Install the agreement and the tab chosen for it.
+    fn with_agreement(
+        mut self,
+        agreement: AgreementView,
+        tab: Tab,
+        notice: Option<&'static str>,
+    ) -> Self {
+        self.agreement = agreement;
+        self.tab = tab;
+        self.tab_notice = notice;
+        self.shown = self
+            .agreement
+            .diffs(&self.page.units.iter().map(|u| u.id).collect::<Vec<_>>());
+        self
+    }
     /// The screen card of a unit shown on this window.
     fn card(&self, unit: i64) -> Option<&crate::sources::review::Card> {
         self.screen.cards.iter().find(|card| card.unit == unit)
@@ -476,12 +632,21 @@ impl Editor {
         if self.page.units.iter().any(|row| row.id == *unit) {
             format!("#unit-{unit}")
         } else {
-            format!("?units={cursor}#unit-{unit}")
+            format!(
+                "?units={cursor}&unit={unit}&show={}#unit-{unit}",
+                self.tab.key()
+            )
         }
     }
     fn region_link(&self, region: &crate::sources::review::Overlay) -> String {
         if region.unit > 0 {
-            self.unit_link(&(region.unit, region.cursor))
+            let (unit, cursor) = (region.unit, region.cursor);
+            if self.page.units.iter().any(|row| row.id == unit) {
+                format!("#unit-{unit}")
+            } else {
+                // A short link: 2,000 overlay links share the response budget.
+                format!("?units={cursor}&unit={unit}#unit-{unit}")
+            }
         } else if self
             .screen
             .notes
@@ -503,8 +668,16 @@ impl Editor {
         } else {
             "complete".into()
         };
+        let unit = if self.draft.is_some() {
+            format!(
+                "&unit={}",
+                self.page.units.first().map_or(0, |unit| unit.id)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "/admin/materials/pages/{}?units={}#{anchor}",
+            "/admin/materials/pages/{}?units={}{unit}&show=all#{anchor}",
             self.page.id, self.units
         )
     }
@@ -550,6 +723,14 @@ impl Editor {
             error_unit: 0,
             proposals: Vec::new(),
             notes_open: c.notes > 0,
+            agreement: AgreementView::unavailable(Status::TimedOut),
+            tab: Tab::All,
+            tab_notice: None,
+            shown: std::collections::BTreeMap::new(),
+            next_override: None,
+            matching_list: false,
+            matching_rows: Vec::new(),
+            matching_next: None,
         }
     }
 }
@@ -570,6 +751,87 @@ fn saved_notice(c: PageCursor) -> String {
     };
     format!("Saved unit {}: {}.{tail}", c.saved_unit, c.saved.label())
 }
+/// The agreement of a page; a failed read is "no comparison", never a failed page.
+async fn view_of(state: &AuthState, auth: super::RequestAuth, page: i64) -> AgreementView {
+    match state.sessions.store.material_agreement(auth, page).await {
+        Ok(view) => view,
+        Err(e) => {
+            eprintln!("Mimik: agreement for page {page} failed: {e}");
+            AgreementView::unavailable(Status::Unreadable)
+        }
+    }
+}
+/// The compact list of the matching tab: a window of rows after the cursor, and the cursor
+/// of the next window.
+fn matching_rows(view: &AgreementView, page: i64, after: i64) -> (Vec<MatchingRow>, Option<i64>) {
+    let limit = crate::sources::materials::REVIEW_LIST_UNITS;
+    let mut rows: Vec<&crate::sources::agreement_view::UnitAgreement> = view
+        .units
+        .iter()
+        .filter(|u| u.position > after && AgreementView::in_tab(u, Tab::Matching))
+        .take(limit + 1)
+        .collect();
+    let more = rows.len() > limit;
+    rows.truncate(limit);
+    let next = more.then(|| rows.last().map(|u| u.position)).flatten();
+    let rows = rows
+        .into_iter()
+        .map(|u| MatchingRow {
+            id: u.id,
+            kind: u.kind.clone(),
+            first_line: u.first_line.clone(),
+            link: format!(
+                "/admin/materials/pages/{page}?units={}&unit={}&show=all#unit-{}",
+                u.position - 1,
+                u.id,
+                u.id
+            ),
+        })
+        .collect();
+    (rows, next)
+}
+/// The window the tab lists, and whether it is the compact matching list (no cards).
+fn window_filter(
+    view: &AgreementView,
+    tab: Tab,
+) -> (crate::sources::materials::WindowFilter, bool) {
+    use crate::sources::materials::WindowFilter;
+    if tab == Tab::Matching && view.offers_batch() {
+        return (WindowFilter::Ids(Vec::new()), true);
+    }
+    let filter = match tab {
+        Tab::Attention | Tab::Matching => WindowFilter::Ids(view.ids(tab)),
+        Tab::Reviewed => WindowFilter::Reviewed,
+        Tab::All => WindowFilter::All,
+    };
+    (filter, false)
+}
+/// The owner table, merge and split a redirect announces, each checked against the store.
+async fn verified_replacements(
+    state: &AuthState,
+    auth: &super::RequestAuth,
+    page: i64,
+    c: PageCursor,
+) -> (i64, i64, i64) {
+    let mut found = [0; 3];
+    for (slot, (unit, kind)) in
+        found
+            .iter_mut()
+            .zip([(c.table, "table"), (c.merge, "merge"), (c.split, "split")])
+    {
+        if unit > 0
+            && state
+                .sessions
+                .store
+                .material_is_owner_replacement(auth.clone(), page, unit, kind)
+                .await
+                .unwrap_or(false)
+        {
+            *slot = unit;
+        }
+    }
+    (found[0], found[1], found[2])
+}
 async fn page(
     State(state): State<AuthState>,
     session: Session,
@@ -577,25 +839,7 @@ async fn page(
     Query(mut c): Query<PageCursor>,
 ) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
-    let mut created = 0;
-    let mut merged = 0;
-    let mut split = 0;
-    for (unit, kind, slot) in [
-        (c.table, "table", &mut created),
-        (c.merge, "merge", &mut merged),
-        (c.split, "split", &mut split),
-    ] {
-        if unit > 0
-            && state
-                .sessions
-                .store
-                .material_is_owner_replacement(auth.clone(), id, unit, kind)
-                .await
-                .unwrap_or(false)
-        {
-            *slot = unit;
-        }
-    }
+    let (created, merged, split) = verified_replacements(&state, &auth, id, c).await;
     if c.saved != Saved::None {
         // A hand-made link must not claim a save that did not happen.
         let true_link = state
@@ -608,10 +852,34 @@ async fn page(
             c.saved = Saved::None;
         }
     }
+    // The agreement is computed before the card window is read: the tab decides which units
+    // the window lists.
+    let view = view_of(&state, auth.clone(), id).await;
+    let focus = if c.unit > 0 { c.unit } else { c.to };
+    // Without a result the view knows no unit: ask the unit itself whether it is decided.
+    let focus_reviewed = if focus > 0 && !view.has_result() {
+        state
+            .sessions
+            .store
+            .material_unit_state(auth.clone(), id, focus)
+            .await
+            .ok()
+            .map(|before| before != "unreviewed")
+    } else {
+        None
+    };
+    let (tab, tab_notice) = view.resolve(
+        c.show,
+        c.units > 0,
+        focus,
+        view.offers_batch(),
+        focus_reviewed,
+    );
+    let (filter, matching_list) = window_filter(&view, tab);
     let data = state
         .sessions
         .store
-        .material_page(auth.clone(), id, c.units, c.history)
+        .material_page_filtered(auth.clone(), id, c.units, c.history, filter)
         .await
         .map_err(|e| error(&e))?;
     let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
@@ -650,26 +918,21 @@ async fn page(
         .take(crate::sources::proposals::MAX_PROPOSALS)
         .map(|p| (p.label(), p.link(id)))
         .collect();
-    let mut editor = Editor::new(data, screen, csrf, c);
+    let next_override = matches!(tab, Tab::Attention | Tab::Matching)
+        .then(|| view.next_in(tab, 0).map(|u| (u.id, u.position - 1)))
+        .flatten();
+    let (matching_rows, matching_next) = if matching_list {
+        matching_rows(&view, id, c.units)
+    } else {
+        (Vec::new(), None)
+    };
+    let mut editor = Editor::new(data, screen, csrf, c).with_agreement(view, tab, tab_notice);
     editor.proposals = proposals;
-    if created > 0 {
-        editor.notice = format!(
-            "Created table unit {created}; the selected units are rejected. Check the new table against the original page before accepting it."
-        );
-        editor.notice_unit = created;
-    }
-    if merged > 0 {
-        editor.notice = format!(
-            "Merged into unit {merged}; the selected units are rejected and the new unit holds your text as a correction. Check it against the original page."
-        );
-        editor.notice_unit = merged;
-    }
-    if split > 0 {
-        editor.notice = format!(
-            "Split: unit {split} is the first of the new units; the original unit is rejected and each new unit holds your text as a correction. Check them against the original page."
-        );
-        editor.notice_unit = split;
-    }
+    editor.next_override = next_override;
+    editor.matching_list = matching_list;
+    editor.matching_rows = matching_rows;
+    editor.matching_next = matching_next;
+    editor.announce(created, merged, split);
     html(&editor)
 }
 fn png(bytes: Vec<u8>) -> axum::response::Response {
@@ -773,6 +1036,9 @@ struct Draft {
     correction: String,
     #[serde(deserialize_with = "crate::form_text::lf")]
     rationale: String,
+    /// The tab the decision was made on (the redirect continues in it).
+    #[serde(default)]
+    show: Show,
 }
 impl Draft {
     /// The fields that matter for the chosen decision (SRC-4): corrected text and rationale for a
@@ -807,8 +1073,18 @@ struct Completion {
     rationale: String,
 }
 /// The redirect after a stored unit decision; only fixed words and numbers are placed in it.
-fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext) -> String {
+/// The `show` a redirect carries. While no page offers the batch form, an absent `show` means
+/// `all`, so that tab is left out and the links stay as short as they were.
+fn carried(tab: Tab) -> String {
+    if tab == Tab::All && !crate::sources::agreement_view::batch_shipped() {
+        String::new()
+    } else {
+        format!("&show={}", tab.key())
+    }
+}
+fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext, tab: Tab) -> String {
     let label = Saved::of(state).key();
+    let show = carried(tab);
     match *next {
         ReviewNext::Unit { unit: to, cursor } => {
             let units = if cursor > 0 {
@@ -817,31 +1093,62 @@ fn saved_target(page: i64, unit: i64, state: &str, next: &ReviewNext) -> String 
                 String::new()
             };
             format!(
-                "/admin/materials/pages/{page}?{units}saved={label}&saved_unit={unit}&to={to}&then=unit#unit-{to}"
+                "/admin/materials/pages/{page}?{units}saved={label}&saved_unit={unit}&to={to}&then=unit{show}#unit-{to}"
             )
         }
         ReviewNext::Page(next) => format!(
-            "/admin/materials/pages/{next}?saved={label}&saved_unit={unit}&then=page#saved-notice"
+            "/admin/materials/pages/{next}?saved={label}&saved_unit={unit}&then=page{show}#saved-notice"
         ),
         ReviewNext::Done => format!(
             "/admin/materials/pages/{page}?saved={label}&saved_unit={unit}&then=done#complete"
         ),
         ReviewNext::Unknown => format!(
-            "/admin/materials/pages/{page}?saved={label}&saved_unit={unit}&then=unknown#unit-{unit}"
+            "/admin/materials/pages/{page}?saved={label}&saved_unit={unit}&to={unit}&then=unknown{show}#unit-{unit}"
         ),
     }
 }
 /// The redirect after re-deciding a reviewed unit: back to that unit, with its card window.
-fn stay_target(page: i64, unit: i64, state: &str, cursor: i64) -> String {
+fn stay_target(page: i64, unit: i64, state: &str, cursor: i64, tab: Tab) -> String {
     let label = Saved::of(state).key();
     let units = if cursor >= 50 {
         format!("units={cursor}&")
     } else {
         String::new()
     };
+    let show = carried(tab);
     format!(
-        "/admin/materials/pages/{page}?{units}saved={label}&saved_unit={unit}&to={unit}&then=stay#unit-{unit}"
+        "/admin/materials/pages/{page}?{units}saved={label}&saved_unit={unit}&to={unit}&then=stay{show}#unit-{unit}"
     )
+}
+/// Where a first decision continues: the tab's own next unit, else the next unreviewed unit.
+async fn next_after_save(
+    state: &AuthState,
+    auth: super::RequestAuth,
+    page: i64,
+    unit: i64,
+    view: &AgreementView,
+    tab: Tab,
+) -> ReviewNext {
+    if matches!(tab, Tab::Attention | Tab::Matching) {
+        let after = view.unit(unit).map_or(0, |u| u.position);
+        if let Some(next) = view.next_in(tab, after) {
+            return ReviewNext::Unit {
+                unit: next.id,
+                // The default window already shows positions 1..=50.
+                cursor: if next.position <= 50 {
+                    0
+                } else {
+                    next.position - 1
+                },
+            };
+        }
+    }
+    state
+        .sessions
+        .store
+        .material_next_after_review(auth, page, unit)
+        .await
+        .unwrap_or(ReviewNext::Unknown)
 }
 async fn review(
     State(state): State<AuthState>,
@@ -878,7 +1185,9 @@ async fn review(
         .await;
     match result {
         Ok(()) => {
-            // The decision is stored; a failed lookup only loses the jump, not the save.
+            // The decision is stored; a failed lookup only loses the jump, not the save. The
+            // tab the decision was made on continues: its next unit comes from the agreement
+            // read of the new revision (memoised, recomputed on a miss).
             if was_reviewed
                 && let Ok(cursor) = state
                     .sessions
@@ -886,19 +1195,20 @@ async fn review(
                     .material_unit_cursor(auth.clone(), page, unit)
                     .await
             {
+                // A re-decision needs no agreement: the unit stays in view.
+                let tab = form.show.tab();
                 return Ok(
-                    Redirect::to(&stay_target(page, unit, &form.state, cursor)).into_response()
+                    Redirect::to(&stay_target(page, unit, &form.state, cursor, tab))
+                        .into_response(),
                 );
             }
-            let next = state
-                .sessions
-                .store
-                .material_next_after_review(auth, page, unit)
-                .await
-                .unwrap_or(ReviewNext::Unknown);
-            Ok(Redirect::to(&saved_target(page, unit, &form.state, &next)).into_response())
+            let view = view_of(&state, auth.clone(), page).await;
+            let (tab, _) = view.resolve(form.show, false, 0, view.offers_batch(), None);
+            let next = next_after_save(&state, auth, page, unit, &view, tab).await;
+            Ok(Redirect::to(&saved_target(page, unit, &form.state, &next, tab)).into_response())
         }
         Err(e @ (AppError::Invalid(_) | AppError::Conflict)) => {
+            let editor_auth = auth.clone();
             let unit_cursor = state
                 .sessions
                 .store
@@ -940,6 +1250,10 @@ async fn review(
             editor.message = e.to_string();
             editor.error_unit = unit;
             editor.draft = Some(form);
+            // A refused save renders with every unit (so the draft binding and its link stay
+            // valid); its agreement bar is computed like any view.
+            let view = view_of(&state, editor_auth, page).await;
+            let editor = editor.with_agreement(view, Tab::All, None);
             trusted_editor(&editor, error(&e))
         }
         Err(e) => Err(error(&e)),
@@ -977,6 +1291,7 @@ async fn complete(
                 .material_page(auth.clone(), page, 0, 0)
                 .await
                 .map_err(|e| error(&e))?;
+            let view = view_of(&state, auth.clone(), page).await;
             let screen = state
                 .sessions
                 .store
@@ -988,7 +1303,8 @@ async fn complete(
                 )
                 .await
                 .map_err(|e| error(&e))?;
-            let mut editor = Editor::new(data, screen, form.csrf.clone(), PageCursor::default());
+            let mut editor = Editor::new(data, screen, form.csrf.clone(), PageCursor::default())
+                .with_agreement(view, Tab::All, None);
             editor.message = e.to_string();
             editor.completion = Some(form);
             trusted_editor(&editor, error(&e))
@@ -1337,6 +1653,7 @@ async fn reload_editor(
         .material_page(auth.clone(), page, 0, 0)
         .await
         .map_err(|e| error(&e))?;
+    let view = view_of(state, auth.clone(), page).await;
     let screen = state
         .sessions
         .store
@@ -1348,7 +1665,7 @@ async fn reload_editor(
         )
         .await
         .map_err(|e| error(&e))?;
-    Ok(Editor::new(data, screen, csrf, PageCursor::default()))
+    Ok(Editor::new(data, screen, csrf, PageCursor::default()).with_agreement(view, Tab::All, None))
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1746,7 +2063,7 @@ async fn create_table(
                 .await
                 .unwrap_or(0);
             Ok(Redirect::to(&format!(
-                "/admin/materials/pages/{page}?units={cursor}&table={unit}#unit-{unit}"
+                "/admin/materials/pages/{page}?units={cursor}&table={unit}&unit={unit}#unit-{unit}"
             ))
             .into_response())
         }
@@ -1954,7 +2271,7 @@ async fn create_merge(
                 .await
                 .unwrap_or(0);
             Ok(Redirect::to(&format!(
-                "/admin/materials/pages/{page}?units={cursor}&merge={unit}#unit-{unit}"
+                "/admin/materials/pages/{page}?units={cursor}&merge={unit}&unit={unit}#unit-{unit}"
             ))
             .into_response())
         }
@@ -2384,7 +2701,7 @@ async fn create_split(
                 .await
                 .unwrap_or(0);
             Ok(Redirect::to(&format!(
-                "/admin/materials/pages/{page}?units={cursor}&split={first}#unit-{first}"
+                "/admin/materials/pages/{page}?units={cursor}&split={first}&unit={first}#unit-{first}"
             ))
             .into_response())
         }

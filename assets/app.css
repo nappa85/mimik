@@ -188,3 +188,13 @@ textarea[aria-invalid="true"], input[aria-invalid="true"] { border: 2px solid #b
 fieldset[data-split-part] details { margin: .5rem 0; }
 .split-link { margin: .5rem 0 0; }
 .split-outline text { fill: #075ba6; font-weight: bold; }
+
+/* Agreement with the PDF text layer (review screen). */
+#review-overlay path.orphan-word, .review-legend .orphan-word { fill: #a1006622; stroke: #a10066; stroke-width: 1.5; stroke-dasharray: 1 3; vector-effect: non-scaling-stroke; pointer-events: none; }
+.review-tabs { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.review-tabs a[aria-current="page"] { font-weight: 700; text-decoration: none; }
+.agreement { margin-left: .5rem; font-size: .9em; }
+.agreement-agrees { color: #1a7f37; }
+.agreement-differs { color: #b42329; }
+.agreement-no-words, .agreement-excluded { color: #5a5a5a; }
+.agreement-diff q { background: #f6ba3b33; }

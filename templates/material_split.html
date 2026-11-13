@@ -1,6 +1,6 @@
 {% extends "material_base.html" %}
 {% block content %}
-<a href="/admin/materials/pages/{{ page }}#unit-{{ unit }}">← Back to the page</a>
+<a href="/admin/materials/pages/{{ page }}?unit={{ unit }}#unit-{{ unit }}">← Back to the page</a>
 <h1>Split unit {{ unit }}</h1>
 {% if !message.is_empty() %}<div class="panel field-error" id="split-error" role="alert" tabindex="-1" autofocus data-save-error><p>The split was not saved: {{ message }}</p>{% if open %}<p>Your text, boxes and rationale are kept below. If the page changed, <a href="/admin/materials/pages/{{ page }}">reload the page</a> and open the split again.</p>{% endif %}</div>
 {% endif %}{% if open %}

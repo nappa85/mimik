@@ -187,7 +187,7 @@ async fn material_merge_saves_one_corrected_unit_and_rejects_the_originals() {
     // The cursor is computed after the commit: the merged unit follows its anchor, unit 1.
     assert_eq!(
         location,
-        format!("/admin/materials/pages/1?units=1&merge={unit}#unit-{unit}")
+        format!("/admin/materials/pages/1?units=1&merge={unit}&unit={unit}#unit-{unit}")
     );
     let after = counts(&store).await;
     assert_eq!(after.0, before.0 + 1);

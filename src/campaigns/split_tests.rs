@@ -310,7 +310,7 @@ async fn material_split_previews_the_areas_then_saves_corrected_units() {
     assert_eq!(
         location,
         format!(
-            "/admin/materials/pages/1?units=1&split={0}#unit-{0}",
+            "/admin/materials/pages/1?units=1&split={0}&unit={0}#unit-{0}",
             units[0]
         )
     );
