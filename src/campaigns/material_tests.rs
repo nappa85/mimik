@@ -4531,7 +4531,8 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                "{} DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                crate::auth::DROP_HOME_SCHEMA,
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;

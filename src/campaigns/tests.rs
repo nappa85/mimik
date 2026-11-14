@@ -36,6 +36,8 @@ mod cell_tests;
 mod entry_save_tests;
 #[path = "formula_tests.rs"]
 mod formula_tests;
+#[path = "home_tests.rs"]
+mod home_tests;
 #[path = "interpret_route_tests.rs"]
 mod interpret_route_tests;
 #[path = "list_tests.rs"]

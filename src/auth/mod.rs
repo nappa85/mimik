@@ -4,12 +4,17 @@ mod assistant;
 mod assistant_downloads;
 mod assistant_downloads_view;
 mod errors;
+mod home;
 mod materials;
 pub(crate) mod nav;
 mod persistence;
 mod rulesets;
 #[cfg(target_os = "linux")]
 mod uploads;
+/// Rewinds schema 31 (the home marks and their indexes, migration 031) for upgrade tests of older
+/// schemas.
+#[cfg(test)]
+pub(crate) const DROP_HOME_SCHEMA: &str = "DROP TABLE IF EXISTS account_home_marks; DROP INDEX IF EXISTS campaign_events_target; DROP INDEX IF EXISTS campaign_events_campaign; DROP INDEX IF EXISTS campaign_requests_account; DROP INDEX IF EXISTS account_events_action; DROP INDEX IF EXISTS account_credentials_open; DROP INDEX IF EXISTS source_suggestion_reports_imported; DROP INDEX IF EXISTS source_pages_complete;";
 pub use persistence::Principal;
 pub use persistence::SqliteSessions;
 
@@ -192,10 +197,10 @@ fn router_with_sessions(
         .with_same_site(SameSite::Strict)
         .with_path("/");
     let router = Router::new()
-        .route("/", get(landing))
         .route("/auth/login", get(login_form).post(login))
         .route("/auth/logout", post(logout))
         .route("/auth/session", get(status))
+        .merge(home::routes())
         .merge(administration::routes())
         .merge(assistant::routes())
         .merge(materials::routes())
@@ -320,26 +325,6 @@ async fn boundary(request: Request, next: Next) -> Response {
         };
         normalize(response)
     }
-}
-
-#[derive(Template)]
-#[template(path = "home.html")]
-struct HomeTemplate {
-    nav: nav::Nav,
-}
-
-async fn landing(State(state): State<AuthState>, session: Session) -> AuthResult {
-    if principal(&state, &session).await?.is_none() {
-        return Ok(Redirect::to("/auth/login").into_response());
-    }
-    Ok(Html(
-        HomeTemplate {
-            nav: nav::Nav::here(nav::Section::Home),
-        }
-        .render()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-    )
-    .into_response())
 }
 
 fn positive_quality(value: &str) -> Option<bool> {
@@ -690,6 +675,12 @@ pub(crate) async fn request_auth(
     if account.owner {
         return Err(StatusCode::FORBIDDEN);
     }
+    admission(&account)
+}
+
+/// The domain admission of an account `principal` just loaded, from the request's captured
+/// session read.
+fn admission(account: &Summary) -> Result<RequestAuth, StatusCode> {
     let (original_id, deadline) = READ_ADMISSION
         .try_with(std::cell::Cell::get)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -801,18 +792,7 @@ async fn owner_auth(state: &AuthState, session: &Session) -> Result<RequestAuth,
     if !account.owner {
         return Err(StatusCode::FORBIDDEN);
     }
-    let (original_id, deadline) = READ_ADMISSION
-        .try_with(std::cell::Cell::get)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    Ok(RequestAuth {
-        account: Principal {
-            id: account.id,
-            epoch: account.epoch,
-        },
-        original_id,
-        deadline,
-    })
+    admission(&account)
 }
 
 async fn login_form(State(state): State<AuthState>, session: Session) -> AuthResult {

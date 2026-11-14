@@ -76,6 +76,50 @@ carries `aria-current="page"`. Pages without a session (error documents, sign-in
 and reset, catalogue notices, the sheet-busy page, the non-Linux upload stub) keep a
 logo-only header. On sheet pages `sheet-assist.js` holds back form submissions while saves are pending; the Sign out form is one of the page's forms, so signing out waits until pending saves finish.
 
+## Home page
+
+`GET /` (`src/auth/home.rs`) has quick links (the role's menu entries), a **Pending** panel
+and a panel of what is **new**. Every section is its own query of at most 11 rows (10 shown,
+a note and a link to the full list when there are more) inside one read transaction that
+rechecks the session before and after. Each query is bounded by an index or an explicit
+window: `account_events (action, occurred_at)`, `campaign_events (target_id, occurred_at)`
+and `(campaign_id, occurred_at)` (one query per campaign the account runs, at most 128
+exist), `source_suggestion_reports (imported_at)`, `source_pages (source_id, complete,
+pdf_page)`, `account_credentials` (partial, active rows) and `campaign_requests (account_id,
+state)`. "Open" suggestions (neither dismissed nor applied) cannot be indexed, so that block
+looks at the newest 1,000 suggestions only and says when older ones may exist. The Owner's
+home reads Owner tables only (no campaign table), through the Owner admission; a player's home
+reads campaign tables only (no Owner table), through the request admission. The one
+cross-reading is the guard `NOT EXISTS (account_owner)` that keeps an Owner membership left in
+an old database out of the Master's join-request list, as the roster does. Nothing shows sheet
+contents or another player's private data: counts, titles, links and times; a sheet is a link
+by number (the snapshot is not read), at most three per campaign and then a link to the
+campaign page.
+
+- **Owner, pending:** sources with pages not complete (page-level counts, a link to the first
+  incomplete page), uploads running or failed, open suggestions, unredeemed invitations,
+  assistant model downloads confirmed but not finished.
+- **Owner, new:** uploads finished or failed (`source_jobs.finished_at`), invitations
+  redeemed (`account_events`), suggestion reports imported (`source_suggestion_reports`).
+- **Player and Master, pending:** campaigns they run and play in, each with a link to the
+  campaign and to their own active sheets there; their pending join requests; for a Master
+  the requests to answer.
+- **Player and Master, new:** campaign events whose target is the account, and for a Master
+  the events of the campaigns they currently run; the account's own actions are left out.
+
+The mark is a per-account time in `account_home_marks` (a table of its own: `accounts`
+changes only with an epoch bump, which ends the account's other sessions). The new panel
+lists the newest items after the mark, or the latest ones while there is no mark. "Mark as
+seen" (`POST /home/seen`, CSRF) sends the newest time shown (`seen`) and the second the page
+was rendered (`shown_at`). The server accepts both only if they are at most now and `seen` is
+at most the newest new item the home shows at that moment (clamped to now, so a clock
+difference between SQLite's timestamps and the auth clock cannot refuse a mark). It stores
+`min(seen, shown_at - 1)`: the mark never reaches the render second, so an item arriving later
+in that second stays new. A value at or below the mark changes nothing (two tabs), and a
+trigger refuses any backwards or future value. The Owner's write uses the CSRF admission and
+the in-transaction Owner recheck like the other Owner writes; a player's runs in the request
+context. Older items beyond the 10 shown are marked with it.
+
 ## LAN and reverse-proxy deployment
 
 **LAN selection** (`Network::discover`): enumerates private IPv4 interfaces with a
