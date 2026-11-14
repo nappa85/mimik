@@ -4531,7 +4531,8 @@ async fn material_migration_028_allows_only_text_and_table_owner_units() {
                 .unwrap();
             let end = old[start..].find("END;").unwrap() + start + 4;
             db.execute_batch(&format!(
-                "DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                "{} DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; DROP TRIGGER source_unit_origin_insert; {}",
+                crate::auth::DROP_HOME_SCHEMA,
                 &old[start..end]
             ))?;
             db.execute_batch("PRAGMA user_version=27;")?;
@@ -7090,7 +7091,8 @@ async fn material_table_form_shows_the_original_references_only_with_units() {
         )
         .await;
         assert!(
-            !html.contains("<img") && !html.contains("selection/image"),
+            !html.split_once("</header>").unwrap().1.contains("<img")
+                && !html.contains("selection/image"),
             "{html}"
         );
         assert!(!html.contains("table-page-reference"));
@@ -7134,7 +7136,9 @@ async fn material_table_form_without_a_usable_reference_shows_no_images() {
     let html = body(refused).await;
     assert_eq!(field_value(&html, "textarea[name=cells]"), "a | b");
     assert!(
-        !html.contains("page 0") && !html.contains("selection/image") && !html.contains("<img"),
+        !html.contains("page 0")
+            && !html.contains("selection/image")
+            && !html.split_once("</header>").unwrap().1.contains("<img"),
         "{html}"
     );
     assert!(!html.contains("table-page-reference"));
@@ -7167,7 +7171,7 @@ async fn material_table_form_without_a_usable_reference_shows_no_images() {
     assert!(field_value(&html, "textarea[name=cells]").contains('|'));
     assert!(
         !html.contains("selection/image")
-            && !html.contains("<img")
+            && !html.split_once("</header>").unwrap().1.contains("<img")
             && !html.contains("table-page-reference"),
         "{html}"
     );
@@ -7181,3 +7185,105 @@ mod split_tests;
 
 #[path = "agreement_screen_tests.rs"]
 mod agreement_screen_tests;
+
+/// Every renderer of the owner material pages carries the shared header (strict: no layout
+/// script), on a plain read and on a refused POST that re-renders the draft.
+async fn assert_material_header(response: axum::response::Response, status: StatusCode, at: &str) {
+    assert_eq!(response.status(), status, "{at}");
+    let html = body(response).await;
+    crate::auth::nav::check::assert_header(&html, true, Some("/admin/materials"), true, at);
+}
+
+#[tokio::test]
+async fn material_review_pages_and_rerenders_carry_the_header() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth, _clock) = fixture().await;
+    seed(&store).await;
+    finalize_material(&store).await;
+    let id = suggestion_fixture(&store, "correction", suggestion_unit(1)).await;
+    let app = crate::auth::app(store).await.unwrap();
+    for path in [
+        "/admin/materials".to_owned(),
+        "/admin/materials/sources/1".to_owned(),
+        "/admin/materials/sources/1/review".to_owned(),
+        "/admin/materials/pages/1".to_owned(),
+        "/admin/materials/pages/1/units/1/suggestions".to_owned(),
+        format!("/admin/materials/suggestions/{id}"),
+    ] {
+        assert_material_header(
+            router_get(&app, &auth[0], &path).await,
+            StatusCode::OK,
+            &path,
+        )
+        .await;
+    }
+    // The unit editor re-rendering a refused review, and the suggestion editor a refused accept.
+    let refused = document_post(
+        &app,
+        &auth[0],
+        review_form(&[
+            ("revision", "1"),
+            ("state", "bogus"),
+            ("correction", ""),
+            ("rationale", "Checked"),
+        ]),
+    )
+    .await;
+    assert_material_header(refused, StatusCode::UNPROCESSABLE_ENTITY, "unit review").await;
+    let refused = document_at(
+        &app,
+        &auth[0],
+        &format!("/admin/materials/suggestions/{id}/accept"),
+        review_form(&[
+            ("edit", "yes"),
+            ("edited_text", &"🦀".repeat(20000)),
+            ("rationale", ""),
+        ]),
+    )
+    .await;
+    assert_material_header(
+        refused,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "suggestion accept",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn material_table_merge_and_split_editors_carry_the_header() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let (_dir, store, auth) = two_page_table_fixture("").await;
+    let app = crate::auth::app(store).await.unwrap();
+    for path in [
+        "/admin/materials/pages/1/tables/new?unit=1&unit=2",
+        "/admin/materials/pages/1/merges/new?unit=1&unit=2",
+        "/admin/materials/pages/1/units/1/split",
+    ] {
+        assert_material_header(router_get(&app, &auth[0], path).await, StatusCode::OK, path).await;
+    }
+    let refused = table_post(&app, &auth[0], table_fields(&["1:1", "2:1"], "a | b", "")).await;
+    assert_material_header(refused, StatusCode::UNPROCESSABLE_ENTITY, "table save").await;
+    let mut merge = table_fields(&["1:1", "2:1"], "", "");
+    merge[2..].iter_mut().for_each(|(key, _)| {
+        if key == "cells" {
+            "text".clone_into(key);
+        }
+    });
+    let refused = document_at(&app, &auth[0], "/admin/materials/pages/1/merges", merge).await;
+    assert_material_header(refused, StatusCode::UNPROCESSABLE_ENTITY, "merge save").await;
+    let split = vec![
+        ("csrf".to_owned(), "a".repeat(64)),
+        ("revision".to_owned(), "1".to_owned()),
+        ("unit_revision".to_owned(), "1".to_owned()),
+        ("text".to_owned(), String::new()),
+        ("rationale".to_owned(), String::new()),
+    ];
+    let refused = document_at(
+        &app,
+        &auth[0],
+        "/admin/materials/pages/1/units/1/split",
+        split,
+    )
+    .await;
+    assert_material_header(refused, StatusCode::UNPROCESSABLE_ENTITY, "split save").await;
+}

@@ -4,7 +4,7 @@
 It is served locally and embedded in the executable; no CDN or Node.js toolchain is needed at runtime.
 
 htmx is third-party software under the Zero-Clause BSD license, included as `htmx-LICENSE`.
-`app.css` is Mimik's application styling.
+`app.css` is Mimik's application styling. `nav.js` closes the header menus on an outside click or Escape.
 
 `htmx.source.js` is the preferred-form upstream source for the incorporated htmx
 2.0.8 asset, retrieved from https://github.com/bigskysoftware/htmx/blob/v2.0.8/src/htmx.js.

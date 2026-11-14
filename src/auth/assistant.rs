@@ -569,6 +569,7 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
 #[derive(Template)]
 #[template(path = "admin_assistant.html")]
 struct Page {
+    nav: super::nav::Nav,
     csrf: String,
     notice: &'static str,
     view: Option<View>,
@@ -606,6 +607,7 @@ async fn render(
         _ => None,
     };
     html(&Page {
+        nav: super::nav::Nav::here(super::nav::Section::Assistant),
         csrf,
         notice,
         view,

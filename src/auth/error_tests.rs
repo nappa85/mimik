@@ -146,7 +146,7 @@ async fn busy_flag_preserves_only_failed_retry_not_success_or_cookie() {
             "/auth/login",
             axum::routing::post(|| async {
                 mark_storage_busy();
-                let mut response = Redirect::to("/auth/session").into_response();
+                let mut response = Redirect::to("/").into_response();
                 response.extensions_mut().insert(errors::LoginRetry);
                 response.headers_mut().insert(
                     header::SET_COOKIE,

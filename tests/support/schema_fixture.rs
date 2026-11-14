@@ -22,7 +22,21 @@ pub fn remove_empty_account_tables(db: &rusqlite::Connection) {
     transaction.commit().unwrap();
 }
 
+/// Drops the home page's schema (migration 31: the mark table and its indexes) so a rewound
+/// database re-runs that migration cleanly; mirrors `auth::DROP_HOME_SCHEMA` (the unit test
+/// `drop_lists_match_migration_031` keeps the two and the migration identical).
+fn drop_home_schema(db: &rusqlite::Connection) {
+    db.execute_batch(
+        "DROP TABLE IF EXISTS account_home_marks; DROP INDEX IF EXISTS campaign_events_target; \
+         DROP INDEX IF EXISTS campaign_events_campaign; DROP INDEX IF EXISTS campaign_requests_account; \
+         DROP INDEX IF EXISTS account_events_action; DROP INDEX IF EXISTS account_credentials_open; \
+         DROP INDEX IF EXISTS source_suggestion_reports_imported; DROP INDEX IF EXISTS source_pages_complete;",
+    )
+    .unwrap();
+}
+
 fn remove_empty_accounts(db: &rusqlite::Connection) {
+    drop_home_schema(db);
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
@@ -297,6 +311,7 @@ pub fn rewind_review(db: &rusqlite::Connection) {
 }
 
 fn rewind_uploads(db: &rusqlite::Connection) {
+    drop_home_schema(db);
     let exists: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='source_uploads')",

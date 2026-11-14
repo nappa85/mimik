@@ -301,6 +301,7 @@ struct Page {
 #[derive(Template)]
 #[template(path = "campaigns.html")]
 struct IndexTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     workspace: &'a Workspace,
     csrf: &'a str,
 }
@@ -308,6 +309,7 @@ struct IndexTemplate<'a> {
 #[derive(Template)]
 #[template(path = "campaign.html")]
 struct DetailTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     detail: &'a Detail,
     csrf: &'a str,
     account_id: i64,
@@ -335,6 +337,7 @@ async fn index(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Html(
         IndexTemplate {
+            nav: crate::auth::nav::Nav::here(crate::auth::nav::Section::Campaigns),
             workspace: &workspace,
             csrf: &csrf,
         }
@@ -377,6 +380,7 @@ async fn detail(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     Ok(Html(
         DetailTemplate {
+            nav: crate::auth::nav::Nav::here(crate::auth::nav::Section::Campaigns),
             detail: &detail,
             csrf: &csrf,
             account_id,
@@ -487,12 +491,14 @@ async fn member(
 #[derive(Template)]
 #[template(path = "private_list.html")]
 struct PersonalTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     sheets: &'a [SheetSummary],
     next: Option<i64>,
 }
 #[derive(Template)]
 #[template(path = "private_history.html")]
 struct HistoryTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     id: i64,
     rows: &'a [DatedHistory],
     next: Option<i64>,
@@ -515,6 +521,7 @@ async fn personal(
         .map_err(error)?;
     Ok(Html(
         PersonalTemplate {
+            nav: crate::auth::nav::Nav::here(crate::auth::nav::Section::Sheets),
             sheets: &sheets.rows,
             next: sheets.next,
         }
@@ -545,6 +552,7 @@ async fn history(
         .collect::<Vec<_>>();
     Ok(Html(
         HistoryTemplate {
+            nav: crate::auth::nav::Nav::here(crate::auth::nav::Section::Sheets),
             id,
             rows: &dated,
             next: rows.next,
@@ -1349,6 +1357,7 @@ struct GroupView {
 #[derive(Template)]
 #[template(path = "private_sheet.html")]
 struct PrivateTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     view: &'a SheetView,
     csrf: &'a str,
     action: String,
@@ -1465,6 +1474,7 @@ fn native_draft(form: &BTreeMap<String, String>) -> crate::mork_form::SheetDraft
 }
 
 fn render_private(
+    nav: crate::auth::nav::Nav,
     view: &SheetView,
     csrf: &str,
     raw: Option<&BTreeMap<String, String>>,
@@ -1515,6 +1525,7 @@ fn render_private(
         format!("/private-sheets/{}", view.snapshot.sheet_id)
     };
     PrivateTemplate {
+        nav,
         view,
         csrf,
         action,
@@ -1787,9 +1798,11 @@ async fn rendered(
     status: StatusCode,
     notice: Notice,
 ) -> ResultResponse {
+    // The blocking pool does not carry the request's task-local account context.
+    let nav = crate::auth::nav::Nav::here_strict(crate::auth::nav::Section::Sheets);
     let html = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        render_private(&view, &csrf, raw.as_ref(), &notice)
+        render_private(nav, &view, &csrf, raw.as_ref(), &notice)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

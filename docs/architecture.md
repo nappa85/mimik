@@ -45,8 +45,7 @@ process, never a container
 
 Authenticated startup refuses to serve until an Owner exists (`bootstrap-owner`). The
 prototype keeps the legacy identity/notes records and the native MÖRK BORG editor, isolated
-from the private campaign tables. `--dev-owner-play` (development only) lets the Owner use
-explicit gameplay grants. `--assistant` turns the interpretation assistant on, with its
+from the private campaign tables. `--assistant` turns the interpretation assistant on, with its
 `--assistant-model*`, `--models-dir`, `--assistant-runtime` and `--assistant-threads` options
 ([model-runtime.md](model-runtime.md)); builds with the `dev-endpoint` feature (never a
 release) also take `--assistant-dev-endpoint` and `--assistant-dev-token-file` for tests. The

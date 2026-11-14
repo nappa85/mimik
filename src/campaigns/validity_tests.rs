@@ -102,7 +102,8 @@ async fn violated_check_flags_and_a_flagged_sheet_still_saves() {
     assert!(shown.contains("<a href=\"#advisory-checks\">1 check violated</a>"));
     assert!(shown.contains("This flag never blocks saving."));
     // In the header: before any form, so it reads first without script or styles.
-    assert!(html.find("id=\"validity\"").unwrap() < html.find("<form").unwrap());
+    let main = html.find("<main>").unwrap();
+    assert!(html.find("id=\"validity\"").unwrap() < main + html[main..].find("<form").unwrap());
     assert!(
         !html
             .replace(super::script_tests::MODULE_TAG, "")

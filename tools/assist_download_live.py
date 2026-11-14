@@ -283,7 +283,7 @@ class Live:
             form=dict(fields, login=OWNER, password=self.password.decode()),
         )
         require(
-            response[0] == 303 and response[1].get("location") == "/auth/session",
+            response[0] == 303 and response[1].get("location") == "/",
             "Owner login failed (diagnostics redacted)",
         )
         self.cookie = auth_cookie(response)

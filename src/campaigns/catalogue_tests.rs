@@ -473,6 +473,13 @@ async fn sheet_links_its_catalogues_and_routes_follow_the_sheet_read_matrix() {
             assert_eq!(status, expected, "account index {account} {path}");
             if status == StatusCode::OK {
                 assert!(!html.contains("<script"), "{path} loads a script");
+                crate::auth::nav::check::assert_header(
+                    &html,
+                    false,
+                    Some("/private-sheets"),
+                    true,
+                    path,
+                );
             }
         }
     }
@@ -1248,6 +1255,7 @@ async fn browse_pages_link_to_the_next_page_with_the_filters() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    crate::auth::nav::check::assert_header(&first, false, Some("/private-sheets"), true, "browse");
     assert_eq!(first.matches("<li><a href=").count(), 50);
     assert!(
         first.contains("href=\"/private-sheets/1/catalogue/spells?type=charm&#38;q=echo&#38;after=echo-49\">Next entries</a>"),
@@ -1275,6 +1283,13 @@ async fn browse_pages_link_to_the_next_page_with_the_filters() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    crate::auth::nav::check::assert_header(
+        &problem,
+        false,
+        Some("/private-sheets"),
+        true,
+        "problem",
+    );
     assert!(problem.contains("Search text needs at least one word with letters or digits."));
     assert!(problem.contains("role=\"search\""));
 }

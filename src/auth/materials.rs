@@ -128,6 +128,10 @@ pub(super) fn error(e: &AppError) -> StatusCode {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
+/// The header of a material page, served under the strict sheet policy (no layout script).
+fn nav() -> super::nav::Nav {
+    super::nav::Nav::here_strict(super::nav::Section::Materials)
+}
 pub(super) fn html(t: &impl Template) -> AuthResult {
     Ok(Html(t.render().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?).into_response())
 }
@@ -221,6 +225,7 @@ impl Then {
 #[derive(Template)]
 #[template(path = "materials.html")]
 struct Directory {
+    nav: super::nav::Nav,
     rows: Vec<Material>,
     next: Option<i64>,
 }
@@ -237,6 +242,7 @@ async fn directory(
         .await
         .map_err(|e| error(&e))?;
     html(&Directory {
+        nav: nav(),
         rows: listing.rows,
         next: listing.next,
     })
@@ -244,6 +250,7 @@ async fn directory(
 #[derive(Template)]
 #[template(path = "material_pages.html")]
 struct Pages {
+    nav: super::nav::Nav,
     source: i64,
     rows: Vec<crate::sources::materials::PrimaryMaterialPage>,
     next: Option<i64>,
@@ -266,6 +273,7 @@ async fn pages(
         .await
         .map_err(|e| error(&e))?;
     html(&Pages {
+        nav: nav(),
         source: id,
         rows: listing.rows,
         next: listing.next,
@@ -279,6 +287,7 @@ async fn pages(
 #[derive(Template)]
 #[template(path = "material_review.html")]
 struct ReviewListPage {
+    nav: super::nav::Nav,
     source: i64,
     list: crate::sources::materials::ReviewList,
 }
@@ -295,7 +304,11 @@ async fn review_list(
         .material_review_list(auth, id, c.after)
         .await
         .map_err(|e| error(&e))?;
-    html(&ReviewListPage { source: id, list })
+    html(&ReviewListPage {
+        nav: nav(),
+        source: id,
+        list,
+    })
 }
 
 async fn primary_pages(
@@ -376,6 +389,7 @@ async fn primary_pages(
                 }
             }
             let mut response = html(&Pages {
+                nav: nav(),
                 source,
                 rows: listing.rows,
                 next: listing.next,
@@ -394,6 +408,7 @@ async fn primary_pages(
 #[derive(Template)]
 #[template(path = "material_page.html")]
 struct Editor {
+    nav: super::nav::Nav,
     page: PageView,
     csrf: String,
     message: String,
@@ -773,6 +788,7 @@ impl Editor {
             });
         }
         Self {
+            nav: nav(),
             page: data.page,
             csrf,
             message: String::new(),
@@ -1541,6 +1557,7 @@ struct SuggestionDraft {
 #[derive(Template)]
 #[template(path = "material_suggestion.html")]
 struct SuggestionEditor {
+    nav: super::nav::Nav,
     advice: crate::sources::review::Advice,
     form: SuggestionDraft,
     message: String,
@@ -1648,6 +1665,7 @@ async fn suggestion(
         ..SuggestionDraft::default()
     };
     SuggestionEditor {
+        nav: nav(),
         advice,
         form,
         message: String::new(),
@@ -1660,6 +1678,7 @@ async fn suggestion(
 #[derive(Template)]
 #[template(path = "material_suggestions.html")]
 struct SuggestionList {
+    nav: super::nav::Nav,
     page: i64,
     unit: i64,
     rows: Vec<crate::sources::review::Advice>,
@@ -1686,6 +1705,7 @@ async fn suggestion_list(
         .await
         .map_err(|e| error(&e))?;
     html(&SuggestionList {
+        nav: nav(),
         page,
         unit,
         rows,
@@ -1778,6 +1798,7 @@ async fn suggestion_write(
                 .await
                 .map_err(|e| error(&e))?;
             let mut response = SuggestionEditor {
+                nav: nav(),
                 advice,
                 form,
                 message: e.to_string(),
@@ -1931,6 +1952,7 @@ async fn primary(
 #[derive(Template)]
 #[template(path = "material_table.html")]
 struct TableEditor {
+    nav: super::nav::Nav,
     page: i64,
     csrf: String,
     revision: i64,
@@ -2003,6 +2025,7 @@ struct ShapeChoice {
 impl TableEditor {
     fn new(page: i64, csrf: String) -> Self {
         Self {
+            nav: nav(),
             page,
             csrf,
             revision: 0,
@@ -2213,6 +2236,7 @@ async fn create_table(
     let csrf_token = csrf_token.ok_or(StatusCode::FORBIDDEN)?;
     let csrf = csrf_admission(&session, &csrf_token).await?;
     let mut editor = TableEditor {
+        nav: nav(),
         revision: revision.unwrap_or(0),
         units,
         grid: cells.unwrap_or_default(),
@@ -2286,6 +2310,7 @@ async fn create_table(
 #[derive(Template)]
 #[template(path = "material_merge.html")]
 struct MergeEditor {
+    nav: super::nav::Nav,
     page: i64,
     csrf: String,
     revision: i64,
@@ -2308,6 +2333,7 @@ struct MergeEditor {
 impl MergeEditor {
     fn new(page: i64, csrf: String) -> Self {
         Self {
+            nav: nav(),
             page,
             csrf,
             revision: 0,
@@ -2429,6 +2455,7 @@ async fn create_merge(
     let csrf_token = csrf_token.ok_or(StatusCode::FORBIDDEN)?;
     let csrf = csrf_admission(&session, &csrf_token).await?;
     let mut editor = MergeEditor {
+        nav: nav(),
         revision: revision.unwrap_or(0),
         units,
         text: text.unwrap_or_default(),
@@ -2506,6 +2533,7 @@ async fn create_merge(
 #[derive(Template)]
 #[template(path = "material_split.html")]
 struct SplitEditor {
+    nav: super::nav::Nav,
     page: i64,
     unit: i64,
     csrf: String,
@@ -2564,6 +2592,7 @@ impl PartBox {
 impl SplitEditor {
     fn new(page: i64, unit: i64, csrf: String) -> Self {
         Self {
+            nav: nav(),
             page,
             unit,
             csrf,

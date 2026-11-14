@@ -291,7 +291,7 @@ pub(crate) fn authorize_edit(
     snapshot: &PrivateSnapshot,
 ) -> Result<(), AppError> {
     let role = role(db, snapshot.campaign_id, auth.account_id())?;
-    let supervision:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM campaign_members m JOIN accounts a ON a.id=m.account_id WHERE m.campaign_id=?1 AND m.role='master' AND m.state='active' AND a.state='enabled' AND (?2 OR NOT EXISTS(SELECT 1 FROM account_owner o WHERE o.account_id=a.id)))",params![snapshot.campaign_id,auth.development_owner_play()],|r|r.get(0))?;
+    let supervision:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM campaign_members m JOIN accounts a ON a.id=m.account_id WHERE m.campaign_id=?1 AND m.role='master' AND m.state='active' AND a.state='enabled' AND NOT EXISTS(SELECT 1 FROM account_owner o WHERE o.account_id=a.id))",params![snapshot.campaign_id],|r|r.get(0))?;
     if snapshot.state != "active"
         || !supported(snapshot)
         || !supervision

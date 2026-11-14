@@ -531,6 +531,7 @@ fn migration_backfills_existing_owner_tables_in_order() {
             );
             tx.commit()?;
             // Rewind to a version 29 database: no replacement rows exist yet.
+            db.execute_batch(crate::auth::DROP_HOME_SCHEMA)?;
             db.execute_batch("DROP TABLE source_owner_replacements; PRAGMA user_version=29;")?;
             Ok((order, [first, second, third, fourth], missing))
         })

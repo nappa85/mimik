@@ -2037,7 +2037,7 @@ def run_account_admin_browser(browser, owner_page, viewport, directory):
         page.locator('input[name="login"]').fill("browser-enrolled")
         page.locator('input[name="password"]').fill("abcdefghijkl")
         page.get_by_role("button", name="Sign in", exact=True).click()
-        page.wait_for_url("**/auth/session")
+        page.wait_for_url("**/")
         require(
             page.goto("http://127.0.0.1:3000/admin").status == 403,
             "Enrolled player gained administration",
@@ -2220,7 +2220,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
             submitted.value.status == 303,
             f"Browser login failed with HTTP{submitted.value.status} (diagnostics redacted)",
         )
-        page.wait_for_url("**/auth/session")
+        page.wait_for_url("**/")
         require(name in page.locator("main").inner_text(), "Browser current principal differs")
         require(
             all(password.decode() not in page.content() for password in passwords),
@@ -2349,6 +2349,7 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
             secrets=passwords,
         )
         current = login("auth-player", passwords[1])
+        page.locator("header.site details.account summary").click()
         with page.expect_response(
             lambda r: r.request.method == "POST" and urlsplit(r.url).path == "/auth/logout"
         ) as submitted:

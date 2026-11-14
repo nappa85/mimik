@@ -1,5 +1,5 @@
 {% extends "material_base.html" %}
-{% block head %}{% if refresh %}<noscript><meta http-equiv="refresh" content="2"></noscript>{% endif %}<script src="/assets/source-upload.js" defer></script>{% endblock %}
+{% block page_head %}{% if refresh %}<noscript><meta http-equiv="refresh" content="2"></noscript>{% endif %}<script src="/assets/source-upload.js" defer></script>{% endblock %}
 {% block content %}
 <h1>Staged PDF</h1><p>{{ upload.pdf_bytes }} bytes · SHA-256 {{ self.hash() }} · {{ upload.state }}</p>
 {% if let Some(document) = upload.already_document %}<p>already document {{ document }}; this upload can become a separate reading.</p>{% endif %}

@@ -234,7 +234,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 
 - **AUTH-1** (2026-10-12) Accounts come only from Owner-issued invitations; users set their own passwords; no open sign-up, no email delivery.
 - **AUTH-2** (2026-10-13, refined 2026-10-14) Passwords: at least 15 Unicode scalars for the Owner and 12 for players, at most 128 scalars and 512 bytes; no character classes; bytes never trimmed or normalized.
-- **AUTH-3** (2026-10-13, refined 2026-10-19) The Owner account is administration-only: it never plays or acts as a Master, even with leftover grants or custody; there is no Owner gameplay override (`--dev-owner-play` is to be removed).
+- **AUTH-3** (2026-10-13, refined 2026-10-19) The Owner account is administration-only: it never plays or acts as a Master, even with leftover grants or custody; there is no Owner gameplay override.
 - **AUTH-4** (2026-10-13) Owner administration (invite, reset, disable) gives no sheet or history access; resets and disablement end the target's sessions through the account epoch.
 - **AUTH-5** (2026-10-13) The CLI is trusted local operator authority, not web authentication; passwords and tokens enter only through protected private files, never command-line values.
 - **AUTH-6** (2026-10-14) `mimik` serves authenticated LAN by default; `--no-auth` is the explicit loopback-only prototype; the old `--auth` flag is removed with no alias.

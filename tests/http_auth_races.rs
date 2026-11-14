@@ -415,9 +415,7 @@ async fn competing_logout_rotation_and_second_save(store: &Store, path: &std::pa
     assert!(sessions.load(&old.id).await.unwrap().is_none());
     assert!(sessions.save(&old).await.is_err());
     assert_eq!(
-        get_session(&normal, &new_cookie, "/auth/session")
-            .await
-            .status(),
+        get_session(&normal, &new_cookie, "/").await.status(),
         StatusCode::OK
     );
     let current = sessions

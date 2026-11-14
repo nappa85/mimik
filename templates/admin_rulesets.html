@@ -1,5 +1,4 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Rulesets · Mimik</title><link rel="stylesheet" href="/assets/app.css"></head><body><main>
-<nav><a href="/admin">Owner administration</a> · <a href="/admin/materials">Materials</a> · <a href="/admin/rulesets">Rulesets</a></nav>
+{% extends "layout.html" %}{% block title %}Rulesets · Mimik{% endblock %}{% block content %}
 <h1>Ruleset registry</h1>
 <p>Registering a stable game/edition identity lets prepared sources and records name it exactly. It does not approve evidence, publish a sheet definition, enable rules or authorize campaigns. IDs and labels are immutable once registered; there is no rename or delete. The same registrations are available to the local operator CLI.</p>
 {% if !notice.is_empty() %}<p class="panel" role="status">{{ notice }}</p>{% endif %}
@@ -23,4 +22,4 @@
 {% for row in rows %}<article><h3>{{ row.game_label }} — {{ row.edition_label }}</h3><p><code>{{ row.game_id }}</code> / <code>{{ row.edition_id }}</code> · {% if let Some(adapter) = row.native_adapter %}native adapter {{ adapter }}{% else %}no native adapter{% endif %} · {% if row.generic_sheet_available %}generic sheet available{% else %}no generic sheet{% endif %}</p></article>{% endfor %}
 {% if rows.is_empty() %}<p>No registered editions on this page.</p>{% endif %}
 {% if let Some(next) = next %}<a href="/admin/rulesets?after_game={{ next.game_id }}&amp;after_edition={{ next.edition_id }}">Next editions</a> · {% endif %}<a href="/admin/rulesets">First editions</a></section>
-</main></body></html>
+{% endblock %}

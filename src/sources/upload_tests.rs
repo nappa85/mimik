@@ -123,6 +123,7 @@ fn exclusion_migration_removes_legacy_guessable_fingerprints() {
                 "UPDATE source_upload_exclusions SET proposal_fingerprint=?1",
                 [hash(b"test")],
             )?;
+            db.execute_batch(crate::auth::DROP_HOME_SCHEMA)?;
             db.execute_batch(
                 "ALTER TABLE source_uploads DROP COLUMN fingerprint_key; DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; PRAGMA user_version=26;",
             )?;

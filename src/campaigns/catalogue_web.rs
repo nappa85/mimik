@@ -170,9 +170,11 @@ async fn respond(
         Err(other) => return Err(error(other)),
     };
     // Rendering keeps the runtime permit (R6 phase 4).
+    // The blocking pool does not carry the request's task-local account context.
+    let nav = crate::auth::nav::Nav::here_strict(crate::auth::nav::Section::Sheets);
     let (status, html) = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        render(&page, &echo)
+        render(nav, &page, &echo)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
@@ -288,6 +290,7 @@ struct ResultView {
 #[derive(Template)]
 #[template(path = "catalogue_browse.html")]
 struct BrowseTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     sheet_href: String,
     action: String,
     title: &'a str,
@@ -320,6 +323,7 @@ impl From<&Citation> for CitationView {
 #[derive(Template)]
 #[template(path = "catalogue_entry.html")]
 struct EntryTemplate<'a> {
+    nav: crate::auth::nav::Nav,
     sheet_href: String,
     browse_href: String,
     title: &'a str,
@@ -365,6 +369,7 @@ fn browse_link(base: &str, echo: &Echo, after: Option<&str>) -> Result<String, S
 }
 
 fn entry_page(
+    nav: crate::auth::nav::Nav,
     page: &CataloguePage,
     entry: &EntryPage,
     sheet_href: String,
@@ -379,6 +384,7 @@ fn entry_page(
             Description::Unavailable | Description::Malformed => (None, &[], None),
         };
     EntryTemplate {
+        nav,
         sheet_href,
         browse_href,
         title: &page.title,
@@ -402,7 +408,11 @@ fn entry_page(
     .render()
 }
 
-fn render(page: &CataloguePage, echo: &Echo) -> Result<(StatusCode, String), StatusCode> {
+fn render(
+    nav: crate::auth::nav::Nav,
+    page: &CataloguePage,
+    echo: &Echo,
+) -> Result<(StatusCode, String), StatusCode> {
     let sheet_href = format!("/private-sheets/{}", page.sheet_id);
     let base = format!("{sheet_href}/catalogue/{}", page.catalogue);
     let rendered = match &page.body {
@@ -435,6 +445,7 @@ fn render(page: &CataloguePage, echo: &Echo) -> Result<(StatusCode, String), Sta
             (
                 StatusCode::OK,
                 BrowseTemplate {
+                    nav,
                     sheet_href,
                     action: base,
                     title: &page.title,
@@ -453,6 +464,7 @@ fn render(page: &CataloguePage, echo: &Echo) -> Result<(StatusCode, String), Sta
         Body::Problem(message) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             BrowseTemplate {
+                nav,
                 sheet_href,
                 action: base,
                 title: &page.title,
@@ -467,7 +479,10 @@ fn render(page: &CataloguePage, echo: &Echo) -> Result<(StatusCode, String), Sta
             }
             .render(),
         ),
-        Body::Entry(entry) => (StatusCode::OK, entry_page(page, entry, sheet_href, base)),
+        Body::Entry(entry) => (
+            StatusCode::OK,
+            entry_page(nav, page, entry, sheet_href, base),
+        ),
         Body::NoEntry(key) => notice_page(&Notice::NoEntry(Missing404 {
             sheet_href,
             browse_href: base,

@@ -79,6 +79,7 @@ struct Cursor {
 #[derive(Template)]
 #[template(path = "admin.html")]
 struct Directory<'a> {
+    nav: super::nav::Nav,
     rows: &'a [Summary],
     next: Option<i64>,
     csrf: &'a str,
@@ -97,6 +98,7 @@ async fn directory(
     let csrf = super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?;
     Ok(Html(
         Directory {
+            nav: super::nav::Nav::here(super::nav::Section::Accounts),
             rows: &rows,
             next,
             csrf: &csrf,
@@ -173,6 +175,7 @@ async fn change(
 #[derive(Template)]
 #[template(path = "account_issued.html")]
 struct Issuance<'a> {
+    nav: super::nav::Nav,
     account: &'a Summary,
     token: &'a str,
     link: &'a str,
@@ -195,6 +198,7 @@ fn issuance(origin: &str, issued: &Issued) -> AuthResult {
     let expires = crate::presentation::datetime(issued.expires);
     Ok(Html(
         Issuance {
+            nav: super::nav::Nav::here(super::nav::Section::Accounts),
             account: &issued.account,
             token,
             link: link.as_str(),

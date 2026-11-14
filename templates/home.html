@@ -1,0 +1,10 @@
+{% extends "layout.html" %}
+{% block title %}Home · Mimik{% endblock %}
+{% block content %}
+<h1>Home</h1>
+<section class="panel"><h2>Quick links</h2><ul class="home-links">{% for menu in nav.menus %}{% for item in menu.items %}<li><a href="{{ item.href }}">{{ item.label }}</a></li>{% endfor %}{% endfor %}</ul></section>
+<div class="home-grid">
+<section class="panel"><h2>Pending</h2>{% for block in home.pending %}{% include "home_block.html" %}{% endfor %}</section>
+<section class="panel"><h2>{% if home.mark.is_some() %}New since you last marked them as seen{% else %}Latest changes{% endif %}</h2>{% if let Some(time) = home.mark_time() %}<p class="home-mark">Last marked as seen: <time datetime="{{ time.iso }}">{{ time.readable }}</time></p>{% endif %}{% for block in home.news %}{% include "home_block.html" %}{% endfor %}{% if let Some(seen) = home.newest %}<form method="post" action="/home/seen"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="seen" value="{{ seen }}"><input type="hidden" name="shown_at" value="{{ home.shown_at }}"><button type="submit">Mark as seen</button></form>{% endif %}</section>
+</div>
+{% endblock %}

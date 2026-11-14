@@ -87,6 +87,7 @@ struct AliasForm {
 #[derive(Template)]
 #[template(path = "admin_rulesets.html")]
 struct Directory {
+    nav: super::nav::Nav,
     rows: Vec<RulesetEntry>,
     next: Option<RulesetKey>,
     csrf: String,
@@ -108,6 +109,7 @@ async fn listing(
         .await
         .map_err(|e| error(&e))?;
     Ok(Directory {
+        nav: super::nav::Nav::here(super::nav::Section::Rulesets),
         rows: page.rows,
         next: page.next,
         csrf,

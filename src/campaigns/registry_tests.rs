@@ -101,7 +101,7 @@ async fn ruleset_router_owner_matrix_and_escaped_listing() {
         .await
         .unwrap();
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
-    for player in [&auth[1], &auth[1].clone().development_fixture()] {
+    for player in [&auth[1]] {
         assert_eq!(
             router_request(&app, player, "/admin/rulesets", None)
                 .await

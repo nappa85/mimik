@@ -200,6 +200,8 @@ impl Setup {
 
 /// Every `name="…"` attribute inside the sheet form.
 fn names(html: &str) -> BTreeSet<String> {
+    // The page's own form: the layout's Sign out form sits before `<main>`.
+    let html = &html[html.find("<main>").unwrap()..];
     let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
     form.split("name=\"")
         .skip(1)

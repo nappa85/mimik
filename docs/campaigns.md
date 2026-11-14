@@ -15,7 +15,7 @@ authorization, the single sheet/history writer), `web.rs` (routes). Schema:
 
 - **Owner:** technical administrator of the instance. Admin-only: no campaign
   membership, request, sheet or history access, even with grants left from development.
-  SQL triggers reject Owner membership unless `--dev-owner-play` is set. The human
+  SQL triggers reject Owner membership. The human
   running the instance enrolls a separate player account to play.
 - **Player:** any enabled non-Owner account. Can create campaigns, request to join, and
   hold sheets.
