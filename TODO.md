@@ -89,9 +89,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **UX revamp (owner, 2026-11-13):** `docs/ux-navigation-plan.md`, branch `navigation`
   (worktree `../mimik-wt/navigation`, volumes `mimik-nav-reg`/`mimik-nav-target`). Slice 1
-  (shared layout and menu, `--dev-owner-play` removed) committed b269454, reviewed, gate green;
-  owner browser check owed. Next: slice 2 (home page). Then collect the owner's points on the
-  review screen (cards, table form, merge, split).
+  (shared layout and menu, `--dev-owner-play` removed, b269454) browser-checked; slice 2 (home
+  page, migration 031, 2296ef1) reviewed, gate green, owner browser check owed (back up
+  `data/mimik.sqlite3` first). Then merge, and collect the owner's points on the review screen
+  (cards, table form, merge, split). Migration numbers: source-limits plan now 032/033.
 
 - **mupdf-rs release:** PR messense/mupdf-rs#280 merged upstream 2026-11-08 (dd46f0e); its text
   API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
