@@ -11,7 +11,7 @@ h2 { margin-top: 0; }
 p { line-height: 1.6; }
 .intro { max-width: 65ch; color: #555e57; }
 .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 2rem; align-items: start; }
-.panel { background: #fffef9; border: 1px solid #d8d8cc; border-radius: 12px; padding: 1.5rem; min-width: 0; }
+.panel { background: rgb(255 254 249 / 60%); border: 1px solid #d8d8cc; border-radius: 12px; padding: 1.5rem; min-width: 0; }
 label, input, select, textarea { display: block; width: 100%; }
 label { margin: 1rem 0 .4rem; font-weight: 600; }
 input, select, textarea { font: inherit; padding: .7rem; border: 1px solid #90998e; border-radius: 6px; background: white; }
@@ -205,6 +205,8 @@ header.site { max-width: none; gap: .25rem 1rem; padding: .3rem max(1rem, calc((
 header.site .logo { display: block; flex: none; line-height: 0; padding: .1rem; background: #fffdf8; border-radius: .4rem; }
 header.site .logo img { display: block; width: 2.4rem; height: 2.4rem; }
 header.site :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+/* The logo as a faint watermark behind every page of the signed-in app; never intercepts clicks. */
+body.app::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none; background: url("/assets/logo.png") no-repeat center 60% / min(70vmin, 640px); opacity: .09; }
 .menu { display: flex; flex: 1; flex-wrap: wrap; gap: .25rem .5rem; align-items: center; }
 .menu details { position: relative; }
 .menu details.account { margin-left: auto; }

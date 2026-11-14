@@ -1,4 +1,4 @@
-//! The shared header and menu of the authenticated app (`docs/ux-navigation-plan.md`, slice 1):
+//! The shared header and menu of the authenticated app (`docs/auth-and-sessions.md`, Pages and menu):
 //! one table over its page routes for the Owner and a player.
 //!
 //! Pages that never carry the menu because they have no session: the error documents rebuilt by
