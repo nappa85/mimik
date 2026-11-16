@@ -129,11 +129,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    weekend. The general 104-reply screen with D ran (`docs/results.md`): Granite 37/8/5, 9B on the GPU
    42/4/4. Open: `max_tokens` of both default files (largest replies 173 and 178: 224 by the
    2b rule, 256 by the trial rule, 352 now; kept until long ids are measured, L52).
-   Live acceptance check before release: prime, a structured request, then a request with a
-   different `ref` enum (another context): the fixed prefix's tokens are reused
-   (`cached_tokens` covers the prefix), plus the grammar-compilation time per request; and
-   the token length of the largest schema-valid reply (3 options, 8 leaves, 64-character ids,
-   120-character explanations) with the model's tokenizer against `max_tokens` (ASSIST-L52).
+   Measured 2026-11-16 (`docs/results.md`): the prefix is reused across reply schemas, the
+   grammar costs under 30 ms, and the schema's largest reply (857–2,261 tokens) exceeds
+   `max_tokens` 352 (owner decision: raise it or tighten the schema, ASSIST-L52).
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
@@ -167,11 +165,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   correct_ref reaches 24-25 but false_confident is 4-8 (cap 3); the errors are misreadings
   (a factor added or dropped, the wrong sign, replace instead of add). Owner 2026-11-05: more
   prompt work (examples of "per each" and of buying versus spending), then re-screen (GPU).
-  - TwIL-8B (webAI, Granite 4.2 8B dense reasoning model, webAI Non-Commercial 1.0: local
-    evaluation only): owner 2026-11-05 asked to try it. Official Q4_K_M balanced at revision
-    58d49f0d, SHA-256 17bda82d…faa0e, in `/media/data/mimik/models/twil-8b`; GPU
-    screen (104 replies, field refs) with thinking off and on, after 18:00 once the owner
-    confirms the fans.
   - Qwen4 (announced, not released on 2026-10-27): screen it when it is out.
   - Engines (ASSIST-54): re-screen when mistral.rs gains Vulkan or vllm.cpp has stable releases.
 

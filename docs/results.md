@@ -5,6 +5,42 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Prompt cache, grammar cost, reply length and VRAM (ASSIST-L47, ASSIST-L52, 2026-11-16)
+
+Prototype tier. (a) and (b) re-read the 2026-11-06 ledgers of the 2b screen on b12110 (GPU,
+prompt D v2-ids-53, 104 requests per model, each with its own reply schema: the `ref` enum
+differs per context); the harness sends the request shape of the product, not the product
+itself. (c) tokenizes constructed replies with each default file's own tokenizer
+(`/tokenize` of the pinned b12110 server). (d) loads Qwen3.5-9B on the RX 6650 XT with the
+screens' arguments while the desktop session runs.
+
+- **(a) Prefix reuse across schemas:** every request reused the whole fixed prefix
+  (`cache_n` never below 1,917 tokens for Qwen3.5-9B and Ornith, 1,946 for the Granite
+  family and TwIL, 2,135 for Spark-X); only the dynamic part was evaluated (`prompt_n` median
+  147–164, max 808–943). The reply schema does not break the prompt cache.
+- **(b) Grammar cost per request:** time to first token minus prompt evaluation, an upper
+  bound on grammar compilation plus HTTP: 16–19 ms median, 29 ms max, for every
+  thinking-off model.
+- **(c) Reply length:** largest schema-valid reply on the screen: 178 tokens (Qwen3.5-9B),
+  131 (Granite 4.2 3B, on the GPU). The largest legal reply (3 options, each a full tree of 7
+  `div` nodes and 8 leaves, 120-character explanations) takes, Qwen3.5-9B / Granite 4.2 3B:
+  857 / 971 tokens with realistic 64-character IDs and text; 2,261 / 2,261 with IDs and text
+  built to tokenize badly (digits and punctuation); 1,181 / 917 with 20-digit literals in
+  place of IDs. An `ambiguous` reply of three 120-character readings: 371 / 371. So
+  `max_tokens` 352 holds every reply seen so far with about 2× headroom, but not the schema's
+  maximum: one full-size option with realistic IDs (about 290–325 tokens) fits, three do not,
+  and such a reply is cut off and shows nothing (ASSIST-L52 (d)). Whitespace the grammar
+  allows between tokens is not counted.
+- **(d) VRAM:** the desktop held 0.6 GB of the 8 GB. Qwen3.5-9B with all layers on the GPU
+  took 5.5 GB at 8,192 context and 6.0 GB at 16,384 (the thinking arms), leaving about 2 GB
+  free; GTT rose by about 1 GB (host-visible buffers), not a spill. The 8–9B dense screens
+  therefore did not lose VRAM to the desktop; latencies under desktop load stay indicative,
+  as recorded with each run, and scores do not depend on memory placement.
+- **Limitations:** (a)–(b) through the screen harness, not the app's runtime; the CPU path's
+  priming and calibration and the default file's `max_tokens` derivation on the CPU (where
+  the largest reply may differ slightly from the GPU's) are still owed (ASSIST-L47); one
+  desktop state for (d).
+
 ## Agreement rule on the owner's IT source (agreement-v1, slice 2, 2026-11-12)
 
 Ignored test `sources::agreement_measure` (release build) on a read-only copy of the owner's
