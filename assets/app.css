@@ -230,3 +230,5 @@ body.app::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-
 .home-block ul { margin: 0; padding-left: 1.2rem; }
 .home-block li { margin: .3rem 0; }
 .home-empty, .home-more, .home-mark { color: #555e57; margin: .2rem 0; }
+/* A disabled button must look disabled: the buttons' colours above would hide that a press does nothing. */
+button:disabled, .mork-sheet button:disabled, .menu .items button:disabled { background: #b9bdb9; color: #3f4441; cursor: not-allowed; }

@@ -1160,3 +1160,49 @@ async fn a_stored_trial_is_flagged_unless_it_ran_under_the_current_prompt() {
         handle.shutdown().await;
     }
 }
+
+/// Try and Set stay enabled while the model server restarts: a press is answered by the
+/// server with the reason (`model-busy`), never silently ignored by a disabled button (the
+/// owner saw a green Try that did nothing, 2026-11-16).
+#[tokio::test]
+async fn try_and_set_answer_with_a_notice_while_a_restart_runs() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(1)).await;
+    *models.launcher.preflight_delay.lock().unwrap() = Some(Duration::from_secs(3600));
+    let restart = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/restart",
+        Some(form(&[("csrf", &csrf())])),
+    )
+    .await;
+    assert_eq!(restart.status(), StatusCode::SEE_OTHER);
+    models.until(|status| status.restarting).await;
+    let page = models.page().await;
+    assert!(page.contains("<button>Try</button>"), "{page}");
+    assert!(page.contains("<button>Set</button>"), "{page}");
+    assert_eq!(
+        models
+            .owner("try", &[("csrf", &csrf()), ("model", "local:other.gguf")])
+            .await,
+        "/admin/assistant?notice=model-busy"
+    );
+    assert_eq!(
+        models
+            .owner("length", &[("csrf", &csrf()), ("max_tokens", "1536")])
+            .await,
+        "/admin/assistant?notice=model-busy"
+    );
+    let page = body(
+        router_request(
+            &models.app,
+            &models.auth[0],
+            "/admin/assistant?notice=model-busy",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(page.contains("already being carried out"), "{page}");
+    models.handle.shutdown().await;
+}
