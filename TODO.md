@@ -87,6 +87,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+- **Reply length setting (2d-3, owner 2026-11-16):** plan in `docs/assisted-sheet-plan.md`
+  (reviewed, d223d3b); owner approval owed, then implement; live check at 2,560 tokens on CPU
+  and GPU with the owner present.
+
 - **Review screen points (owner):** collect the owner's points on the materials review screen
   (cards, table form, merge, split) and plan them.
 
