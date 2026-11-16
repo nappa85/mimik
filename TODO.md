@@ -87,8 +87,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-- **Reply length setting (2d-3, owner 2026-11-16):** built and live-checked on CPU and GPU
-  (ASSIST-59, `docs/results.md`); branch `reply-length`, merge after the owner's OK.
+- **Live progress on the assistant page (2d-4, owner 2026-11-16):** plan in
+  `docs/assisted-sheet-plan.md` (reviewed); owner go-ahead, then implement.
 
 - **Review screen points (owner):** collect the owner's points on the materials review screen
   (cards, table form, merge, split) and plan them.

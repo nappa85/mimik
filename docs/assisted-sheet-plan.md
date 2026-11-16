@@ -578,6 +578,96 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
   panel at two viewports; (5) the release binary refusing a certificate outside the system
   store on a clean machine (the unit tests cover the verifier with an isolated store).
 
+### 2d-4 Live progress on the assistant page (owner request, 2026-11-16)
+
+Why: `/admin/assistant` is rendered once; a start (about 2 minutes on the CPU), a restart, a
+reply-length change or a model trial (up to 90 minutes) shows its phase only on reload, with
+no sense of how far along it is. The owner asked for a page that updates itself, with a
+progress bar, the phase and how long is left, or at least how many steps. Reviewed (Opus,
+approve with changes; applied below).
+
+- **Approach.** One status route and one script for the whole page, replacing the Downloads
+  panel's own poller (`assets/assistant-downloads.js`, `/admin/assistant/downloads.json`
+  merge into it: one reload decision). Plain JavaScript as the Downloads panel already uses
+  (`layout.html` does not load htmx; DEP-5's htmx is for the sheet pages). The script makes
+  no decisions: the server sends the poll interval, the formatted texts and the numbers; the
+  script sets `textContent`, `value` and `max` only (no `innerHTML`). Without JavaScript the
+  page is as today, rendered at the current step.
+- **Route.** `GET /admin/assistant/status.json`, owner-only through `owner_auth` like the
+  page (no CSRF for a GET that changes nothing; polling does not extend the absolute session
+  expiry); `no-store` comes from the global header layer (asserted, not added). With no
+  assistant or the development endpoint: `{"available": false}`. Otherwise: `signature`,
+  `poll_ms`, `progress` (or null), and the downloads' current fields. No prompt text, paths
+  or tokens beyond what the page shows.
+- **Busy, and polling that never stops.** Busy = `State::Starting` or `restarting` or
+  `model.pending` or a trial running or a download running. Busy: `poll_ms` 2,000 and
+  `progress` non-null; idle: 15,000 (a crash restart, a change from another tab or the
+  breaker still show up). The script pauses while `document.hidden`, polls at once on
+  `visibilitychange`, chains `setTimeout` (no piling up behind slow answers), and on 401/403
+  stops and shows "Signed out: reload to sign in". A "Stop updating" button (WCAG 2.2.2)
+  stops polling.
+- **Steps: one source.** A `Phase` enum in the manager replaces both
+  `State::Starting(&'static str)` and `TrialState::Running.phase`, so the label, the step
+  number and the page agree. The manager chooses the step list at each entry point:
+  - fresh session (Mimik's start, Restart, Try the GPU again, Switch, Switch back, a
+    reply-length change, the previous model after a trial): stopping the model server (only
+    when one ran), checking the host, starting the model server, verifying the model file,
+    loading the model (with the GPU offload check), priming, calibration sample 1,
+    calibration sample 2;
+  - retry after a failure or a restart after a crash (no preflight or probe): starting,
+    verifying, loading, priming, samples 1 and 2, labelled "attempt n of up to 4"
+    (`MAX_FAILURES`, counted failures only);
+  - waiting to retry: its own step with an exact time left (`RETRY_AFTER`);
+  - GPU fallback: the list again from checking the host, labelled "on the CPU after a GPU
+    failure"; a reply-length revert: the fresh list labelled "with the earlier length";
+  - trial: waiting for the model server to stop, hashing the file, checking the host,
+    starting, loading, priming, samples 1 and 2, phrases 1 to 5; then the previous model's
+    fresh session as its own progress.
+  Needed hooks: `calibration::calibrate` reports each sample (a callback like `trial::run`'s);
+  `files::hash` widens its per-MiB callback to report bytes (both `hash_model` and
+  `Real::verify`); a cache hit reports "verified (unchanged)" at once.
+- **Time left: deadlines always, measurements when they exist.** "At most X left" from the
+  limits the code already enforces: `/health` 60 s, priming 300 s, calibration 2 × 480 + 60
+  s, each phrase `phrase_bound(budgets.run)` once calibration has run, the whole trial
+  `trial_bound()`, waiting to retry exactly; hashing from bytes read over the file size. Plus
+  "about Y (last time)" for a step whose duration was measured in the last successful run of
+  the same file, path and entry kind in this process (memory only; a failed attempt's
+  partial times are never used). Phrases end on EOS, so they get the bound only. A step past
+  its "last time" says "taking longer than last time (N s)", never a negative time. The bar's
+  basis (steps) is fixed for the run; time is text.
+- **Signature and reloads.** One Rust function over one `Status` snapshot produces the
+  signature for the page's `data-signature` and the JSON (a plain joined string, no
+  `DefaultHasher`, no floats, no instants): state kind (not the phase label), Unavailable
+  message, active and previous model with lengths, note, trial number and outcome kind,
+  restarting and pending, budgets' presence, the downloads' state signature. Generation is
+  left out while busy (shown in place), so a trial reloads about twice, not four times. On a
+  change the script navigates with `location.replace("/admin/assistant")` (no form
+  re-submission after a 422 answer, no stale `?notice=`), at most once per 5 s
+  (sessionStorage, in try/catch); while a form field has focus or a changed value it shows
+  "The state changed: reload" instead, so typed input is not lost.
+- **Page.** A progress block for the running work: the step text ("Trial of
+  local:x.gguf: step 8 of 13, trial phrase 1 of 5") in an `aria-live="polite"` element
+  changed only on a step change; elapsed and time left in a separate, non-live line; a
+  `<progress>` named by the step text. It replaces the trial's "Now: …" line. Texts that
+  told the owner to reload ("Reload this page to follow it" in `Notice::TryingModel` and the
+  trial line) say the page updates itself (without JavaScript, reload).
+- **Docs.** `docs/model-runtime.md` (page section), `docs/model-downloads.md` (the merged
+  poller), `docs/assisted-entry.md` code map.
+- **Tests.**
+  - Manager (paused clock; elapsed read through a helper so whole-`Status` comparisons stay
+    exact): every entry point walks its list in order with exact step/steps (fresh, the
+    stopping step after a Restart while Ready, retry, crash restart, waiting to retry with
+    its exact time left, GPU fallback, revert, trial with per-sample and per-phrase steps);
+    deadlines give "at most" on a first trial; "last time" only from a successful run of the
+    same file, path and kind; never negative; the hash byte counter and a cache hit.
+  - Route: owner-only (other roles, signed out), `available: false` without an assistant,
+    `no-store`, the poll interval busy and idle, the signature equal to the page's for the
+    same status and unchanged by a phase-only change, no path or secret in the body.
+  - Page: the progress block and its texts at each kind; the page without the script.
+  - Browser (live, not in CI): `tools/assist_model_browser.py` watches a start advance and
+    the page arrive at `ready` without a manual reload, and a typed field survive a state
+    change.
+
 ### 3 Bundles and reminders
 
 Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,
