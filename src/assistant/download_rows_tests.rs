@@ -136,6 +136,8 @@ async fn the_model_choice_decides_whether_a_file_is_in_use() {
 
 #[tokio::test]
 async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_check() {
+    // The rows were written at 384 and come out at 1,024: migration 032 (the reply length)
+    // rebuilds both tables on top of 023, keeping ids, trials and the choice.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mimik.sqlite3");
     {
@@ -144,7 +146,7 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
             .run(|db| {
                 for (name, id) in [("a.gguf", 1), ("b.gguf", 2)] {
                     db.execute(
-                        "INSERT INTO assistant_models(id,spec,file_name,sha256,size,alias,max_tokens,trial,recorded_at) VALUES(?1,?2,?3,?4,10,'alias',300,'{\"a\":1}',5)",
+                        "INSERT INTO assistant_models(id,spec,file_name,sha256,size,alias,max_tokens,trial,recorded_at) VALUES(?1,?2,?3,?4,10,'alias',384,'{\"a\":1}',5)",
                         rusqlite::params![id, format!("local:{name}"), name, SHA],
                     )?;
                 }
@@ -171,7 +173,7 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
                 .count();
             Ok((
                 count("PRAGMA user_version")?,
-                count("SELECT count(*) FROM assistant_models WHERE max_tokens=300 AND trial='{\"a\":1}'")?,
+                count("SELECT count(*) FROM assistant_models WHERE max_tokens=1024 AND trial='{\"a\":1}'")?,
                 count("SELECT count(*) FROM assistant_model_choice WHERE active_model=2 AND previous_model=1 AND changed_by=7 AND changed_at=9")?,
                 violations,
                 count("SELECT count(*) FROM assistant_downloads")?,

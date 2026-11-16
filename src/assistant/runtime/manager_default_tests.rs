@@ -12,7 +12,7 @@ const GPU_CONFIG: Config = Config {
 };
 
 fn placeholder() -> Model {
-    Model::test("granite-4.2-3b-Q4_K_M.gguf", DEFAULT_MODEL_SHA256, 352)
+    Model::test("granite-4.2-3b-Q4_K_M.gguf", DEFAULT_MODEL_SHA256, 1024)
 }
 
 fn spawn_default(
@@ -57,7 +57,7 @@ async fn the_gpu_path_runs_the_9b_when_its_file_is_there() {
     assert_eq!(status.path, Path::Gpu);
     assert_eq!(selected_shas(&launcher), [GPU_DEFAULT_MODEL_SHA256]);
     assert_eq!(status.model.active.spec, GPU_DEFAULT_MODEL);
-    assert_eq!(status.model.active.max_tokens, 352);
+    assert_eq!(status.model.active.max_tokens, 1024);
     assert!(status.model.device_default.is_on());
     assert_eq!(status.model.device_default.note(), None);
 }
@@ -321,7 +321,7 @@ async fn a_9b_trial_while_the_device_default_is_on_runs_the_candidate_and_stores
     };
     assert_eq!(report.path, config.path);
     assert_eq!(report.model.sha256, GPU_DEFAULT_MODEL_SHA256);
-    assert_eq!(report.model.max_tokens, 352);
+    assert_eq!(report.model.max_tokens, 1024);
     assert_eq!(
         selected_shas(&launcher),
         [
@@ -373,7 +373,7 @@ async fn an_explicit_9b_with_the_wrong_hash_stays_unavailable() {
             Arc::clone(&launcher) as Arc<dyn Launcher>,
             GPU_CONFIG,
             ModelSetup {
-                active: Model::test("Qwen3.5-9B-Q4_K_M.gguf", GPU_DEFAULT_MODEL_SHA256, 352),
+                active: Model::test("Qwen3.5-9B-Q4_K_M.gguf", GPU_DEFAULT_MODEL_SHA256, 1024),
                 previous: None,
                 records: None,
                 from_owner_setting: false,

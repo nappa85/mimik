@@ -1,14 +1,18 @@
 //! Job budgets from the calibration samples (assisted sheet plan §1.4a, "Budgets"; ASSIST-31,
-//! ASSIST-32): a latency estimate within hard caps, recomputed at every start, not a
-//! worst-case bound.
+//! ASSIST-32): a latency estimate within one safety ceiling, recomputed at every start, not
+//! a worst-case bound.
 //!
+//! Each sample generates [`SAMPLE_TOKENS`] tokens; the reply the owner allows (`max_tokens`,
+//! `model::reply_length`) enters the estimate through the measured per-token time.
 //! Per sample i: per-token prompt time pᵢ = `prompt_ms` / `prompt_n`, per-token generation
 //! time gᵢ = `predicted_ms` / `predicted_n`, overhead oᵢ = max(0, W − `prompt_ms` −
 //! `predicted_ms`) and the uncached tail tᵢ = `prompt_n` − Nᵢ. For a candidate bound B,
 //! N(B) = floor(`N_cal` × B / cap) with `N_cal` = min(N₁, N₂), Tᵢ(B) = oᵢ + pᵢ × (tᵢ + N(B)) +
 //! gᵢ × `max_tokens`, T(B) = max(T₁(B), T₂(B)) and R(B) = max(15, 1.25 × T(B) rounded up to
-//! 5 s). B is the largest candidate whose R fits the path's cap.
+//! 5 s). B is the largest candidate whose R fits [`RUN_CEILING_S`] and whose request, with
+//! the reply and a template margin, fits the context.
 use super::Path;
+use super::launch::CTX_SIZE;
 use crate::assistant::jobs::Budgets;
 use crate::assistant::request::Bounds;
 use std::time::Duration;
@@ -19,8 +23,19 @@ const MARGIN: f64 = 1.25;
 const FLOOR_S: u64 = 15;
 /// R is rounded up to a multiple of this many seconds.
 const STEP_S: u64 = 5;
-/// Queue wait plus run deadline, at most (ASSIST-32), in seconds.
+/// Queue wait plus run deadline, at least this long (ASSIST-32), in seconds: the total wait is
+/// the larger of this and 2 × R.
 const TOTAL_S: u64 = 120;
+/// The most R may be, in seconds, on both paths (ASSIST-31, ASSIST-32): a limit on stuck
+/// requests, not a wait.
+pub(crate) const RUN_CEILING_S: u64 = 600;
+/// The tokens each calibration sample generates (`ignore_eos`).
+pub(crate) const SAMPLE_TOKENS: u32 = 64;
+/// One calibration sample is abandoned after this long: a wait above it already means R is
+/// over [`RUN_CEILING_S`].
+pub(crate) const SAMPLE_TIMEOUT_S: u64 = 480;
+/// Tokens kept free in the context for the chat template, on top of the request and the reply.
+const TEMPLATE_MARGIN_TOKENS: f64 = 64.0;
 /// The cached share of the fixed prefix a sample must show (a timing criterion).
 const MIN_CACHED: f64 = 0.75;
 
@@ -38,14 +53,6 @@ impl Path {
         match self {
             Self::Cpu => &[1024, 768, 512],
             Self::Gpu => &[4096, 2048, 1024],
-        }
-    }
-
-    /// The most R may be, in seconds.
-    pub(crate) fn run_cap(self) -> u64 {
-        match self {
-            Self::Cpu => 90,
-            Self::Gpu => 60,
         }
     }
 }
@@ -80,12 +87,15 @@ pub(crate) struct Measured {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum NoBudgets {
     /// A sample's timing is missing, zero, not finite, `predicted_n` differs from
-    /// `max_tokens`, its tail is negative or too little of the prefix was cached: the attempt
+    /// [`SAMPLE_TOKENS`], its tail is negative or too little of the prefix was cached: the attempt
     /// fails (a timing criterion, not a content one).
     Invalid(&'static str),
     /// Even the smallest candidate does not fit: about `needed_s` would be needed, the cap
     /// is `cap_s`.
     TooSlow { needed_s: u64, cap_s: u64 },
+    /// No candidate bound leaves room in the context for the fixed prefix, the request, the
+    /// reply the owner allows and the template margin (never cut silently).
+    ReplyTooLarge,
 }
 
 /// The derived budgets with what they were derived from (shown on the assistant page).
@@ -110,7 +120,7 @@ fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
 }
 
-fn rates(sample: &Sample, max_tokens: u32, prefix_tokens: f64) -> Result<Rates, NoBudgets> {
+fn rates(sample: &Sample, prefix_tokens: f64) -> Result<Rates, NoBudgets> {
     let fields = [
         sample.wall_ms,
         sample.prompt_n,
@@ -125,9 +135,9 @@ fn rates(sample: &Sample, max_tokens: u32, prefix_tokens: f64) -> Result<Rates, 
             "a calibration timing is missing, zero or not finite",
         ));
     }
-    if (sample.predicted_n - f64::from(max_tokens)).abs() > f64::EPSILON {
+    if (sample.predicted_n - f64::from(SAMPLE_TOKENS)).abs() > f64::EPSILON {
         return Err(NoBudgets::Invalid(
-            "a calibration sample did not generate exactly max_tokens tokens",
+            "a calibration sample did not generate exactly 64 tokens",
         ));
     }
     let t = sample.prompt_n - sample.filler_tokens;
@@ -177,16 +187,8 @@ fn run_deadline(estimate_s: f64) -> u64 {
 pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
     let path = measured.path;
     let rates = [
-        rates(
-            &measured.samples[0],
-            measured.max_tokens,
-            measured.prefix_tokens,
-        )?,
-        rates(
-            &measured.samples[1],
-            measured.max_tokens,
-            measured.prefix_tokens,
-        )?,
+        rates(&measured.samples[0], measured.prefix_tokens)?,
+        rates(&measured.samples[1], measured.prefix_tokens)?,
     ];
     let n_cal = measured.samples[0]
         .filler_tokens
@@ -194,6 +196,18 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
     let cap = path.cap();
     let max_tokens = f64::from(measured.max_tokens);
     let mut slowest_needed = 0;
+    let fits_context = |tokens: f64| {
+        measured.prefix_tokens + tokens + max_tokens + TEMPLATE_MARGIN_TOKENS <= f64::from(CTX_SIZE)
+    };
+    let smallest = path.candidates().last().copied().unwrap_or(0);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "byte bounds are at most 4,096, exact in f64"
+    )]
+    let smallest_tokens = (n_cal * (smallest as f64 / cap as f64)).floor();
+    if !fits_context(smallest_tokens) {
+        return Err(NoBudgets::ReplyTooLarge);
+    }
     for &bytes in path.candidates() {
         #[expect(
             clippy::cast_precision_loss,
@@ -201,19 +215,23 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
         )]
         let share = bytes as f64 / cap as f64;
         let tokens = (n_cal * share).floor();
+        if !fits_context(tokens) {
+            continue;
+        }
         let (estimate_s, prompt_s) = rates.iter().fold((0.0_f64, 0.0_f64), |(t, p), r| {
             let prompt = r.p * (r.t + tokens);
             (t.max(r.o + prompt + r.g * max_tokens), p.max(prompt))
         });
         let run = run_deadline(estimate_s);
         slowest_needed = run;
-        if run > path.run_cap() {
+        if run > RUN_CEILING_S {
             continue;
         }
+        let total = TOTAL_S.max(2 * run);
         let (depth, queue) = match path {
-            Path::Cpu => (1, TOTAL_S - run),
+            Path::Cpu => (1, total - run),
             Path::Gpu => {
-                let depth = ((TOTAL_S - run) / run).clamp(1, 4);
+                let depth = ((total - run) / run).clamp(1, 4);
                 (depth, depth * run)
             }
         };
@@ -238,7 +256,7 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
     }
     Err(NoBudgets::TooSlow {
         needed_s: slowest_needed,
-        cap_s: path.run_cap(),
+        cap_s: RUN_CEILING_S,
     })
 }
 

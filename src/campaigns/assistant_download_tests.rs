@@ -45,7 +45,7 @@ fn granite() -> Model {
         name: "granite-4.2-3b-Q4_K_M.gguf".into(),
         sha256: DEFAULT_MODEL_SHA256.into(),
         alias: "granite-4.2-3b-q4_k_m".into(),
-        max_tokens: 352,
+        max_tokens: 1024,
         size: None,
     }
 }

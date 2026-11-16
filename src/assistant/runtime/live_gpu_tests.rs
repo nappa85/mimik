@@ -348,7 +348,7 @@ async fn live_gpu_the_rx6650_reaches_ready_with_gpu_budgets() {
     gpu_allowed("live_gpu_the_rx6650_reaches_ready_with_gpu_budgets");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
-    let handle = run_until(&real, 352, |status| {
+    let handle = run_until(&real, 1024, |status| {
         status.state == State::Ready || matches!(status.state, State::Unavailable(_))
     })
     .await;
@@ -371,7 +371,7 @@ async fn live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa() {
     gpu_allowed("live_gpu_landlock_the_rx6650_reaches_ready_under_hakoniwa");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
-    let handle = run_until(&real, 352, |status| {
+    let handle = run_until(&real, 1024, |status| {
         status.state == State::Ready || matches!(status.state, State::Unavailable(_))
     })
     .await;
@@ -499,7 +499,7 @@ async fn live_gpu_killing_llama_server_mid_job_ends_the_job_neutral_and_runs_on_
     let real = real_gpu(scratch.path());
     let assistant = Assistant::new();
     tokio::spawn(Arc::clone(&assistant).work());
-    let handle = run_with(&assistant, &real, 352, |status| {
+    let handle = run_with(&assistant, &real, 1024, |status| {
         status.state == State::Ready
     })
     .await;
@@ -568,7 +568,7 @@ async fn live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why() {
     gpu_allowed("live_gpu_killing_the_whole_sandbox_ends_on_the_cpu_saying_why");
     let scratch = scratch();
     let real = real_gpu(scratch.path());
-    let handle = run_until(&real, 352, |status| status.state == State::Ready).await;
+    let handle = run_until(&real, 1024, |status| status.state == State::Ready).await;
     assert_eq!(handle.status().path, Path::Gpu);
     // The sandbox's processes are the runner's descendants.
     for pid in super::descendants(runner_pid(scratch.path())) {

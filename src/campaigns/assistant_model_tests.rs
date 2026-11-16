@@ -39,7 +39,7 @@ fn granite() -> Model {
         name: "granite-4.2-3b-Q4_K_M.gguf".into(),
         sha256: DEFAULT_MODEL_SHA256.into(),
         alias: "granite-4.2-3b-q4_k_m".into(),
-        max_tokens: 352,
+        max_tokens: 1024,
         size: None,
     }
 }
@@ -276,7 +276,7 @@ async fn every_model_action_is_owner_only_csrf_checked_strict_and_body_bounded()
     let _lock = crate::auth::test_resource_lock().await;
     let models = models(Duration::from_millis(1)).await;
     let key = format!("1.2.{}", "b".repeat(64));
-    let valid: [(&str, Vec<(&str, String)>); 5] = [
+    let valid: [(&str, Vec<(&str, String)>); 6] = [
         (
             "try",
             vec![("csrf", csrf()), ("model", "local:other.gguf".into())],
@@ -285,6 +285,10 @@ async fn every_model_action_is_owner_only_csrf_checked_strict_and_body_bounded()
         ("switch", vec![("csrf", csrf()), ("trial", key)]),
         ("keep", vec![("csrf", csrf())]),
         ("switch-back", vec![("csrf", csrf())]),
+        (
+            "length",
+            vec![("csrf", csrf()), ("max_tokens", "1536".into())],
+        ),
     ];
     for (action, pairs) in &valid {
         let borrowed = |pairs: &Vec<(&str, String)>| -> Vec<(String, String)> {
@@ -382,7 +386,7 @@ async fn a_trial_switch_keep_and_switch_back_through_the_routes_are_stored() {
         "Passed on the CPU",
         "Priming",
         "tokens/s",
-        "<strong>256</strong>",
+        "<strong>1024</strong>",
         "Request bound B 1024 bytes",
         "run deadline R",
         "queue D",
@@ -432,8 +436,8 @@ async fn a_trial_switch_keep_and_switch_back_through_the_routes_are_stored() {
     let stored = SqlRecords(models.store.clone()).load().await.unwrap();
     let recorded = stored.active.unwrap();
     assert_eq!(recorded.model.sha256, "b".repeat(64));
-    assert_eq!(recorded.model.max_tokens, 256);
-    assert!(recorded.trial.unwrap().contains("\"max_tokens\":256"));
+    assert_eq!(recorded.model.max_tokens, 1024);
+    assert!(recorded.trial.unwrap().contains("\"max_tokens\":1024"));
     let page = models.page().await;
     assert!(
         page.contains("Active: <strong>local:other.gguf</strong>"),
@@ -680,6 +684,147 @@ async fn a_development_endpoint_has_no_model_form() {
 }
 
 #[tokio::test]
+async fn the_reply_length_route_checks_bounds_and_steps_stores_one_row_and_restarts_once() {
+    use crate::assistant::model::reply_length::{DEFAULT, MAX, MIN, STEP};
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(1)).await;
+    let settled = |tokens: u32| {
+        move |s: &manager::Status| {
+            s.model.active.max_tokens == tokens && s.state == manager::State::Ready && !s.restarting
+        }
+    };
+    // The form shows the bounds from the constants and the active value.
+    let page = models.page().await;
+    for shown in [
+        "action=\"/admin/assistant/model/length\"".to_owned(),
+        format!(
+            "name=\"max_tokens\" type=\"number\" min=\"{MIN}\" max=\"{MAX}\" step=\"{STEP}\" value=\"{DEFAULT}\""
+        ),
+        "does not run the five phrases".to_owned(),
+        "a reply can take up to 15 s".to_owned(),
+        "per token".to_owned(),
+        // Q + R, not 2 × R: on the CPU at R 15 s the queue wait is 120 − 15 s.
+        "a player can wait up to about 120 s".to_owned(),
+    ] {
+        assert!(page.contains(&shown), "{shown}: {page}");
+    }
+    // Crafted values change nothing: off the step, out of bounds, not a number.
+    for crafted in [
+        "1000",
+        "255",
+        "257",
+        "0",
+        "2688",
+        "99999999999999",
+        "-128",
+        "abc",
+        "",
+        "1536.0",
+        "1e3",
+        " ",
+        "0x600",
+    ] {
+        assert_eq!(
+            models
+                .owner("length", &[("csrf", &csrf()), ("max_tokens", crafted)])
+                .await,
+            "/admin/assistant?notice=length-invalid",
+            "{crafted:?}"
+        );
+    }
+    assert_eq!(
+        models
+            .owner("length", &[("csrf", &csrf()), ("max_tokens", "1024")])
+            .await,
+        "/admin/assistant?notice=length-unchanged"
+    );
+    assert_eq!(models.count("assistant_models").await, 0);
+    assert_eq!(models.launcher.starts.lock().unwrap().len(), 1);
+    // A valid value: one row for the model switched away from (the start flags named it), one
+    // for the new length, and one restart.
+    assert_eq!(
+        models
+            .owner("length", &[("csrf", &csrf()), ("max_tokens", "1536")])
+            .await,
+        "/admin/assistant?notice=length-set"
+    );
+    let status = models.until(settled(1536)).await;
+    assert_eq!(status.model.previous.unwrap().max_tokens, 1024);
+    assert_eq!(models.count("assistant_models").await, 2);
+    assert_eq!(models.launcher.starts.lock().unwrap().len(), 2);
+    let page = models.page().await;
+    assert!(page.contains("value=\"1536\""), "{page}");
+    assert!(page.contains("longest reply 1536 tokens"), "{page}");
+    // Nothing was hashed or tried.
+    assert!(models.launcher.hashed.lock().unwrap().is_empty());
+    assert_eq!(models.handle.status().trial, None);
+}
+
+#[tokio::test]
+async fn the_reply_length_copies_the_trial_record_and_reuses_a_matching_row() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(1)).await;
+    let status = models.try_model("other.gguf").await;
+    let key = trial_key(&status);
+    models
+        .owner("switch", &[("csrf", &csrf()), ("trial", &key)])
+        .await;
+    models
+        .until(|s| s.model.active.spec == "local:other.gguf" && s.state == manager::State::Ready)
+        .await;
+    assert_eq!(models.count("assistant_models").await, 2);
+    let hashed = models.launcher.hashed.lock().unwrap().len();
+    let stored = SqlRecords(models.store.clone()).load().await.unwrap();
+    let trial = stored.active.unwrap().trial.unwrap();
+    // Set 2048 on the switched model: a new row with the trial copied, the five phrases not run.
+    assert_eq!(
+        models
+            .owner("length", &[("csrf", &csrf()), ("max_tokens", "2048")])
+            .await,
+        "/admin/assistant?notice=length-set"
+    );
+    models
+        .until(|s| {
+            s.model.active.max_tokens == 2048 && s.state == manager::State::Ready && !s.restarting
+        })
+        .await;
+    assert_eq!(models.count("assistant_models").await, 3);
+    let stored = SqlRecords(models.store.clone()).load().await.unwrap();
+    let (active, previous) = (stored.active.unwrap(), stored.previous.unwrap());
+    assert_eq!(active.trial.as_deref(), Some(trial.as_str()));
+    assert_eq!(active.model.sha256, "b".repeat(64));
+    assert_eq!(active.model.name, "other.gguf");
+    assert_eq!(
+        (previous.model.max_tokens, previous.trial),
+        (1024, Some(trial))
+    );
+    assert_eq!(models.launcher.hashed.lock().unwrap().len(), hashed);
+    // Back to 1024: the row of the switch matches (file, hash, alias, max_tokens) and is
+    // reused, so no row is added.
+    models
+        .owner("length", &[("csrf", &csrf()), ("max_tokens", "1024")])
+        .await;
+    models
+        .until(|s| {
+            s.model.active.max_tokens == 1024 && s.state == manager::State::Ready && !s.restarting
+        })
+        .await;
+    assert_eq!(models.count("assistant_models").await, 3);
+    let (active_id, previous_id): (i64, i64) = models
+        .store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT active_model,previous_model FROM assistant_model_choice",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_ne!(active_id, previous_id);
+}
+
+#[tokio::test]
 async fn the_stored_setting_beats_the_start_flags() {
     let _lock = crate::auth::test_resource_lock().await;
     let (dir, store, _auth, _clock) = fixture_with_owner(1).await;
@@ -689,7 +834,7 @@ async fn the_stored_setting_beats_the_start_flags() {
         name: "other.gguf".into(),
         sha256: "b".repeat(64),
         alias: "other".into(),
-        max_tokens: 320,
+        max_tokens: 384,
         size: Some(1 << 30),
     };
     let records = SqlRecords(store.clone());
@@ -737,7 +882,7 @@ async fn an_explicit_9b_spec_without_a_hash_gets_the_9b_hash_not_granites() {
         status.model.active.sha256,
         crate::assistant::GPU_DEFAULT_MODEL_SHA256
     );
-    assert_eq!(status.model.active.max_tokens, 352);
+    assert_eq!(status.model.active.max_tokens, 1024);
     handle.shutdown().await;
 }
 
@@ -824,7 +969,7 @@ async fn only_the_absence_of_a_flag_and_of_a_stored_setting_leaves_the_device_de
         name: "other.gguf".into(),
         sha256: "b".repeat(64),
         alias: "other".into(),
-        max_tokens: 320,
+        max_tokens: 384,
         size: Some(1 << 30),
     };
     SqlRecords(store.clone())
@@ -959,7 +1104,7 @@ async fn a_stored_trial_is_flagged_unless_it_ran_under_the_current_prompt() {
         name: "other.gguf".into(),
         sha256: "b".repeat(64),
         alias: "other".into(),
-        max_tokens: 320,
+        max_tokens: 384,
         size: Some(1 << 30),
     };
     let current = serde_json::json!({"prefix_sha256": crate::assistant::contract::prefix_sha256(), "trial": 1}).to_string();

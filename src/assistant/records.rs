@@ -55,6 +55,10 @@ pub(crate) trait Records: Send + Sync {
     async fn activate(&self, new: &Record, old: Option<&Record>, by: i64) -> Result<(), String>;
     /// Swaps the active and the previous model.
     async fn swap(&self, by: i64) -> Result<(), String>;
+    /// Makes the active model's reply length `max_tokens` (`model::reply_length`): a row with
+    /// the same file, hash and alias, the trial copied, found by the record match or new; the
+    /// row it replaces becomes the previous model. One transaction.
+    async fn set_length(&self, active: &Model, max_tokens: u32, by: i64) -> Result<(), String>;
 }
 
 /// Drops migration 022's and 023's tables (tests that rewind the schema).
@@ -156,6 +160,33 @@ impl SqlRecords {
     }
 }
 
+/// The stored active row with its id, when the manager's active model is that file.
+fn stored_active(
+    db: &rusqlite::Connection,
+    active: &Model,
+) -> rusqlite::Result<Option<(i64, Record)>> {
+    let found = db
+        .query_row(
+            &format!("{SELECT} JOIN assistant_model_choice c ON c.active_model=m.id WHERE c.id=1"),
+            [],
+            record,
+        )
+        .optional()?;
+    let Some(found) = found else { return Ok(None) };
+    if found.model.name != active.name
+        || found.model.sha256 != active.sha256
+        || found.model.alias != active.alias
+    {
+        return Ok(None);
+    }
+    let id = db.query_row(
+        "SELECT active_model FROM assistant_model_choice WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(Some((id, found)))
+}
+
 #[async_trait]
 impl Records for SqlRecords {
     async fn activate(&self, new: &Record, old: Option<&Record>, by: i64) -> Result<(), String> {
@@ -176,6 +207,45 @@ impl Records for SqlRecords {
             })
             .await
             .map_err(|_| "the model setting cannot be stored".to_owned())
+    }
+
+    async fn set_length(&self, active: &Model, max_tokens: u32, by: i64) -> Result<(), String> {
+        let active = active.clone();
+        self.0
+            .run(move |db| {
+                let tx = db.transaction()?;
+                // The trial to copy is the stored row's; a model the start flags named has none.
+                let stored = stored_active(&tx, &active)?;
+                let (old_id, current) = if let Some(stored) = stored {
+                    stored
+                } else {
+                    let current = Record {
+                        model: active.clone(),
+                        trial: None,
+                    };
+                    (find_or_insert(&tx, &current)?, current)
+                };
+                let new = Record {
+                    model: Model {
+                        max_tokens,
+                        ..current.model.clone()
+                    },
+                    trial: current.trial.clone(),
+                };
+                let new_id = find_or_insert(&tx, &new)?;
+                if new_id == old_id {
+                    return Err(crate::AppError::Invalid("The reply length is unchanged."));
+                }
+                tx.execute(
+                    "INSERT INTO assistant_model_choice(id,active_model,previous_model,changed_by,changed_at) VALUES(1,?1,?2,?3,mimik_auth_now())
+                     ON CONFLICT(id) DO UPDATE SET active_model=excluded.active_model,previous_model=excluded.previous_model,changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+                    params![new_id, old_id, by],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| "the reply length cannot be stored".to_owned())
     }
 
     async fn swap(&self, by: i64) -> Result<(), String> {

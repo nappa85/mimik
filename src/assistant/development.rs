@@ -186,6 +186,6 @@ mod resolution_tests {
         .unwrap();
         let active = handle.runtime.clone().unwrap().status().model.active;
         assert_eq!(active.sha256, crate::assistant::GPU_DEFAULT_MODEL_SHA256);
-        assert_eq!(active.max_tokens, 352);
+        assert_eq!(active.max_tokens, 1024);
     }
 }

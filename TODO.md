@@ -87,9 +87,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-- **Reply length setting (2d-3, owner 2026-11-16):** plan in `docs/assisted-sheet-plan.md`
-  (reviewed, d223d3b); owner approval owed, then implement; live check at 2,560 tokens on CPU
-  and GPU with the owner present.
+- **Reply length setting (2d-3, owner 2026-11-16):** built (ASSIST-59); live check at 2,560
+  tokens on CPU and GPU with the owner present (`docs/assisted-sheet-plan.md`).
 
 - **Review screen points (owner):** collect the owner's points on the materials review screen
   (cards, table form, merge, split) and plan them.
@@ -124,18 +123,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    `docs/release-scope.md` update for schema 23, the assisted scope and the system CA store
    requirement of the downloads).
 2. Owed live measurement for the shipped prefix (ASSIST-56; ASSIST-L47; CPU, 5 threads, outside
-   weekday 09:00-18:00): replay the 104-reply screen (`tools/run_assist_screen.sh`,
-   `CONTRACT=v2-ids-53`, Granite 4.2 3B, `MAX_TOKENS=384`) and take the largest valid, untruncated
-   `predicted_n`; the default file's `max_tokens` is `min(384, round up to 32 of 1.25 ×
-   that)` (`DEFAULT_MAX_TOKENS` in `src/assistant/model.rs`, 352 until then); then re-run the idle
-   CPU calibration (`tools/assist_runtime_measure.py`) for the priming and the budgets. Also a
-   live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU at a
-   weekend. The general 104-reply screen with D ran (`docs/results.md`): Granite 37/8/5, 9B on the GPU
-   42/4/4. Open: `max_tokens` of both default files (largest replies 173 and 178: 224 by the
-   2b rule, 256 by the trial rule, 352 now; kept until long ids are measured, L52).
-   Measured 2026-11-16 (`docs/results.md`): the prefix is reused across reply schemas, the
-   grammar costs under 30 ms, and the schema's largest reply (857–2,261 tokens) exceeds
-   `max_tokens` 352 (owner decision: raise it or tighten the schema, ASSIST-L52).
+   weekday 09:00-18:00): re-run the idle CPU calibration (`tools/assist_runtime_measure.py`) for
+   the priming and the budgets. Also a live trial of a second model through `/admin/assistant`
+   (`local:`), CPU first, GPU at a weekend. The general 104-reply screen with D ran
+   (`docs/results.md`): Granite 37/8/5, 9B on the GPU 42/4/4. Measured 2026-11-16
+   (`docs/results.md`): the prefix is reused across reply schemas and the grammar costs under 30
+   ms.
 3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
 4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks

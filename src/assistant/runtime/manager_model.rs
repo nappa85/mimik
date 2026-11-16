@@ -5,11 +5,12 @@
 //! previous (or, after a switch, the new) model starts next.
 use super::{
     Arc, AtomicBool, Attempt, Child, Command, DeviceDefault, EndReason, Fail, Future, Instant,
-    Launcher, Level, Manager, Measurement, Model, ModelCommand, Mutex, Next, NotCalibrated,
-    Ordering, Path, Record, State, Status, TrialKey, TrialReport, TrialRequest, TrialState,
-    calibrate_budgets, log, measured, phrase_bound, trial, trial_bound, warm,
+    Launcher, LengthChange, Level, Manager, Measurement, Model, ModelCommand, Mutex, Next,
+    NotCalibrated, Ordering, Path, Record, State, Status, TrialKey, TrialReport, TrialRequest,
+    TrialState, calibrate_budgets, log, measured, trial, trial_bound, warm,
 };
-use crate::assistant::model::{default_alias, trial_max_tokens};
+use crate::assistant::model::{default_alias, reply_length};
+use crate::assistant::runtime::models::phrase_bound;
 
 /// Why a trial stopped before it finished.
 enum Stopped {
@@ -28,8 +29,8 @@ const PHRASE_PHASES: [&str; 5] = [
     "trial phrase 5 of 5",
 ];
 
-fn too_long(spec: &str, path: Path) -> String {
-    let minutes = trial_bound(path).as_secs() / 60;
+fn too_long(spec: &str) -> String {
+    let minutes = trial_bound().as_secs() / 60;
     format!("the trial of {spec} took longer than its {minutes} minutes")
 }
 
@@ -41,7 +42,7 @@ struct Plan {
     generation: u64,
     level: Level,
     path: Path,
-    /// The candidate, with the measurement cap as `max_tokens`.
+    /// The candidate, with the default reply length as `max_tokens`.
     candidate: Model,
 }
 
@@ -59,6 +60,10 @@ impl Manager {
                 self.switch_back(by).await;
                 None
             }
+            ModelCommand::SetLength { max_tokens, by } => {
+                self.set_length(max_tokens, by).await;
+                None
+            }
         }
     }
 
@@ -66,7 +71,7 @@ impl Manager {
         self.update(|status| status.trial = Some(state));
     }
 
-    fn note(&self, text: String) {
+    pub(super) fn note(&self, text: String) {
         log(&text);
         self.update(|status| status.model.note = Some(text));
     }
@@ -125,8 +130,8 @@ impl Manager {
         self.set_trial(TrialState::Failed { number, spec, why });
     }
 
-    /// The trial: hash the file, start the candidate on the current path, prime it, send the
-    /// phrases, derive `max_tokens`, calibrate. Whatever happens, the candidate is stopped
+    /// The trial: hash the file, start the candidate on the current path, prime it, calibrate
+    /// it at the default reply length, send the phrases. Whatever happens, the candidate is stopped
     /// and the caller starts a session with the previous model.
     async fn trial(&mut self, request: TrialRequest) -> Option<Next> {
         let TrialRequest {
@@ -140,16 +145,13 @@ impl Manager {
         self.trial = number;
         let path = self.status().path;
         // The whole trial, hashing included, is bounded.
-        let deadline = Instant::now() + trial_bound(path);
+        let deadline = Instant::now() + trial_bound();
         log(&format!("trial {number} of {spec} on the {path:?} path"));
         self.update(|status| {
             status.state = State::Starting("trying a model");
             status.budgets = None;
         });
-        let candidate = match self
-            .hash_candidate(number, &spec, name, path, deadline)
-            .await
-        {
+        let candidate = match self.hash_candidate(number, &spec, name, deadline).await {
             Ok(candidate) => candidate,
             Err(next) => return next,
         };
@@ -164,7 +166,6 @@ impl Manager {
         number: u64,
         spec: &str,
         name: String,
-        path: Path,
         deadline: Instant,
     ) -> Result<Model, Option<Next>> {
         self.set_trial(TrialState::Running {
@@ -188,7 +189,7 @@ impl Manager {
             Ok(Ok(Err(why))) => return failed(self, why),
             Ok(Err(_)) => {
                 self.stop_work().await;
-                return failed(self, too_long(spec, path));
+                return failed(self, too_long(spec));
             }
             Err(stopped) => {
                 self.stop_work().await;
@@ -209,7 +210,7 @@ impl Manager {
                 name,
                 sha256: file.sha256,
                 alias,
-                max_tokens: crate::assistant::model::TRIAL_MEASURE_TOKENS,
+                max_tokens: reply_length::DEFAULT,
                 size: Some(file.size),
             }),
             Err(why) => failed(self, why),
@@ -286,7 +287,7 @@ impl Manager {
                 None
             }
             Ok(Err(_)) => {
-                let why = too_long(&spec, path);
+                let why = too_long(&spec);
                 self.failed_trial(number, spec, why);
                 None
             }
@@ -368,7 +369,38 @@ impl Manager {
         self.publish_models();
     }
 
-    fn publish_models(&self) {
+    /// "Longest reply": the active model gets the reply length `max_tokens`, stored first
+    /// as a model row (the trial copied, the five phrases not run). The previous row is the one
+    /// it replaces; the caller starts a session, measured again with the new length, and a
+    /// start that fails or is "too slow" goes back ([`Manager::revert_length`]).
+    async fn set_length(&mut self, max_tokens: u32, by: i64) {
+        let Some(records) = self.records.clone() else {
+            return;
+        };
+        let old = self.active.clone();
+        if let Err(why) = records.set_length(&old, max_tokens, by).await {
+            self.note(format!(
+                "the reply length could not be stored ({why}); the current setting stays"
+            ));
+            return;
+        }
+        log(&format!(
+            "reply length of {} set to {max_tokens} tokens (was {})",
+            old.spec, old.max_tokens
+        ));
+        let from = old.max_tokens;
+        self.active = Model {
+            max_tokens,
+            ..old.clone()
+        };
+        self.previous = Some(old);
+        self.older_prompt.previous = self.older_prompt.active;
+        self.device_default = false;
+        self.publish_models();
+        self.length_change = Some(LengthChange { by, from });
+    }
+
+    pub(super) fn publish_models(&self) {
         let (active, previous) = (self.active.clone(), self.previous.clone());
         let older_prompt = self.older_prompt.active;
         self.update(|status| {
@@ -425,7 +457,7 @@ async fn trial_work(
     }
 }
 
-/// Health, priming, the five phrases, `max_tokens`, calibration.
+/// Health, priming, calibration at the default reply length, the five phrases.
 async fn measure_trial(
     child: &Arc<dyn Child>,
     plan: &Plan,
@@ -440,19 +472,20 @@ async fn measure_trial(
             Attempt::Ready(..) | Attempt::Interrupted(_) => "interrupted".into(),
         })?;
     let server = child.server();
-    let phrases = trial::run(server.as_ref(), phrase_bound(plan.path), &|n| {
-        phase(PHRASE_PHASES[n - 1]);
-    })
-    .await
-    .map_err(|failure| failure.describe())?;
-    let largest = trial::largest_predicted(&phrases);
-    let max_tokens = trial_max_tokens(&plan.candidate.sha256, largest);
+    // The two 64-token samples give the candidate's speed, and with it the phrase bound.
     phase("calibrating");
+    let max_tokens = reply_length::DEFAULT;
     let (calibration, budgets) = calibrate_budgets(server.as_ref(), plan.path, max_tokens, prefix)
         .await
         .map_err(|failed| match failed {
             NotCalibrated::TooSlow(why, _) | NotCalibrated::Failed(why) => why,
         })?;
+    let phrases = trial::run(server.as_ref(), phrase_bound(budgets.run), &|n| {
+        phase(PHRASE_PHASES[n - 1]);
+    })
+    .await
+    .map_err(|failure| failure.describe())?;
+    let largest = trial::largest_predicted(&phrases);
     let model = Model {
         max_tokens,
         ..plan.candidate.clone()

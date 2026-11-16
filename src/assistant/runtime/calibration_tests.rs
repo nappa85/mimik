@@ -14,6 +14,8 @@ pub(crate) struct Scripted {
     /// Tokens per filler, in order of `/tokenize` calls.
     pub token_counts: Mutex<Vec<usize>>,
     pub fail_priming: bool,
+    /// How long each calibration sample takes (the paused clock).
+    pub sample_delay: std::time::Duration,
 }
 
 #[async_trait::async_trait]
@@ -54,6 +56,7 @@ impl Server for Scripted {
                 predicted_ms: Some(10.0),
             });
         }
+        tokio::time::sleep(self.sample_delay).await;
         Ok(self.samples.lock().unwrap().remove(0))
     }
 
@@ -125,19 +128,20 @@ async fn priming_sends_the_minimal_envelope_with_one_token() {
 }
 
 #[tokio::test]
-async fn calibration_sends_two_fillers_with_ignore_eos_and_derives_budgets() {
+async fn calibration_sends_two_64_token_fillers_with_ignore_eos_and_derives_budgets() {
     let server = Scripted::default();
     *server.token_counts.lock().unwrap() = vec![293, 280];
     *server.samples.lock().unwrap() = vec![
-        timings(170.0 + 293.0, 1290.0, 192.0),
-        timings(170.0 + 280.0, 1290.0, 192.0),
+        timings(170.0 + 293.0, 1290.0, 64.0),
+        timings(170.0 + 280.0, 1290.0, 64.0),
     ];
     let calibration = calibrate(&server, Path::Cpu, 192, 1460.0).await.unwrap();
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     for (variant, (user, max_tokens, ignore_eos)) in requests.iter().enumerate() {
         assert_eq!(user, &filler(1024, variant));
-        assert_eq!(*max_tokens, 192);
+        // The samples generate 64 tokens whatever reply length the budgets are derived for.
+        assert_eq!(*max_tokens, 64);
         assert!(ignore_eos);
     }
     assert_eq!(
@@ -149,21 +153,75 @@ async fn calibration_sends_two_fillers_with_ignore_eos_and_derives_budgets() {
     assert!((calibration.density[0] - 1024.0 / 293.0).abs() < 1e-9);
     // N_cal is the smaller count.
     let derived = calibration.derived.unwrap();
-    assert_eq!(derived.budgets.bounds.bytes, 512);
-    assert_eq!(derived.budgets.bounds.tokens, 140);
+    assert_eq!(derived.budgets.bounds.bytes, 1024);
+    assert_eq!(derived.budgets.bounds.tokens, 280);
+    assert_eq!(derived.budgets.max_tokens, 192);
+}
+
+#[tokio::test]
+async fn the_estimate_is_g_times_the_owners_reply_length_not_the_samples_64_tokens() {
+    // Hand values: g = 0.213 s, p = 0.088 s, no overhead beyond rounding. T = o + p × (t + N)
+    // + g × max_tokens with t = 170, N = 280, o = wall - prompt - generation.
+    let derive_at = |max_tokens: u32| async move {
+        let server = Scripted::default();
+        *server.token_counts.lock().unwrap() = vec![293, 280];
+        *server.samples.lock().unwrap() = vec![
+            timings(170.0 + 293.0, 1290.0, 64.0),
+            timings(170.0 + 280.0, 1290.0, 64.0),
+        ];
+        let calibration = calibrate(&server, Path::Cpu, max_tokens, 1460.0)
+            .await
+            .unwrap();
+        calibration.derived.unwrap()
+    };
+    let default = derive_at(1024).await;
+    let long = derive_at(2048).await;
+    // The second sample (t 170, N 280) is the larger: 0.088 × 450 + 0.213 × max_tokens.
+    assert!((default.estimate_s - (39.6 + 0.213 * 1024.0)).abs() < 1e-6);
+    assert!((long.estimate_s - (39.6 + 0.213 * 2048.0)).abs() < 1e-6);
+    assert!(long.budgets.run > default.budgets.run);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sample_over_480_s_stops_the_calibration_as_too_slow() {
+    let server = Scripted {
+        sample_delay: std::time::Duration::from_secs(481),
+        ..Scripted::default()
+    };
+    *server.samples.lock().unwrap() = vec![timings(463.0, 1290.0, 64.0)];
+    let began = tokio::time::Instant::now();
+    assert_eq!(
+        calibrate(&server, Path::Cpu, 1024, 1460.0).await.err(),
+        Some(Interrupted::SampleTimedOut { limit_s: 480 })
+    );
+    // The first sample alone is abandoned at its timeout; the second never starts.
+    assert_eq!(began.elapsed(), std::time::Duration::from_secs(480));
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        Interrupted::SampleTimedOut { limit_s: 480 }.describe(),
+        "a calibration sample took more than 480 s"
+    );
+    // Just under the timeout completes.
+    let server = Scripted {
+        sample_delay: std::time::Duration::from_secs(479),
+        ..Scripted::default()
+    };
+    *server.samples.lock().unwrap() =
+        vec![timings(463.0, 1290.0, 64.0), timings(463.0, 1290.0, 64.0)];
+    assert!(calibrate(&server, Path::Cpu, 1024, 1460.0).await.is_ok());
 }
 
 #[tokio::test]
 async fn a_missing_timing_or_a_short_generation_derives_no_budgets() {
     let server = Scripted::default();
-    let mut missing = timings(463.0, 1290.0, 192.0);
+    let mut missing = timings(463.0, 1290.0, 64.0);
     missing.prompt_ms = None;
-    *server.samples.lock().unwrap() = vec![timings(463.0, 1290.0, 192.0), missing];
+    *server.samples.lock().unwrap() = vec![timings(463.0, 1290.0, 64.0), missing];
     let calibration = calibrate(&server, Path::Cpu, 192, 1460.0).await.unwrap();
     assert!(matches!(calibration.derived, Err(NoBudgets::Invalid(_))));
     let server = Scripted::default();
     *server.samples.lock().unwrap() =
-        vec![timings(463.0, 1290.0, 192.0), timings(463.0, 1290.0, 100.0)];
+        vec![timings(463.0, 1290.0, 64.0), timings(463.0, 1290.0, 100.0)];
     let calibration = calibrate(&server, Path::Cpu, 192, 1460.0).await.unwrap();
     assert!(matches!(calibration.derived, Err(NoBudgets::Invalid(_))));
 }

@@ -7,7 +7,7 @@ use super::materials::{TrustedDraft, html};
 use super::{AuthResult, AuthState, csrf_admission, owner_auth};
 use crate::assistant::model::{SpecError, parse_spec};
 use crate::assistant::runtime::manager::{
-    CancelTrial, Chosen, Restart, State as Runtime, Status, TryGpu, TryModel,
+    CancelTrial, Chosen, Restart, SetLength, State as Runtime, Status, TryGpu, TryModel,
 };
 use crate::assistant::runtime::models::{TrialKey, TrialReport, TrialState};
 use crate::assistant::runtime::{Level, Path};
@@ -47,6 +47,10 @@ pub(super) fn routes() -> Router<AuthState> {
             "/admin/assistant/model/switch-back",
             post(switch_back).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
         )
+        .route(
+            "/admin/assistant/model/length",
+            post(set_length).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
         .merge(super::assistant_downloads::routes())
 }
 
@@ -70,6 +74,9 @@ enum Notice {
     SwitchingBack,
     TrialStale,
     NoPreviousModel,
+    LengthSet,
+    LengthInvalid,
+    LengthUnchanged,
     Kept,
     NothingToKeep,
     ModelBusy,
@@ -126,6 +133,15 @@ impl Notice {
                 "That trial is not the latest finished one, so nothing changed. Try the model again."
             }
             Self::NoPreviousModel => "There is no previous model to switch back to.",
+            Self::LengthSet => {
+                "Setting the longest reply: the model server restarts once and is measured again. If it does not start or is too slow, the previous setting comes back."
+            }
+            Self::LengthInvalid => {
+                "That is not a reply length this page accepts (a whole number of tokens in the allowed range, in the allowed steps); nothing changed."
+            }
+            Self::LengthUnchanged => {
+                "The active model already has that reply length; nothing changed."
+            }
             Self::Kept => "Kept the current model; the trial result is dismissed.",
             Self::NothingToKeep => "There is no trial result to dismiss.",
             Self::ModelBusy => {
@@ -279,10 +295,62 @@ struct ModelView {
     /// The active model's measurement predates the current prompt (ASSIST-56).
     older_prompt: bool,
     trial: Option<TrialView>,
+    /// The "Longest reply" setting of the active model.
+    length: LengthView,
     /// The field's content: the refused input is kept.
     input: String,
     /// Why the input was refused.
     error: Option<String>,
+}
+
+/// The "Longest reply" setting: its bounds, the active value and what it means on the running
+/// path (shown once the runtime is measured).
+struct LengthView {
+    min: u32,
+    max: u32,
+    step: u32,
+    value: u32,
+    path: &'static str,
+    /// R: a reply can take up to this many seconds.
+    run: Option<u64>,
+    /// The measured generation time per token.
+    per_token: Option<String>,
+    /// The longest a player can wait: the queue wait Q plus R, with jobs queued ahead.
+    worst: Option<u64>,
+}
+
+/// The slower sample's generation time per token, as the page shows it.
+fn per_token(status: &Status) -> Option<String> {
+    let calibration = status.calibration.as_ref()?;
+    let slowest = calibration
+        .samples
+        .iter()
+        .filter(|s| s.predicted_n > 0.0 && s.predicted_ms.is_finite())
+        .map(|s| s.predicted_ms / s.predicted_n)
+        .fold(f64::NAN, f64::max);
+    slowest.is_finite().then(|| format!("{slowest:.1} ms"))
+}
+
+fn length_view(status: &Status) -> LengthView {
+    use crate::assistant::model::reply_length;
+    let run = status.budgets.as_ref().map(|b| b.run.as_secs());
+    let worst = status
+        .budgets
+        .as_ref()
+        .map(|b| (b.queue_wait + b.run).as_secs());
+    LengthView {
+        min: reply_length::MIN,
+        max: reply_length::MAX,
+        step: reply_length::STEP,
+        value: status.model.active.max_tokens,
+        path: match status.path {
+            Path::Cpu => "CPU",
+            Path::Gpu => "GPU",
+        },
+        run,
+        per_token: run.and_then(|_| per_token(status)),
+        worst,
+    }
 }
 
 struct ModelLine {
@@ -471,6 +539,7 @@ fn count(n: f64) -> String {
 }
 
 fn view(status: Status, breaker: String, input: String, error: Option<String>) -> View {
+    let length = length_view(&status);
     let retry_note = status.gpu_retry_note().map(str::to_owned);
     let (gpu_note, gpu_default_note) = if status.path == Path::Cpu {
         (retry_note, None)
@@ -484,6 +553,7 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
     };
     let pinned = &crate::assistant::runtime::manifest::MANIFEST.llama_cpp;
     let model = ModelView {
+        length,
         switchable: status.model.switchable,
         active: model_line(&status.model.active),
         source: if status.model.from_owner_setting {
@@ -691,6 +761,14 @@ struct CancelForm {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct LengthForm {
+    csrf: String,
+    /// The reply length in tokens, as typed (parsed and checked by the route).
+    max_tokens: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SwitchForm {
     csrf: String,
     trial: String,
@@ -828,6 +906,30 @@ async fn switch_back(
         Chosen::Pending => "model-busy",
         Chosen::Stale | Chosen::NoPrevious => "no-previous-model",
     }))
+}
+
+/// "Longest reply": a whole number of tokens within `model::reply_length`'s bounds and steps,
+/// checked here and again by the runtime; anything else changes nothing.
+async fn set_length(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<LengthForm>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let runtime = runtime_of(&state)?;
+    let Ok(max_tokens) = form.max_tokens.trim().parse::<u32>() else {
+        return Ok(redirect("length-invalid"));
+    };
+    Ok(redirect(
+        match runtime.set_length(auth.account.id, max_tokens) {
+            SetLength::Accepted => "length-set",
+            SetLength::Busy => "trial-running",
+            SetLength::Pending => "model-busy",
+            SetLength::Invalid => "length-invalid",
+            SetLength::Unchanged => "length-unchanged",
+        },
+    ))
 }
 
 #[cfg(test)]

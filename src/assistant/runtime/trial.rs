@@ -1,14 +1,14 @@
 //! The five synthetic phrases of a model trial (`docs/model-runtime.md`, "Owner model
 //! setting"): shipped with Mimik, no sheet or player text. Each is sent as a job would be
-//! (the fixed prefix, the schema of its context IDs, a data envelope) at the measurement cap, and its
-//! reply must be schema-valid and untruncated; the largest `predicted_n` sets the model's
-//! `max_tokens`.
+//! (the fixed prefix, the schema of its context IDs, a data envelope) at the default reply
+//! length, and its reply must be schema-valid and untruncated; the largest `predicted_n` is
+//! recorded as information (the reply length is the owner's setting).
 use super::models::PhraseResult;
 use super::server::Server;
 use crate::assistant::contract::{
     Envelope, EnvelopeItem, EnvelopeTarget, ItemKind, TARGET_ALIAS, envelope,
 };
-use crate::assistant::model::TRIAL_MEASURE_TOKENS;
+use crate::assistant::model::reply_length::DEFAULT as TRIAL_TOKENS;
 use crate::assistant::output::{self, Checks, Reading, Supplied};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -119,7 +119,7 @@ pub(crate) enum PhraseFailure {
     Deadline { note: &'static str, seconds: u64 },
     /// The exchange failed.
     Exchange { note: &'static str, what: String },
-    /// The reply stopped at the measurement cap.
+    /// The reply stopped at the default reply length.
     Truncated { note: &'static str },
     /// The reply is not valid against the schema.
     Invalid { note: &'static str },
@@ -133,7 +133,7 @@ impl PhraseFailure {
             }
             Self::Exchange { note, what } => format!("the phrase \"{note}\": {what}"),
             Self::Truncated { note } => {
-                format!("the reply to \"{note}\" was cut off at {TRIAL_MEASURE_TOKENS} tokens")
+                format!("the reply to \"{note}\" was cut off at {TRIAL_TOKENS} tokens")
             }
             Self::Invalid { note } => {
                 format!("the reply to \"{note}\" does not follow the reply schema")
@@ -148,7 +148,7 @@ impl PhraseFailure {
 /// # Errors
 ///
 /// The first phrase that fails: past its deadline, a failed exchange, a reply cut off at the
-/// measurement cap or one the schema refuses.
+/// default reply length or one the schema refuses.
 pub(crate) async fn run(
     server: &dyn Server,
     bound: Duration,
@@ -159,19 +159,17 @@ pub(crate) async fn run(
         progress(n + 1);
         let (dynamic, ref_ids, checks) = phrase.request();
         let began = tokio::time::Instant::now();
-        let reply = tokio::time::timeout(
-            bound,
-            server.structured(&dynamic, &ref_ids, TRIAL_MEASURE_TOKENS),
-        )
-        .await
-        .map_err(|_| PhraseFailure::Deadline {
-            note: phrase.note,
-            seconds: bound.as_secs(),
-        })?
-        .map_err(|failure| PhraseFailure::Exchange {
-            note: phrase.note,
-            what: describe_failure(failure),
-        })?;
+        let reply =
+            tokio::time::timeout(bound, server.structured(&dynamic, &ref_ids, TRIAL_TOKENS))
+                .await
+                .map_err(|_| PhraseFailure::Deadline {
+                    note: phrase.note,
+                    seconds: bound.as_secs(),
+                })?
+                .map_err(|failure| PhraseFailure::Exchange {
+                    note: phrase.note,
+                    what: describe_failure(failure),
+                })?;
         let seconds = began.elapsed().as_secs_f64();
         if reply.truncated {
             return Err(PhraseFailure::Truncated { note: phrase.note });
@@ -184,7 +182,7 @@ pub(crate) async fn run(
                 .any(|candidate| phrase.expected.contains(&candidate.value)),
             Reading::Ambiguous(_) => false,
         };
-        // A reply without its generated-token count cannot set `max_tokens`.
+        // A reply without its generated-token count is not a measurement.
         let predicted_n = reply
             .predicted_n
             .filter(|n| n.is_finite() && *n >= 1.0)
@@ -219,9 +217,9 @@ pub(crate) fn largest_predicted(results: &[PhraseResult]) -> u32 {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "a finite token count of at most the measurement cap"
+        reason = "a finite token count of at most the default reply length"
     )]
-    let tokens = largest.ceil().min(f64::from(TRIAL_MEASURE_TOKENS)) as u32;
+    let tokens = largest.ceil().min(f64::from(TRIAL_TOKENS)) as u32;
     tokens
 }
 
