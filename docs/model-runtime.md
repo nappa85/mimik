@@ -620,9 +620,11 @@ candidate too and the previous model starts again at once, so players are not le
 the owner's decision: the page shows the result, with "Switch" and "Keep the current model"
 (which only dismisses the result). One trial at a time (a second "Try" answers "a trial is
 already running"); while it runs, Switch, Switch back and Keep are refused. Model changes
-are admitted one at a time: a Try, Switch or Switch back is refused ("a model change or a
-restart is already being carried out") while another is pending or a Restart is running, so a
-double click on Switch back swaps once. "Cancel" carries the number of the trial the page
+are admitted one at a time: a Try, Switch, Switch back or reply-length Set is refused ("a model
+change or a restart is already being carried out") while another is pending or a Restart is
+running, so a double click on Switch back swaps once. During Mimik's own first start or a wait
+to retry, a Try or Set is admitted and interrupts that start. The page never disables these
+buttons, nor Restart and "Try the GPU again": a refused press is answered with the notice. "Cancel" carries the number of the trial the page
 showed and is refused when another trial runs now. A file of 0 bytes or over 8 GiB (the
 stored size's limit) fails the trial naming why, before anything starts. An interrupted or
 expired trial stops its candidate, then settles the launcher's work; a hash in progress is
