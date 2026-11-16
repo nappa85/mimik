@@ -324,8 +324,9 @@ async fn a_model_too_slow_for_the_ceiling_fails_with_the_numbers() {
     let fixture = fixture(
         [
             Start::Ok(Behaviour::default()),
-            // 0.6 s per generated token: a default reply of 1,024 tokens takes about 614 s,
-            // R over 770 s, past the 600 s ceiling (the 64-token samples take 38 s each).
+            // 0.6 s per generated token: a default reply of 1,024 tokens takes about 680 s
+            // with the slowdown, R over 850 s, past the 600 s ceiling (the 64-token samples
+            // take 38 s each).
             Start::Ok(Behaviour {
                 g: 0.6,
                 ..Behaviour::default()
@@ -346,12 +347,14 @@ async fn a_model_too_slow_for_the_ceiling_fails_with_the_numbers() {
 #[tokio::test(start_paused = true)]
 async fn a_phrase_past_its_bound_stops_the_candidate_and_restores_the_previous_model() {
     // The bound is twice R of a default reply on the candidate's measured speed, at most the
-    // ceiling. g 0.01: T about 10.8 s, R 15 s, bound 30 s. g 0.1: T about 103 s, R 130 s,
-    // bound 260 s. g 0.4: T about 410 s, R 515 s, twice that over the ceiling: 600 s.
+    // ceiling; a default reply is 1,134.1 tokens with the CPU slowdown, 1,060.7 with the
+    // GPU's. g 0.01: T about 11.9 s on the CPU, R 15 s, bound 30 s; 12.2 s on the GPU (its
+    // prompt term is 1.6 s), R 20 s, bound 40 s. g 0.1: T about 114 s, R 145 s, bound 290 s.
+    // g 0.4: T about 454 s, R 570 s, twice that over the ceiling: 600 s.
     for (config, g, seconds) in [
         (CONFIG, 0.01, 30),
-        (gpu_config(), 0.01, 30),
-        (CONFIG, 0.1, 260),
+        (gpu_config(), 0.01, 40),
+        (CONFIG, 0.1, 290),
         (CONFIG, 0.4, 600),
     ] {
         let fixture = fixture(
@@ -1309,27 +1312,27 @@ async fn the_reply_length_is_stored_once_and_the_server_restarts_once_calibrated
 
 #[tokio::test(start_paused = true)]
 async fn a_longer_reply_lengthens_the_run_deadline_from_the_measured_speed() {
-    // g 0.2 s a token: R is 1.25 × (0.54 + 0.2 × max_tokens) up to 5 s.
+    // g 0.15 s a token: R is 1.25 × (0.54 + 0.15 × L × (1 + 2.1e-4 × L / 2)) up to 5 s.
     let slow = || Behaviour {
-        g: 0.2,
+        g: 0.15,
         ..Behaviour::default()
     };
     let fixture = fixture([Start::Ok(slow()), Start::Ok(slow())], CONFIG);
     ready(&fixture.assistant).await;
-    // 1,024 tokens: T 205.3 s, R 257.2 s, so 260 s.
-    assert_eq!(fixture.handle.status().budgets.unwrap().run.as_secs(), 260);
+    // 1,024 tokens: T 170.7 s, R 213.3 s, so 215 s.
+    assert_eq!(fixture.handle.status().budgets.unwrap().run.as_secs(), 215);
     assert_eq!(
         fixture.handle.set_length(7, 2048).await,
         SetLength::Accepted
     );
     ready_at(&fixture, 2).await;
-    // 2,048 tokens: T 410.1 s, R 512.6 s, so 515 s; the total wait doubles it, and the queue
+    // 2,048 tokens: T 373.8 s, R 467.3 s, so 470 s; the total wait doubles it, and the queue
     // carries the slack for the server still busy after an expiry.
     let budgets = fixture.handle.status().budgets.unwrap();
-    assert_eq!(budgets.run.as_secs(), 515);
+    assert_eq!(budgets.run.as_secs(), 470);
     assert_eq!(
         budgets.queue_wait,
-        Duration::from_secs(515) + budgets.busy_after_expiry
+        Duration::from_secs(470) + budgets.busy_after_expiry
     );
 }
 
@@ -1551,7 +1554,7 @@ fn slow_at_0_3() -> Start {
 
 #[tokio::test(start_paused = true)]
 async fn a_new_length_that_is_too_slow_goes_back_on_both_paths_without_resetting_the_breaker() {
-    // g 0.3 s: 1,024 tokens fit (R 385 s), 2,560 do not (R over 960 s).
+    // g 0.3 s: 1,024 tokens fit (R 430 s on the CPU, 400 s on the GPU), 2,560 do not.
     for (config, path) in [(CONFIG, Path::Cpu), (gpu_config(), Path::Gpu)] {
         let fixture = fixture([slow_at_0_3(), slow_at_0_3(), slow_at_0_3()], config);
         ready(&fixture.assistant).await;

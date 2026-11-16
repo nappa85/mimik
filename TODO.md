@@ -87,8 +87,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-- **Reply length setting (2d-3, owner 2026-11-16):** built (ASSIST-59); live check at 2,560
-  tokens on CPU and GPU with the owner present (`docs/assisted-sheet-plan.md`).
+- **Reply length setting (2d-3, owner 2026-11-16):** built and live-checked on CPU and GPU
+  (ASSIST-59, `docs/results.md`); branch `reply-length`, merge after the owner's OK.
 
 - **Review screen points (owner):** collect the owner's points on the materials review screen
   (cards, table form, merge, split) and plan them.
@@ -122,10 +122,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 1. 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
    `docs/release-scope.md` update for schema 23, the assisted scope and the system CA store
    requirement of the downloads).
-2. Owed live measurement for the shipped prefix (ASSIST-56; ASSIST-L47; CPU, 5 threads, outside
-   weekday 09:00-18:00): re-run the idle CPU calibration (`tools/assist_runtime_measure.py`) for
-   the priming and the budgets. Also a live trial of a second model through `/admin/assistant`
-   (`local:`), CPU first, GPU at a weekend. The general 104-reply screen with D ran
+2. Owed: a live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU
+   at a weekend (ASSIST-L47). The CPU and GPU start-up with the shipped prefix ran 2026-11-16
+   (`docs/results.md`). The general 104-reply screen with D ran
    (`docs/results.md`): Granite 37/8/5, 9B on the GPU 42/4/4. Measured 2026-11-16
    (`docs/results.md`): the prefix is reused across reply schemas and the grammar costs under 30
    ms.

@@ -5,6 +5,42 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Long replies and start-up with the reply length setting (ASSIST-59, ASSIST-L47, 2026-11-16)
+
+Live inference on the dev host, b12110, the shipped prefix, fan manual, desktop session
+running. (a) The pinned llama-server run natively with the app's arguments (8,192 context,
+`--parallel 1`, 5 threads): priming, two 64-token `ignore_eos` samples with a filler of the
+path's cap, then one streamed 2,560-token `ignore_eos` reply on a third filler, each token
+time-stamped. (b) Mimik's release build of branch `reply-length` (`assist_runtime_measure.py
+calibrate` and `assist_live_smoke.py` in runtime mode, `--assistant-device cpu` or `auto`),
+default reply length 1,024.
+
+| Path, model | g (64 tokens) | tokens 2–257 | 1,152–1,408 | 2,305–2,560 | 2,560 tokens: measured / g × 2,560 |
+|---|---|---|---|---|---|
+| CPU, Granite 4.2 3B, 5 threads | 125.9 ms | 130.1 ms | 160.3 ms | 190.5 ms | 411.0 s / 322.3 s (1.28) |
+| GPU, Qwen3.5-9B, RX 6650 XT | 71.3 ms | 72.2 ms | 77.8 ms | 83.5 ms | 199.1 s / 182.4 s (1.09) |
+
+- **Slowdown with context:** per-token time grows about linearly with the tokens already
+  generated: 0.026 ms per token on the CPU (2.1e-4 of g), 0.0049 ms on the GPU (6.9e-5 of g).
+  A reply of L tokens therefore takes g × L × (1 + α × L / 2); with α 2.1e-4 (CPU) and 7.0e-5
+  (GPU) this predicts both 2,560-token replies within 1 %. The plan's alternative, the
+  context ratio (prefix + N + L / 2) / sample context, predicted 1.60 and 1.40: too
+  conservative (a 2,560 setting would have been "too slow" on this CPU, R about 660 s, against
+  a real worst case near 530 s). The owner chose the measured slope (`Path::slowdown`).
+- **Start-up in the app:** CPU ready after 124 s (priming 78.5 s, 1,979 prefix tokens; samples
+  W 19.7 and 20.5 s; B 1,024, N(B) 280, R 185 s, Q 198 s); GPU, Qwen3.5-9B as device default,
+  ready after 38 s (priming 10.3 s; samples W 10.3 s; B 4,096, N(B) 1,128, R 100 s, D 1, Q
+  106 s). The R values predate the slowdown factor (about 10 % higher at 1,024 on the CPU, 4 %
+  on the GPU).
+- **One job end to end at 1,024 (CPU):** ready after 126.6 s; a scribble's job answered in
+  17.1 s with one option ("Current HP (84) − 15", 84 → 69) and Use applied it; a second job
+  15.6 s; a superseded job then a fresh one in 29.2 s, the superseded one answering "stale".
+- **Observation:** the 9B's 71 ms per token here is at a 3.1k-token context with the 4 KiB
+  filler; it is the figure the app's budgets use on this host.
+- **Limitations:** one host, one run per path, two models; the slope may differ with other
+  models, thread counts and GPUs (ASSIST-L47). The release smoke tool needed a fix to ignore
+  the header's Sign out form (since the shared top menu).
+
 ## Prompt cache, grammar cost, reply length and VRAM (ASSIST-L47, ASSIST-L52, 2026-11-16)
 
 Prototype tier. (a) and (b) re-read the 2026-11-06 ledgers of the 2b screen on b12110 (GPU,

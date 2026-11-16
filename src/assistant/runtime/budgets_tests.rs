@@ -52,10 +52,11 @@ fn container(t: f64) -> Sample {
     sample(0.088, 0.213, 1.0, t, 293.0, 1290.0)
 }
 
-/// A sample whose estimate is almost exactly `seconds` at a reply of 1,024 tokens (the
-/// prompt term is a few hundred microseconds).
-fn takes(seconds: f64) -> Sample {
-    sample(1e-6, seconds / 1024.0, 0.0, 100.0, 293.0, 1290.0)
+/// A sample whose estimate on `path` is almost exactly `seconds` at a reply of 1,024 tokens,
+/// the path's slowdown included (the prompt term is a few hundred microseconds).
+fn takes(path: Path, seconds: f64) -> Sample {
+    let reply = 1024.0 * (1.0 + path.slowdown() * 512.0);
+    sample(1e-6, seconds / reply, 0.0, 100.0, 293.0, 1290.0)
 }
 
 fn budgets(derived: &Derived) -> (usize, usize, u64, usize, u64) {
@@ -77,17 +78,18 @@ fn container_figures_with_a_192_token_reply_fit_the_largest_cpu_bound() {
         [container(170.0), container(170.0)],
     ))
     .unwrap();
-    // T = 1 + 0.088 × (170 + 293) + 0.213 × 192, R = 1.25 T up to 5 s; the total wait is
-    // twice R, the queue the rest plus the busy slack: the prompt term 0.088 × 463 = 40.74 s,
-    // so 41 s (Q = 105 + 41).
-    assert!((derived.estimate_s - 82.64).abs() < 1e-9);
+    // T = 1 + 0.088 × (170 + 293) + 0.213 × 192 × (1 + 2.1e-4 × 96) = 83.46 s, R = 1.25 T
+    // up to 5 s; the total wait is twice R, the queue the rest plus the busy slack: the
+    // prompt term 0.088 × 463 = 40.74 s, so 41 s (Q = 105 + 41).
+    let reply = 192.0 * (1.0 + 2.1e-4 * 96.0);
+    assert!((derived.estimate_s - (1.0 + 0.088 * 463.0 + 0.213 * reply)).abs() < 1e-9);
     assert_eq!(budgets(&derived), (1024, 293, 105, 1, 146));
     assert_eq!(derived.budgets.busy_after_expiry.as_secs(), 41);
 }
 
 #[test]
 fn the_reply_length_enters_the_estimate_through_the_measured_speed() {
-    // The same samples, two reply lengths: T grows by g × the extra tokens.
+    // The same samples, two reply lengths: T grows by g × the reply, slowed by its context.
     let at = |max_tokens| {
         derive(&measured(
             Path::Cpu,
@@ -98,14 +100,15 @@ fn the_reply_length_enters_the_estimate_through_the_measured_speed() {
     };
     let (short, default) = (at(256), at(1024));
     for (derived, tokens) in [(short, 256.0), (default, 1024.0)] {
-        let expected = 1.0 + 0.088 * (170.0 + 293.0) + 0.213 * tokens;
+        let expected =
+            1.0 + 0.088 * (170.0 + 293.0) + 0.213 * tokens * (1.0 + 2.1e-4 * tokens / 2.0);
         assert!((derived.estimate_s - expected).abs() < 1e-9, "{tokens}");
     }
-    // 1 + 40.744 + 218.112 = 259.856 s: R 325.
-    // The queue carries the prompt term, 0.088 × 463 = 40.74 s, as 41 s: Q = 325 + 41.
-    assert_eq!(budgets(&default), (1024, 293, 325, 1, 366));
-    // At 2,560 tokens B 1024 is 587.0 s (R 735 s), B 768 (N 219) 580.5 s (R 730 s) and B 512
-    // (N 146) 574.1 s (R 720 s): all over the ceiling.
+    // 1 + 40.744 + 0.213 × 1,134.1 = 283.31 s: R 355.
+    // The queue carries the prompt term, 0.088 × 463 = 40.74 s, as 41 s: Q = 355 + 41.
+    assert_eq!(budgets(&default), (1024, 293, 355, 1, 396));
+    // At 2,560 tokens (3,248.1 with the slowdown) even B 512 (N 146) is 720.7 s (R 905 s):
+    // all over the ceiling.
     assert_eq!(
         derive(&measured(
             Path::Cpu,
@@ -113,7 +116,7 @@ fn the_reply_length_enters_the_estimate_through_the_measured_speed() {
             [container(170.0), container(170.0)]
         )),
         Err(NoBudgets::TooSlow {
-            needed_s: 720,
+            needed_s: 905,
             cap_s: 600
         })
     );
@@ -121,7 +124,8 @@ fn the_reply_length_enters_the_estimate_through_the_measured_speed() {
 
 #[test]
 fn container_figures_with_the_high_tail_and_a_long_reply_are_too_slow() {
-    // 1 + 0.088 × (365 + 146) + 0.213 × 2560 = 591.1 s at B 512: R 740 s, over the ceiling.
+    // 1 + 0.088 × (365 + 146) + 0.213 × 3,248.1 = 737.8 s at B 512: R 925 s, over the
+    // ceiling.
     assert_eq!(
         derive(&measured(
             Path::Cpu,
@@ -129,7 +133,7 @@ fn container_figures_with_the_high_tail_and_a_long_reply_are_too_slow() {
             [container(365.0), container(365.0)]
         )),
         Err(NoBudgets::TooSlow {
-            needed_s: 740,
+            needed_s: 925,
             cap_s: 600
         })
     );
@@ -146,16 +150,16 @@ fn gpu_figures_give_the_largest_bound() {
 
 #[test]
 fn a_gpu_measurement_picks_the_largest_bound_that_fits_the_ceiling() {
-    // Reply of 2,560 tokens at 0.1 s each is 256 s before any prompt.
+    // Reply of 2,560 tokens, 2,789.4 with the GPU slowdown, at 0.1 s each: 278.9 s.
     let pick = |p| {
         let s = sample(p, 0.1, 0.3, 250.0, 1170.0, 1290.0);
         derive(&measured(Path::Gpu, 2560, [s, s]))
     };
-    // B 4096: 0.3 + 0.2 × 1420 + 256 = 540.3 s, R 680 s (over); B 2048: 423.3 s, R 530 s.
+    // B 4096: 0.3 + 0.2 × 1420 + 278.9 = 563.2 s, R 705 s (over); B 2048: 446.2 s, R 560 s.
     // The queue adds the prompt term 0.2 × (t + 585) = 166.6 s, so 167 s.
-    assert_eq!(budgets(&pick(0.2).unwrap()), (2048, 585, 530, 1, 697));
-    // B 4096 and 2048 are over at p = 0.3; B 1024: 0.3 + 0.3 × 542 + 256 = 418.9 s, R 525 s.
-    assert_eq!(budgets(&pick(0.3).unwrap()), (1024, 292, 525, 1, 688));
+    assert_eq!(budgets(&pick(0.2).unwrap()), (2048, 585, 560, 1, 727));
+    // B 4096 and 2048 are over at p = 0.3; B 1024: 0.3 + 0.3 × 542 + 278.9 = 441.8 s, R 555 s.
+    assert_eq!(budgets(&pick(0.3).unwrap()), (1024, 292, 555, 1, 718));
     // Slower generation: nothing fits, and the ceiling is the cap named.
     let slowest = sample(0.2, 0.3, 0.3, 250.0, 1170.0, 1290.0);
     assert!(matches!(
@@ -166,8 +170,9 @@ fn a_gpu_measurement_picks_the_largest_bound_that_fits_the_ceiling() {
 
 #[test]
 fn a_cpu_measurement_that_fits_only_768_picks_it() {
-    // B 1024: 1 + 0.28 × 393 + 384 = 495.04 s, R 620 s (over); B 768: 474.3 s, R 595 s.
-    let s = sample(0.28, 0.15, 1.0, 100.0, 293.0, 1290.0);
+    // A reply of 2,560 tokens is 3,248.1 with the CPU slowdown, at 0.118 s 383.3 s.
+    // B 1024: 1 + 0.28 × 393 + 383.3 = 494.3 s, R 620 s (over); B 768: 473.6 s, R 595 s.
+    let s = sample(0.28, 0.118, 1.0, 100.0, 293.0, 1290.0);
     let derived = derive(&measured(Path::Cpu, 2560, [s, s])).unwrap();
     // The prompt term 0.28 × (t + 219) is 90 s: Q = 595 + 90.
     assert_eq!(budgets(&derived), (768, 219, 595, 1, 685));
@@ -177,10 +182,19 @@ fn a_cpu_measurement_that_fits_only_768_picks_it() {
 fn the_ceiling_is_600_seconds_on_both_paths() {
     // T just under and just over 480 s: R 600 s fits, R 605 s does not.
     for path in [Path::Cpu, Path::Gpu] {
-        let fits = derive(&measured(path, 1024, [takes(479.0), takes(479.0)])).unwrap();
+        let fits = derive(&measured(
+            path,
+            1024,
+            [takes(path, 479.0), takes(path, 479.0)],
+        ))
+        .unwrap();
         assert_eq!(fits.budgets.run.as_secs(), 600, "{path:?}");
         assert_eq!(
-            derive(&measured(path, 1024, [takes(481.0), takes(481.0)])),
+            derive(&measured(
+                path,
+                1024,
+                [takes(path, 481.0), takes(path, 481.0)]
+            )),
             Err(NoBudgets::TooSlow {
                 needed_s: 605,
                 cap_s: 600
@@ -203,12 +217,22 @@ fn the_queue_follows_a_total_wait_of_the_larger_of_120_s_and_twice_r() {
         (300, 301, 1, 301),
     ] {
         let seconds = f64::from(r) * 0.8 - 1.0;
-        let cpu = derive(&measured(Path::Cpu, 1024, [takes(seconds), takes(seconds)])).unwrap();
+        let cpu = derive(&measured(
+            Path::Cpu,
+            1024,
+            [takes(Path::Cpu, seconds), takes(Path::Cpu, seconds)],
+        ))
+        .unwrap();
         assert_eq!(cpu.budgets.run.as_secs(), u64::from(r));
         assert_eq!(cpu.budgets.depth, 1);
         assert_eq!(cpu.budgets.busy_after_expiry.as_secs(), 1, "R {r}");
         assert_eq!(cpu.budgets.queue_wait.as_secs(), cpu_queue, "R {r}");
-        let gpu = derive(&measured(Path::Gpu, 1024, [takes(seconds), takes(seconds)])).unwrap();
+        let gpu = derive(&measured(
+            Path::Gpu,
+            1024,
+            [takes(Path::Gpu, seconds), takes(Path::Gpu, seconds)],
+        ))
+        .unwrap();
         assert_eq!(gpu.budgets.depth, depth, "R {r}");
         assert_eq!(gpu.budgets.queue_wait.as_secs(), gpu_queue, "R {r}");
     }
@@ -250,8 +274,9 @@ fn unequal_filler_token_counts_use_the_smaller_in_both_estimates() {
     // N(1024) is the smaller count, 280.
     assert_eq!(derived.budgets.bounds.tokens, 280);
     // Both estimates use it; the second is the larger.
-    let t_a = 1.0 + 0.088 * (170.0 + 280.0) + 0.213 * 192.0;
-    let t_b = 1.0 + 0.088 * (170.0 + 280.0) + 0.213 * 1.01 * 192.0;
+    let reply = 192.0 * (1.0 + 2.1e-4 * 96.0);
+    let t_a = 1.0 + 0.088 * (170.0 + 280.0) + 0.213 * reply;
+    let t_b = 1.0 + 0.088 * (170.0 + 280.0) + 0.213 * 1.01 * reply;
     assert!(t_b > t_a);
     assert!(
         (derived.estimate_s - t_b).abs() < 1e-9,
@@ -368,4 +393,23 @@ fn run_deadlines_stay_within_floor_and_ceiling() {
     assert_eq!(run_deadline(12.0), 15);
     assert_eq!(run_deadline(12.1), 20);
     assert_eq!(run_deadline(f64::INFINITY) % 5, 0);
+}
+
+/// The 2026-11-16 live check (`docs/results.md`): 64-token samples at 125.9 ms (CPU, Granite
+/// 4.2 3B) and 71.3 ms (GPU, Qwen3.5-9B) per token, and a 2,560-token reply that took 411.0 s
+/// and 199.1 s of generation. With the slowdown the estimate's generation term is within 2 %
+/// of each; without it, it was 22 % and 8 % short.
+#[test]
+fn the_slowdown_matches_the_live_long_replies() {
+    for (path, g, measured_s) in [(Path::Cpu, 0.125_89, 411.0), (Path::Gpu, 0.071_26, 199.1)] {
+        let samples = [sample(1e-6, g, 0.0, 10.0, 293.0, 1290.0); 2];
+        let derived = derive(&measured(path, 2560, samples)).unwrap();
+        let generation = derived.estimate_s - derived.prompt_s;
+        assert!(
+            (generation / measured_s - 1.0).abs() < 0.02,
+            "{path:?}: {generation} s against {measured_s} s"
+        );
+        let flat = g * 2560.0;
+        assert!(flat < measured_s * 0.93, "{path:?}: {flat}");
+    }
 }

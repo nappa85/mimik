@@ -443,14 +443,15 @@ async fn settled(handle: &Handle, generation: u64) {
 
 fn slow() -> Start {
     Start::Ok(Behaviour {
-        g: 0.3,
+        g: 0.28,
         ..Behaviour::default()
     })
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_reply_length_leaves_the_device_default_in_force_and_a_revert_does_too() {
-    // GPU, g 0.3 s a token: 1,536 tokens fit the ceiling, 2,560 do not.
+    // GPU, g 0.28 s a token: 1,536 tokens (1,618.6 with the slowdown) take 454.8 s, R 570 s,
+    // within the ceiling; 2,560 do not.
     let launcher = FakeLauncher::scripted([slow(), slow(), slow(), slow()]);
     let records = Arc::new(MemRecords::default());
     let (assistant, handle) =

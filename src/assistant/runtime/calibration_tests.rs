@@ -159,9 +159,9 @@ async fn calibration_sends_two_64_token_fillers_with_ignore_eos_and_derives_budg
 }
 
 #[tokio::test]
-async fn the_estimate_is_g_times_the_owners_reply_length_not_the_samples_64_tokens() {
+async fn the_estimate_is_g_times_the_owners_slowed_reply_length_not_the_samples_64_tokens() {
     // Hand values: g = 0.213 s, p = 0.088 s, no overhead beyond rounding. T = o + p × (t + N)
-    // + g × max_tokens with t = 170, N = 280, o = wall - prompt - generation.
+    // + g × L × (1 + 2.1e-4 × L / 2) with t = 170, N = 280, o = wall - prompt - generation.
     let derive_at = |max_tokens: u32| async move {
         let server = Scripted::default();
         *server.token_counts.lock().unwrap() = vec![293, 280];
@@ -175,10 +175,11 @@ async fn the_estimate_is_g_times_the_owners_reply_length_not_the_samples_64_toke
         calibration.derived.unwrap()
     };
     let default = derive_at(1024).await;
-    let long = derive_at(2048).await;
-    // The second sample (t 170, N 280) is the larger: 0.088 × 450 + 0.213 × max_tokens.
-    assert!((default.estimate_s - (39.6 + 0.213 * 1024.0)).abs() < 1e-6);
-    assert!((long.estimate_s - (39.6 + 0.213 * 2048.0)).abs() < 1e-6);
+    let long = derive_at(1536).await;
+    // The second sample (t 170, N 280) is the larger: 0.088 × 450 + 0.213 × the slowed reply.
+    let reply = |l: f64| l * (1.0 + 2.1e-4 * l / 2.0);
+    assert!((default.estimate_s - (39.6 + 0.213 * reply(1024.0))).abs() < 1e-6);
+    assert!((long.estimate_s - (39.6 + 0.213 * reply(1536.0))).abs() < 1e-6);
     assert!(long.budgets.run > default.budgets.run);
 }
 

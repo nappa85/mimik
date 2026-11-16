@@ -578,16 +578,6 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
   panel at two viewports; (5) the release binary refusing a certificate outside the system
   store on a clean machine (the unit tests cover the verifier with an isolated store).
 
-### 2d-3 Reply length setting
-
-Built (reference [model-runtime.md](model-runtime.md), "Reply length"; ASSIST-59). Remaining:
-
-- **Live check (owner present, CPU and GPU):** a 2,560-token generation on both paths,
-  predicted against measured per-token time at the end of the reply (ASSIST-L47: if the ratio
-  exceeds 1.1 the estimate gains a context factor ((prefix + N + max_tokens / 2) / sample
-  context) before the margin, which stays for sample spread only), start-up time, and one job
-  end to end at 1,024.
-
 ### 3 Bundles and reminders
 
 Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,

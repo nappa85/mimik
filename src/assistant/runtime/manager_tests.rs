@@ -995,7 +995,8 @@ async fn the_gpu_path_reaches_ready_with_gpu_budgets() {
     assert_eq!(status.gpu_note, None);
     let budgets = status.budgets.unwrap();
     assert_eq!(budgets.bounds.bytes, 4096);
-    assert_eq!(budgets.run, Duration::from_secs(15));
+    // 10 ms per token over 1,024 × (1 + 7e-5 × 512) tokens plus 1.6 s of prompt: T 12.2 s.
+    assert_eq!(budgets.run, Duration::from_secs(20));
     assert_eq!(budgets.depth, 4);
     assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu]);
     assert_eq!(*launcher.probed.lock().unwrap(), [Path::Gpu]);

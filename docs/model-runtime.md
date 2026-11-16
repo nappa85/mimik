@@ -567,9 +567,11 @@ cached tokens at least 75 % of priming's prompt tokens, or the attempt fails. Th
 follow `assisted-sheet-plan.md` §1.4a "Budgets" (ASSIST-31, ASSIST-32): T(B) is the larger of
 the two samples' estimates per candidate (CPU 1,024, 768, 512; GPU 4,096, 2,048, 1,024), R =
 max(15, 1.25 × T rounded up to 5 s), at most the 600 s ceiling on both paths (a limit on stuck
-requests, not a wait), with T using the measured per-token time g times the owner's reply
-length (the 64-token samples give g; the first token comes from the prompt pass, which makes g
-about 1.6 % optimistic). The total wait is max(120 s, 2 × R): on the CPU path D 1 and Q =
+requests, not a wait), with T using the measured per-token time g over the owner's reply
+length L slowed by the context each token adds, g × L × (1 + α × L / 2), α 2.1e-4 on the CPU
+path and 7.0e-5 on the GPU path (`Path::slowdown`, measured on 2,560-token replies,
+`docs/results.md`; ASSIST-L47). The 64-token samples give g; the first token comes from the
+prompt pass, which makes g about 1.6 % optimistic. The total wait is max(120 s, 2 × R): on the CPU path D 1 and Q =
 total − R + busy, on the GPU path D = max(1, min(4, floor((total − R) / R))) and
 Q = D × (R + busy), where busy is the calibrated prompt term (the time the server stays busy
 after a request cancelled at R, which a queued job waits too), so D is 1 once R reaches 40 s. B must also leave room in the context: the fixed prefix (priming's

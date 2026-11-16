@@ -8,7 +8,7 @@
 //! time gᵢ = `predicted_ms` / `predicted_n`, overhead oᵢ = max(0, W − `prompt_ms` −
 //! `predicted_ms`) and the uncached tail tᵢ = `prompt_n` − Nᵢ. For a candidate bound B,
 //! N(B) = floor(`N_cal` × B / cap) with `N_cal` = min(N₁, N₂), Tᵢ(B) = oᵢ + pᵢ × (tᵢ + N(B)) +
-//! gᵢ × `max_tokens`, T(B) = max(T₁(B), T₂(B)) and R(B) = max(15, 1.25 × T(B) rounded up to
+//! gᵢ × L × (1 + α × L / 2) with L = `max_tokens` and α [`Path::slowdown`], T(B) = max(T₁(B), T₂(B)) and R(B) = max(15, 1.25 × T(B) rounded up to
 //! 5 s). B is the largest candidate whose R fits [`RUN_CEILING_S`] and whose request, with
 //! the reply and a template margin, fits the context.
 //! The queue wait Q is the total wait's rest plus the calibrated prompt term, the time the
@@ -48,6 +48,18 @@ impl Path {
         match self {
             Self::Cpu => 1024,
             Self::Gpu => crate::assistant::contract::MAX_DYNAMIC_BYTES,
+        }
+    }
+
+    /// How much slower each generated token gets per token of context it adds, as a share
+    /// of the calibrated per-token time g (measured 2026-11-16, `docs/results.md`: a
+    /// 2,560-token reply went from 130 to 190 ms per token on the CPU with Granite 4.2 3B, 72
+    /// to 84 ms on the GPU with Qwen3.5-9B; the samples' 64 tokens cannot see it). A reply of
+    /// L tokens then takes g × L × (1 + α × L / 2).
+    pub(crate) fn slowdown(self) -> f64 {
+        match self {
+            Self::Cpu => 2.1e-4,
+            Self::Gpu => 7.0e-5,
         }
     }
 
@@ -198,6 +210,8 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
         .min(measured.samples[1].filler_tokens);
     let cap = path.cap();
     let max_tokens = f64::from(measured.max_tokens);
+    // The reply's tokens at the calibrated speed, slowed by the context each one adds.
+    let reply = max_tokens * (1.0 + path.slowdown() * max_tokens / 2.0);
     let mut slowest_needed = 0;
     let fits_context = |tokens: f64| {
         measured.prefix_tokens + tokens + max_tokens + TEMPLATE_MARGIN_TOKENS <= f64::from(CTX_SIZE)
@@ -223,7 +237,7 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
         }
         let (estimate_s, prompt_s) = rates.iter().fold((0.0_f64, 0.0_f64), |(t, p), r| {
             let prompt = r.p * (r.t + tokens);
-            (t.max(r.o + prompt + r.g * max_tokens), p.max(prompt))
+            (t.max(r.o + prompt + r.g * reply), p.max(prompt))
         });
         let run = run_deadline(estimate_s);
         slowest_needed = run;
