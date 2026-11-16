@@ -843,6 +843,76 @@ async fn a_deadline_expiry_keeps_the_server_busy_for_its_prompt_term() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_job_queued_behind_one_that_expires_still_starts_within_the_derived_queue_wait() {
+    // The CPU figures `budgets::derive` gives for R 50 s and a prompt term of 30 s: the total
+    // wait is max(120, 2 × 50) = 120, Q = (120 − 50) + 30 = 100 s; without the busy slack Q
+    // would be 70 s. A job queued at once behind a running one waits R for it to expire and
+    // the busy time after: 80 s.
+    for (queue, starts) in [(100, true), (70, false)] {
+        let (stub, gate) = gated(3);
+        let mut derived = budgets();
+        derived.run = Duration::from_secs(50);
+        derived.queue_wait = Duration::from_secs(queue);
+        derived.busy_after_expiry = Duration::from_secs(30);
+        let assistant = ready(stub, derived);
+        let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+        settle().await;
+        let (second, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+        tokio::time::advance(Duration::from_secs(51)).await;
+        settle().await;
+        assert_eq!(assistant.poll(1, 1, first), Poll::Done(Answer::AskAgain));
+        assert_eq!(assistant.poll(2, 2, second), Poll::Queued);
+        // 50 s + 30 s after it was queued the second job runs, or, with the old Q, it has
+        // already been ended as too old.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        settle().await;
+        let expected = if starts {
+            Poll::Running
+        } else {
+            Poll::Done(Answer::AskAgain)
+        };
+        assert_eq!(assistant.poll(2, 2, second), expected, "Q {queue}");
+        gate.add_permits(3);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn on_the_gpu_two_queued_jobs_behind_expiring_ones_still_start_within_the_derived_queue_wait()
+{
+    // GPU figures from `budgets::derive`: D 2, R 30 s, a prompt term of 20 s, Q = D × (R +
+    // busy) = 100 s. Two requests ahead are dropped at their deadlines, each leaving the server
+    // busy for 20 s, so the third job starts at 30 + 20 + 30 + 20 = 100 s.
+    let (stub, gate) = gated(4);
+    let mut derived = budgets();
+    derived.run = Duration::from_secs(30);
+    derived.depth = 2;
+    derived.queue_wait = Duration::from_secs(100);
+    derived.busy_after_expiry = Duration::from_secs(20);
+    let assistant = ready(stub, derived);
+    let (first, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    let (second, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let (third, _) = start(&assistant, 3, origin(3, "field:hp", 5)).unwrap();
+    tokio::time::advance(Duration::from_secs(26)).await;
+    settle().await;
+    assert_eq!(assistant.poll(1, 1, first), Poll::Done(Answer::AskAgain));
+    // Busy until 50 s; then the second job runs, and is dropped at 80 s.
+    tokio::time::advance(Duration::from_secs(20)).await;
+    settle().await;
+    assert_eq!(assistant.poll(2, 2, second), Poll::Running);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    settle().await;
+    assert_eq!(assistant.poll(2, 2, second), Poll::Done(Answer::AskAgain));
+    assert_eq!(assistant.poll(3, 3, third), Poll::Queued);
+    // The third was queued at 5 s and starts at 100 s, inside its Q (105 s).
+    tokio::time::advance(Duration::from_secs(20)).await;
+    settle().await;
+    assert_eq!(assistant.poll(3, 3, third), Poll::Running);
+    gate.add_permits(4);
+}
+
+#[tokio::test(start_paused = true)]
 async fn expiries_and_completed_exchanges_are_signalled_to_the_runtime() {
     let stub = Arc::new(StubInterpreter::answering([Ok(HEAL.to_owned())]));
     let gate = Arc::new(Semaphore::new(0));

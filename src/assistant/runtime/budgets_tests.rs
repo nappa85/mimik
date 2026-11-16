@@ -78,9 +78,11 @@ fn container_figures_with_a_192_token_reply_fit_the_largest_cpu_bound() {
     ))
     .unwrap();
     // T = 1 + 0.088 × (170 + 293) + 0.213 × 192, R = 1.25 T up to 5 s; the total wait is
-    // twice R, the queue the rest.
+    // twice R, the queue the rest plus the busy slack: the prompt term 0.088 × 463 = 40.74 s,
+    // so 41 s (Q = 105 + 41).
     assert!((derived.estimate_s - 82.64).abs() < 1e-9);
-    assert_eq!(budgets(&derived), (1024, 293, 105, 1, 105));
+    assert_eq!(budgets(&derived), (1024, 293, 105, 1, 146));
+    assert_eq!(derived.budgets.busy_after_expiry.as_secs(), 41);
 }
 
 #[test]
@@ -100,7 +102,8 @@ fn the_reply_length_enters_the_estimate_through_the_measured_speed() {
         assert!((derived.estimate_s - expected).abs() < 1e-9, "{tokens}");
     }
     // 1 + 40.744 + 218.112 = 259.856 s: R 325.
-    assert_eq!(budgets(&default), (1024, 293, 325, 1, 325));
+    // The queue carries the prompt term, 0.088 × 463 = 40.74 s, as 41 s: Q = 325 + 41.
+    assert_eq!(budgets(&default), (1024, 293, 325, 1, 366));
     // At 2,560 tokens B 1024 is 587.0 s (R 735 s), B 768 (N 219) 580.5 s (R 730 s) and B 512
     // (N 146) 574.1 s (R 720 s): all over the ceiling.
     assert_eq!(
@@ -137,7 +140,8 @@ fn gpu_figures_give_the_largest_bound() {
     // About 1,100 prompt and 80 generated tokens per second on the RX 6650 XT.
     let gpu = sample(1.0 / 1100.0, 1.0 / 80.0, 0.3, 250.0, 1170.0, 1290.0);
     let derived = derive(&measured(Path::Gpu, 192, [gpu, gpu])).unwrap();
-    assert_eq!(budgets(&derived), (4096, 1170, 15, 4, 60));
+    // Q = D × (R + busy) = 4 × (15 + 2), the prompt term being about 1.2 s, rounded up.
+    assert_eq!(budgets(&derived), (4096, 1170, 15, 4, 68));
 }
 
 #[test]
@@ -148,9 +152,10 @@ fn a_gpu_measurement_picks_the_largest_bound_that_fits_the_ceiling() {
         derive(&measured(Path::Gpu, 2560, [s, s]))
     };
     // B 4096: 0.3 + 0.2 × 1420 + 256 = 540.3 s, R 680 s (over); B 2048: 423.3 s, R 530 s.
-    assert_eq!(budgets(&pick(0.2).unwrap()), (2048, 585, 530, 1, 530));
+    // The queue adds the prompt term 0.2 × (t + 585) = 166.6 s, so 167 s.
+    assert_eq!(budgets(&pick(0.2).unwrap()), (2048, 585, 530, 1, 697));
     // B 4096 and 2048 are over at p = 0.3; B 1024: 0.3 + 0.3 × 542 + 256 = 418.9 s, R 525 s.
-    assert_eq!(budgets(&pick(0.3).unwrap()), (1024, 292, 525, 1, 525));
+    assert_eq!(budgets(&pick(0.3).unwrap()), (1024, 292, 525, 1, 688));
     // Slower generation: nothing fits, and the ceiling is the cap named.
     let slowest = sample(0.2, 0.3, 0.3, 250.0, 1170.0, 1290.0);
     assert!(matches!(
@@ -164,7 +169,8 @@ fn a_cpu_measurement_that_fits_only_768_picks_it() {
     // B 1024: 1 + 0.28 × 393 + 384 = 495.04 s, R 620 s (over); B 768: 474.3 s, R 595 s.
     let s = sample(0.28, 0.15, 1.0, 100.0, 293.0, 1290.0);
     let derived = derive(&measured(Path::Cpu, 2560, [s, s])).unwrap();
-    assert_eq!(budgets(&derived), (768, 219, 595, 1, 595));
+    // The prompt term 0.28 × (t + 219) is 90 s: Q = 595 + 90.
+    assert_eq!(budgets(&derived), (768, 219, 595, 1, 685));
 }
 
 #[test]
@@ -187,17 +193,20 @@ fn the_ceiling_is_600_seconds_on_both_paths() {
 #[test]
 fn the_queue_follows_a_total_wait_of_the_larger_of_120_s_and_twice_r() {
     // (R, CPU queue, GPU depth, GPU queue): the CPU keeps one job and waits total - R; the
-    // GPU admits (total - R) / R jobs, between 1 and 4.
+    // GPU admits (total - R) / R jobs, between 1 and 4. The CPU queue also carries the
+    // busy-after-expiry slack once, the GPU's once per queued job (D × (R + busy)), 1 s here (the prompt term of these samples is a fraction of a
+    // second, rounded up), so a job queued behind one cancelled at R still starts within Q.
     for (r, cpu_queue, depth, gpu_queue) in [
-        (20_u32, 100_u64, 4_usize, 80_u64),
-        (40, 80, 2, 80),
-        (60, 60, 1, 60),
-        (300, 300, 1, 300),
+        (20_u32, 101_u64, 4_usize, 84_u64),
+        (40, 81, 2, 82),
+        (60, 61, 1, 61),
+        (300, 301, 1, 301),
     ] {
         let seconds = f64::from(r) * 0.8 - 1.0;
         let cpu = derive(&measured(Path::Cpu, 1024, [takes(seconds), takes(seconds)])).unwrap();
         assert_eq!(cpu.budgets.run.as_secs(), u64::from(r));
         assert_eq!(cpu.budgets.depth, 1);
+        assert_eq!(cpu.budgets.busy_after_expiry.as_secs(), 1, "R {r}");
         assert_eq!(cpu.budgets.queue_wait.as_secs(), cpu_queue, "R {r}");
         let gpu = derive(&measured(Path::Gpu, 1024, [takes(seconds), takes(seconds)])).unwrap();
         assert_eq!(gpu.budgets.depth, depth, "R {r}");
@@ -336,7 +345,15 @@ fn run_deadlines_stay_within_floor_and_ceiling() {
                         assert!((15..=RUN_CEILING_S).contains(&run), "{run}");
                         assert_eq!(run % 5, 0);
                         let total = run + derived.budgets.queue_wait.as_secs();
-                        assert!(total <= 120.max(2 * run), "{total}");
+                        let busy = derived.budgets.busy_after_expiry.as_secs();
+                        // The total wait stays max(120, 2R) plus the busy slack, and a job
+                        // queued behind one cancelled at R starts within Q.
+                        let depth = u64::try_from(derived.budgets.depth).unwrap();
+                        assert!(total <= 120.max(2 * run) + depth * busy, "{total}");
+                        assert!(
+                            derived.budgets.queue_wait.as_secs() >= run + busy,
+                            "{run} {busy}"
+                        );
                         if path == Path::Cpu {
                             assert_eq!(derived.budgets.depth, 1);
                         } else {

@@ -11,6 +11,9 @@
 //! gᵢ × `max_tokens`, T(B) = max(T₁(B), T₂(B)) and R(B) = max(15, 1.25 × T(B) rounded up to
 //! 5 s). B is the largest candidate whose R fits [`RUN_CEILING_S`] and whose request, with
 //! the reply and a template margin, fits the context.
+//! The queue wait Q is the total wait's rest plus the calibrated prompt term, the time the
+//! server stays busy after a request cancelled at R (CPU: total − R + busy; GPU: D × (R +
+//! busy)): a job queued behind ones that expire still starts within Q.
 use super::Path;
 use super::launch::CTX_SIZE;
 use crate::assistant::jobs::Budgets;
@@ -228,11 +231,21 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
             continue;
         }
         let total = TOTAL_S.max(2 * run);
+        // The server stays busy for `busy_after_expiry` after a request cancelled at R, and a
+        // job queued behind it waits that long too: Q carries that slack, so such a job still
+        // starts within Q (CPU: total - R + busy; GPU: each of D jobs may follow one cancelled
+        // at R, D x (R + busy)).
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a non-negative whole number of seconds, far below u64"
+        )]
+        let busy = prompt_s.ceil() as u64;
         let (depth, queue) = match path {
-            Path::Cpu => (1, total - run),
+            Path::Cpu => (1, total - run + busy),
             Path::Gpu => {
                 let depth = ((total - run) / run).clamp(1, 4);
-                (depth, depth * run)
+                (depth, depth * (run + busy))
             }
         };
         #[expect(
@@ -248,7 +261,7 @@ pub(crate) fn derive(measured: &Measured) -> Result<Derived, NoBudgets> {
                 depth: usize::try_from(depth).unwrap_or(1),
                 queue_wait: Duration::from_secs(queue),
                 max_tokens: measured.max_tokens,
-                busy_after_expiry: Duration::from_secs_f64(prompt_s.ceil()),
+                busy_after_expiry: Duration::from_secs(busy),
             },
             estimate_s,
             prompt_s,

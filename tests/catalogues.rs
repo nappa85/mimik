@@ -473,7 +473,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     // Schema 20 (change notes) is newer than the rewind target too.
     db.execute_batch("DROP TABLE private_sheet_notes;").unwrap();
     // So is the assistant's model setting (schema 22).
-    db.execute_batch("DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;")
+    db.execute_batch("DROP TABLE assistant_reply_lengths; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;")
         .unwrap();
     db.execute_batch("PRAGMA user_version=18;").unwrap();
     let catalogue_objects = |db: &rusqlite::Connection| -> i64 {

@@ -105,11 +105,12 @@ migrations.
 | 019 | Catalogues: drafts, versions, entry types, entries, unit references, seals (trigger-bound to the hashed content), name FTS index |
 | 020 | Private sheet change notes (assisted entry) |
 | 021 | Change notes rebuilt to admit row addresses (`row:<list>/<host>`) and 6-byte `meta:` addresses |
-| 022 | The assistant's model setting: models the owner switched to (spec, SHA-256, size, alias, `max_tokens`, trial measurements) and the single active/previous choice ([model-runtime.md](model-runtime.md), "Owner model setting") |
+| 022 | The assistant's model setting: models the owner switched to (spec, SHA-256, size, alias, trial measurements) and the single active/previous choice ([model-runtime.md](model-runtime.md), "Owner model setting") |
 | 023 | The owner's model downloads: the confirmed downloads with their licence snapshot ([model-downloads.md](model-downloads.md)) |
 | 024–027 | Source documents, owner units, review operations and suggestions; source uploads; upload fingerprint key |
 | 028 | Owner units may be `Text` or `Table` |
 | 029 | Append-only `source_page_words`: the word boxes of a page, written at import for the table shapes |
+| 032 | `assistant_reply_lengths`: the owner's reply length per model file, apart from the model rows and the choice ([model-runtime.md](model-runtime.md), "Reply length") |
 
 ## Areas
 

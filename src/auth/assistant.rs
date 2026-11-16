@@ -77,6 +77,7 @@ enum Notice {
     LengthSet,
     LengthInvalid,
     LengthUnchanged,
+    LengthNotStored,
     Kept,
     NothingToKeep,
     ModelBusy,
@@ -134,13 +135,16 @@ impl Notice {
             }
             Self::NoPreviousModel => "There is no previous model to switch back to.",
             Self::LengthSet => {
-                "Setting the longest reply: the model server restarts once and is measured again. If it does not start or is too slow, the previous setting comes back."
+                "Setting the longest reply: the model server restarts once and is measured again. If the new length leaves no usable budgets, the file's earlier setting comes back."
             }
             Self::LengthInvalid => {
                 "That is not a reply length this page accepts (a whole number of tokens in the allowed range, in the allowed steps); nothing changed."
             }
             Self::LengthUnchanged => {
                 "The active model already has that reply length; nothing changed."
+            }
+            Self::LengthNotStored => {
+                "The reply length could not be stored; nothing changed and the model server was not restarted."
             }
             Self::Kept => "Kept the current model; the trial result is dismissed.",
             Self::NothingToKeep => "There is no trial result to dismiss.",
@@ -908,8 +912,9 @@ async fn switch_back(
     }))
 }
 
-/// "Longest reply": a whole number of tokens within `model::reply_length`'s bounds and steps,
-/// checked here and again by the runtime; anything else changes nothing.
+/// "Longest reply": the form's text is parsed as a number here; the runtime manager alone
+/// validates it against `model::reply_length`'s bounds and steps. Anything it refuses changes
+/// nothing.
 async fn set_length(
     State(state): State<AuthState>,
     session: Session,
@@ -922,12 +927,14 @@ async fn set_length(
         return Ok(redirect("length-invalid"));
     };
     Ok(redirect(
-        match runtime.set_length(auth.account.id, max_tokens) {
+        match runtime.set_length(auth.account.id, max_tokens).await {
             SetLength::Accepted => "length-set",
             SetLength::Busy => "trial-running",
             SetLength::Pending => "model-busy",
             SetLength::Invalid => "length-invalid",
             SetLength::Unchanged => "length-unchanged",
+            SetLength::NotStored => "length-not-stored",
+            SetLength::Unsupported => "model-unsupported",
         },
     ))
 }

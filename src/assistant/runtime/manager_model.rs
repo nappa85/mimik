@@ -42,7 +42,7 @@ struct Plan {
     generation: u64,
     level: Level,
     path: Path,
-    /// The candidate, with the default reply length as `max_tokens`.
+    /// The candidate, with the reply length its file will use as `max_tokens`.
     candidate: Model,
 }
 
@@ -60,8 +60,13 @@ impl Manager {
                 self.switch_back(by).await;
                 None
             }
-            ModelCommand::SetLength { max_tokens, by } => {
-                self.set_length(max_tokens, by).await;
+            ModelCommand::SetLength {
+                max_tokens,
+                by,
+                sha256,
+                from,
+            } => {
+                self.set_length(max_tokens, by, sha256, from);
                 None
             }
         }
@@ -205,14 +210,17 @@ impl Manager {
             return failed(self, format!("{name} {what}"));
         }
         match default_alias(spec) {
-            Ok(alias) => Ok(Model {
-                spec: spec.to_owned(),
-                name,
-                sha256: file.sha256,
-                alias,
-                max_tokens: reply_length::DEFAULT,
-                size: Some(file.size),
-            }),
+            // The phrases run at the default length; the model keeps the length its file has.
+            Ok(alias) => Ok(self
+                .with_stored_length(Model {
+                    spec: spec.to_owned(),
+                    name,
+                    sha256: file.sha256,
+                    alias,
+                    max_tokens: reply_length::DEFAULT,
+                    size: Some(file.size),
+                })
+                .await),
             Err(why) => failed(self, why),
         }
     }
@@ -307,7 +315,8 @@ impl Manager {
         let Some(records) = self.records.clone() else {
             return;
         };
-        let new = report.model.clone();
+        // The file's length may have been set since the trial ended.
+        let new = self.with_stored_length(report.model.clone()).await;
         let old = self.active.clone();
         // Trying the file that is already active again keeps the model before it.
         let keeps_previous = old.sha256 == new.sha256 && old.name == new.name;
@@ -331,7 +340,7 @@ impl Manager {
             return;
         }
         log(&format!(
-            "model switched to {} (max_tokens {})",
+            "model switched to {} (reply length {})",
             new.spec, new.max_tokens
         ));
         if !keeps_previous {
@@ -369,35 +378,28 @@ impl Manager {
         self.publish_models();
     }
 
-    /// "Longest reply": the active model gets the reply length `max_tokens`, stored first
-    /// as a model row (the trial copied, the five phrases not run). The previous row is the one
-    /// it replaces; the caller starts a session, measured again with the new length, and a
-    /// start that fails or is "too slow" goes back ([`Manager::revert_length`]).
-    async fn set_length(&mut self, max_tokens: u32, by: i64) {
-        let Some(records) = self.records.clone() else {
-            return;
-        };
-        let old = self.active.clone();
-        if let Err(why) = records.set_length(&old, max_tokens, by).await {
-            self.note(format!(
-                "the reply length could not be stored ({why}); the current setting stays"
+    /// "Longest reply": the length is already stored for the active model's file (by the
+    /// handle, before the server stopped). This applies it in memory and on the page, with no
+    /// change to the model choice, the previous model or the device default; the caller
+    /// starts a session, measured again with the new length, and a first start whose budgets
+    /// fail because of the length goes back ([`Manager::revert_length`]).
+    fn set_length(&mut self, max_tokens: u32, by: i64, sha256: String, from: Option<u32>) {
+        if sha256 != self.active.sha256 {
+            // The active model changed between the handle's read and now (a GPU fallback to
+            // another file): the stored row is that file's, not this one's. It applies the
+            // next time its file is active; nothing here changes and nothing is reverted.
+            log(&format!(
+                "reply length {max_tokens} stored for another file than the active {}; not applied now",
+                self.active.spec
             ));
             return;
         }
         log(&format!(
             "reply length of {} set to {max_tokens} tokens (was {})",
-            old.spec, old.max_tokens
+            self.active.spec, self.active.max_tokens
         ));
-        let from = old.max_tokens;
-        self.active = Model {
-            max_tokens,
-            ..old.clone()
-        };
-        self.previous = Some(old);
-        self.older_prompt.previous = self.older_prompt.active;
-        self.device_default = false;
-        self.publish_models();
-        self.length_change = Some(LengthChange { by, from });
+        self.set_active_length(max_tokens);
+        self.length_change = Some(LengthChange { by, sha256, from });
     }
 
     pub(super) fn publish_models(&self) {
@@ -469,7 +471,9 @@ async fn measure_trial(
         .await
         .map_err(|failed| match failed {
             Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) | Attempt::TooSlow(why) => why,
-            Attempt::Ready(..) | Attempt::Interrupted(_) => "interrupted".into(),
+            Attempt::Ready(..) | Attempt::LengthLimit { .. } | Attempt::Interrupted(_) => {
+                "interrupted".into()
+            }
         })?;
     let server = child.server();
     // The two 64-token samples give the candidate's speed, and with it the phrase bound.
@@ -478,7 +482,9 @@ async fn measure_trial(
     let (calibration, budgets) = calibrate_budgets(server.as_ref(), plan.path, max_tokens, prefix)
         .await
         .map_err(|failed| match failed {
-            NotCalibrated::TooSlow(why, _) | NotCalibrated::Failed(why) => why,
+            NotCalibrated::TooSlow(why, _)
+            | NotCalibrated::Length { why, .. }
+            | NotCalibrated::Failed(why) => why,
         })?;
     let phrases = trial::run(server.as_ref(), phrase_bound(budgets.run), &|n| {
         phase(PHRASE_PHASES[n - 1]);
@@ -486,10 +492,7 @@ async fn measure_trial(
     .await
     .map_err(|failure| failure.describe())?;
     let largest = trial::largest_predicted(&phrases);
-    let model = Model {
-        max_tokens,
-        ..plan.candidate.clone()
-    };
+    let model = plan.candidate.clone();
     Ok(TrialReport {
         key: TrialKey {
             number: plan.number,
@@ -511,7 +514,7 @@ async fn measure_trial(
 /// One log line of a passed trial.
 fn summary(report: &TrialReport) -> String {
     format!(
-        "max_tokens {} (largest phrase reply {} tokens), {}",
+        "reply length {} (largest phrase reply {} tokens), {}",
         report.model.max_tokens,
         report.largest_predicted,
         measured(&report.calibration, Some(&report.budgets))
@@ -556,7 +559,7 @@ fn trial_json(report: &TrialReport) -> String {
         "prefix_tokens": report.calibration.prefix_tokens,
         "phrases": phrases,
         "largest_predicted_n": report.largest_predicted,
-        "max_tokens": report.model.max_tokens,
+        "measured_max_tokens": reply_length::DEFAULT,
         "samples": samples,
         "budgets": {
             "bytes": report.budgets.bounds.bytes,

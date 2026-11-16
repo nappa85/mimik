@@ -27,8 +27,8 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 | Generations and transitions | `src/assistant/runtime/manager.rs` |
 | Model setting: model, trial key and report, bounds | `src/assistant/runtime/models.rs` |
 | Trial, Switch, Switch back | `src/assistant/runtime/manager_model.rs`, `src/assistant/runtime/trial.rs` |
-| Model spec grammar, `max_tokens` rules | `src/assistant/model.rs` |
-| Stored setting (migration 022) | `src/assistant/records.rs`, `migrations/022_assistant_models.sql` |
+| Model spec grammar, reply-length bounds | `src/assistant/model.rs` |
+| Stored setting (migrations 022, 032) | `src/assistant/records.rs`, `migrations/022_assistant_models.sql`, `migrations/032_assistant_reply_length.sql` |
 | Thread count | `src/assistant/runtime/threads.rs` |
 | Device choice (render nodes, listing, ranking) | `src/assistant/runtime/device.rs` |
 | Owner page | `src/auth/assistant.rs`, `templates/admin_assistant.html` |
@@ -44,7 +44,7 @@ model of a database that has no stored setting; once the owner has switched mode
 setting wins and the flags are ignored (the page says so). **Default by device (ASSIST-55):**
 without `--assistant-model` and without a stored setting, the manager picks the model at each
 start (`default_model` in `src/assistant/runtime/models.rs`): on the GPU path the Qwen3.5-9B
-`Q4_K_M` file (`Qwen3.5-9B-Q4_K_M.gguf`, Apache-2.0, SHA-256 compiled in; reply length 1,024 until the owner sets it)
+`Q4_K_M` file (`Qwen3.5-9B-Q4_K_M.gguf`, Apache-2.0, SHA-256 compiled in; reply length 1,024 unless the owner stored one for this file)
 when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found or not
 readable in <absolute models folder>; using Granite 4.2 3B" on `/admin/assistant` (a warning,
 not a block); the same when the 9B file fails its pinned hash at the load ("Qwen3.5-9B in
@@ -53,7 +53,7 @@ and its note. "Try the GPU again" (even while Granite runs on the GPU) or Mimik'
 checks the 9B file again. An explicit or stored 9B is refused instead, as any model whose file
 changed. On the CPU path
 (`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
-(file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 compiled in; reply length 1,024 until the owner sets it), with a note when
+(file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 compiled in; reply length 1,024 unless the owner stored one for this file), with a note when
 the GPU was wanted. "Try the GPU again" picks again. An explicit flag or the stored setting is
 never replaced; a Switch or Switch back ends the default, and "Switch back" returns to the
 model that was running. `--reasoning off` is in every start's arguments, so Qwen3.5's thinking
@@ -546,7 +546,7 @@ transitions:
 | Child exits while ready | restart now | +1 only within 10 minutes of `ready` |
 | Two consecutive run-deadline expiries without a completed exchange between | stop as hung, restart, measure again | as a child exit |
 | Failure count reaches 4 | `unavailable` until Restart | — |
-| Budgets do not derive | `unavailable` ("too slow on this machine: about N s needed, the ceiling is 600 s", or "reply length too large for the context"), no retry; after a reply-length change the previous setting returns and starts | — |
+| Budgets do not derive | `unavailable` ("too slow on this machine: about N s needed, the ceiling is 600 s", or "reply length too large for the context"), no retry; on the first start after a reply-length change the file's earlier length returns and starts (breaker not reset) | — |
 | `ready` for 10 minutes | count back to 0 | reset |
 | Restart (or Mimik's start) | stop, start again from level 1, breaker reset; it interrupts a preflight, probe or start in progress, and further presses are ignored until `ready` or `unavailable` | reset |
 
@@ -570,8 +570,9 @@ max(15, 1.25 × T rounded up to 5 s), at most the 600 s ceiling on both paths (a
 requests, not a wait), with T using the measured per-token time g times the owner's reply
 length (the 64-token samples give g; the first token comes from the prompt pass, which makes g
 about 1.6 % optimistic). The total wait is max(120 s, 2 × R): on the CPU path D 1 and Q =
-total − R, on the GPU path D = max(1, min(4, floor((total − R) / R))) and Q = D × R, so D is 1
-once R reaches 40 s. B must also leave room in the context: the fixed prefix (priming's
+total − R + busy, on the GPU path D = max(1, min(4, floor((total − R) / R))) and
+Q = D × (R + busy), where busy is the calibrated prompt term (the time the server stays busy
+after a request cancelled at R, which a queued job waits too), so D is 1 once R reaches 40 s. B must also leave room in the context: the fixed prefix (priming's
 measurement) + N(B) + the reply length + 64 tokens of template margin within the 8,192-token
 context, or the next smaller candidate is taken; with none left the start fails with "reply
 length too large for the context" (a reply is never cut silently). After a run-deadline expiry, or when a running job
@@ -600,12 +601,13 @@ hashes the file (the SHA-256 it will be held to at every load, remembered by the
 identity so the load does not read it again); starts the candidate on the path the runtime is
 on (the GPU path unless it fell back or `--assistant-device cpu`; no fallback inside a trial)
 at level 1; primes it; calibrates it (two 64-token samples) for the default reply length and
-derives the budgets; then sends five synthetic phrases shipped with Mimik (`trial.rs`; no
+derives the budgets (the trial report shows the reply length the file will use: the length
+stored for it, else the default); then sends five synthetic phrases shipped with Mimik (`trial.rs`; no
 sheet or player text) as a job would be sent (the reply schema limits `ref` to `t` and the
 phrase's context IDs), at the default reply length (1,024 tokens), each of which must be
 schema-valid and untruncated. The largest `predicted_n` of the phrases is recorded as
-information; the reply length of the new model starts at the default and is the owner's to
-change afterwards (below). It passes when the calibration and the phrases succeed ("too slow"
+information; the reply length of a file is the owner's to set (below), and a trial leaves it
+as it is. It passes when the calibration and the phrases succeed ("too slow"
 fails with the numbers). Whether a phrase's expected value was among the options is shown and
 decides nothing (D-D). Bounds: each phrase 2 × R of a default-length reply on the candidate's
 measured speed, at most the 600 s ceiling (phrases end on EOS), the whole trial including
@@ -630,12 +632,14 @@ setting's limit).
 **Switch.** "Switch" carries the passed trial's key (`<number>.<generation>.<sha256>`), accepted
 only if it names the latest finished passed trial (another hash, an older trial or an older
 generation is refused as stale and nothing changes). The manager stores the model first
-(`assistant_models`: spec, file name, SHA-256, size, alias, `max_tokens` (the reply length), the trial's
+(`assistant_models`: spec, file name, SHA-256, size, alias, the trial's
 measurements as JSON, with the SHA-256 of the prompt prefix they ran under; `assistant_model_choice`: the active and the previous model, who and
-when), then starts a session with it: restart, priming, calibration for its recorded
-reply length. A store failure changes nothing and the page says why. A stored model whose trial recorded
+when), then starts a session with it: restart, priming, calibration for the reply length
+stored for its file (else the default; read again at the Switch, in case it was set since the
+trial). "Switch back" uses the previous model as the manager holds it in memory, which a
+reply-length change keeps in step (`set_active_length`). A store failure changes nothing and the page says why. A stored model whose trial recorded
 another prompt prefix than the current one (or none, as before ASSIST-56) is shown with a
-line saying its `max_tokens` and speeds were measured with an older prompt and that trying it
+line saying its speeds were measured with an older prompt and that trying it
 again measures it with the current one; nothing is blocked or re-tried by itself. "Switch back" swaps the
 active and the previous model in the same way and restarts with it. A model that fails to
 become ready after a switch can be switched away from the same way. All actions are
@@ -643,23 +647,39 @@ owner-only, CSRF-checked, strict forms (an extra, duplicate or missing key is a 
 bounded at 4 KiB.
 
 **Reply length.** "Longest reply" (POST `/admin/assistant/model/length`, owner-only,
-CSRF-checked, strict form) sets `max_tokens` of the active model, 256 to 2,560 tokens in steps
-of 128 (`model::reply_length`: `MIN`, `MAX`, `STEP` and the default 1,024 are the one place
-the form, the stored CHECK and the runtime read; the route and the manager both refuse a value
-off the step or out of bounds, a non-number is refused as invalid, and the same value again
-changes nothing). The manager stores it first (one transaction): a row with the same file,
-hash and alias and the new `max_tokens`, the trial record copied, reused through the record
-match (file, hash, alias, `max_tokens`) or new, and the row it replaces becomes the previous
-model; then the server restarts once, primes and calibrates for the new length. It does not
-run the five phrases and consumes no trial number. It applies to both paths: a value tuned on
-the GPU may be "too slow" on the CPU fallback (the page shows R for the path running). A start
-that fails or is "too slow" (or too large for the context) with the new length goes back to
-the previous row (stored first, as Switch back) and starts again with it, with a note
-naming why; a start that became ready, or any later request, keeps the setting. Admitted one
-at a time with Try, Switch, Switch back and Restart ("a model change or a restart is already
-being carried out"), refused while a trial runs. The migration rebuilt both model tables
-with the new CHECK and set existing rows to 1,024. A stuck server is still declared after two
-run-deadline expiries in a row, which now takes up to 2 × R (ASSIST-L63).
+CSRF-checked, strict form) sets the reply length (`max_tokens`) of the active model's file,
+256 to 2,560 tokens in steps of 128 (`model::reply_length`: `MIN`, `MAX`, `STEP` and the
+default 1,024 are the one place the stored CHECK and the runtime read). The route only
+parses the text as a number; the runtime manager alone validates it (out of bounds or off the
+step is refused as invalid, the same value again changes nothing). The length is stored per
+model file: one row of `assistant_reply_lengths` (SHA-256 of the file, length, who, when), a
+table of its own that neither has rows of `assistant_models` nor touches the model choice.
+A file without a row uses the default; every model's effective length (session start, Switch,
+Switch back, the trial report, the device default, the start flags' model) is the length
+stored for its SHA-256. Setting a length is one upsert of the file's row, stored before
+anything stops (a store failure changes nothing, restarts nothing and the page says why); it
+does not change the active or the previous model or the device default (the Qwen3.5-9B stays
+the GPU default and Granite the CPU's; after a GPU failure Granite runs with Granite's own
+length). Switching to another file and back keeps each file's length, and a new trial of a file
+keeps the length stored for it (its phrases and calibration still run at the default). Then the
+server restarts once, primes and calibrates for the new length; it does not run the five
+phrases and consumes no trial number. It applies to both paths: a value tuned on the GPU may
+be "too slow" on the CPU fallback (the page shows R for the path running). A first start that
+fails its budgets because of the length (the estimate over the 600 s ceiling, or a reply too
+large for the context) restores the file's earlier value (the previous row, or no row when
+there was none; stored first) and starts again, with a note naming the measured reason and
+without resetting the circuit breaker (only Restart and Mimik's start do). Any other outcome
+follows its normal path and keeps the new setting: ready, a sandbox or other failure, a
+changed model file, a calibration sample timeout (a 64-token sample is independent of the
+length), a Restart or another request. A reply too large for the context is never a GPU
+failure: the GPU is not slow or broken, the length and the file do not fit the context, so on
+the GPU path it is held as unavailable with its message and the owner fixes the length, instead
+of falling back to the CPU (where, for the device default, Granite would run with its own
+length and hide the problem). Admitted one at a time with Try, Switch, Switch back and Restart ("a model change
+or a restart is already being carried out"), refused while a trial runs. Migration 032 created
+the table and rebuilt the model tables without the old `max_tokens` column. A stuck server is
+still declared after two run-deadline expiries in a row, which now takes up to 2 × R
+(ASSIST-L63).
 
 **Changed file.** A load whose file no longer has the recorded SHA-256 is not retried: the
 assistant is unavailable with "the model file changed", until the owner tries a model again,

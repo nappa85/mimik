@@ -422,12 +422,13 @@ natively for these tests (ASSIST-40).
   largest candidate with R(B) = max(15, round up to 5 s of 1.25 × T(B)) within the 600 s
   ceiling (both paths) and with room in the context (prefix tokens + N(B) + `max_tokens` + 64
   ≤ 8,192). Total wait = max(120 s, 2 × R); queue: GPU D = max(1, min(4, floor((total − R) /
-  R))) and Q = D × R; CPU D = 1 and Q = total − R, so Q + R ≤ max(120 s, 2 × R), and the
+  R))) and Q = D × (R + busy); CPU D = 1 and Q = total − R + busy, where busy is the busy-after-expiry slack (the calibrated prompt term, which a job queued behind one cancelled at R also waits), so Q + R ≤ max(120 s, 2 × R) plus D × busy, and the
   admission rule (`docs/assisted-entry.md`, "Interpretation assistant", Jobs) refuses as busy a start that cannot begin in
   time. Every request also obeys N(B) tokens (`docs/assisted-entry.md`), so its prompt is no longer than the
   calibration's; the hard run deadline holds when the estimate is wrong, and two consecutive
   expiries restart and re-measure (the transitions above). On the GPU path, no fitting
-  candidate is a GPU failure (CPU fallback). On the CPU path, if 1,024 does not fit, 768 and
+  candidate because of speed is a GPU failure (CPU fallback); a reply too large for the context
+  is not (nothing about the path changes it): it is held as unavailable with its message. On the CPU path, if 1,024 does not fit, 768 and
   then 512 are taken; only when 512 does not fit is the assistant unavailable ("too slow on
   this machine: about N s needed, the ceiling is M s"), with the measurement shown; entry is never
   affected: "too slow" on the CPU path turns the assistant off for that machine until a
@@ -579,7 +580,7 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
 
 ### 2d-3 Reply length setting
 
-Merged (reference [model-runtime.md](model-runtime.md), "Reply length"; ASSIST-59). Remaining:
+Built (reference [model-runtime.md](model-runtime.md), "Reply length"; ASSIST-59). Remaining:
 
 - **Live check (owner present, CPU and GPU):** a 2,560-token generation on both paths,
   predicted against measured per-token time at the end of the reply (ASSIST-L47: if the ratio

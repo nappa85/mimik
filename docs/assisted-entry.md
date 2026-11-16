@@ -429,7 +429,7 @@ the file name without `.gguf`, lower case); the runtime's `--models-dir`,
 "Options"). The owner's stored model setting, when there is one, replaces the model flags
 ([model-runtime.md](model-runtime.md), "Owner model setting"). `max_tokens` is the owner's reply length ("Longest reply" on `/admin/assistant`, 256 to 2,560
 tokens in steps of 128, `model::reply_length`): 1,024 for every file until the owner sets it,
-and it belongs to the stored model row ([model-runtime.md](model-runtime.md), "Reply length").
+and it belongs to the model file (one row per SHA-256, apart from the model rows and the choice; [model-runtime.md](model-runtime.md), "Reply length").
 The budgets (B, N(B), R,
 D, Q) come from each generation's calibration and arrive in its `ready` event (generation
 started, ended with its reason, ready with the budgets). Builds with the `dev-endpoint`

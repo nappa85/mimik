@@ -147,26 +147,8 @@ impl AssistantHandle {
                     .into(),
             );
         }
-        let name = model::local_name(&spec)?;
-        let (sha256, max_tokens) = model::resolve(&spec, config.model_sha256.as_deref())?;
-        let alias = match config.model_alias {
-            Some(alias) => alias,
-            None => model::default_alias(&spec)?,
-        };
-        if !model::valid_alias(&alias) {
-            return Err(
-                "--assistant-model-alias must be 1 to 128 characters from [A-Za-z0-9._-]".into(),
-            );
-        }
-        let flags = runtime::models::Model {
-            spec,
-            name: name.clone(),
-            sha256: sha256.clone(),
-            alias: alias.clone(),
-            max_tokens,
-            size: None,
-        };
         let records = records::SqlRecords(store);
+        let flags = flags_model(spec, &config, &records).await?;
         // The owner's stored setting beats the start flags.
         let stored = records.load().await?;
         let from_owner_setting = stored.active.is_some();
@@ -264,6 +246,38 @@ impl AssistantHandle {
             downloads_note: None,
         }
     }
+}
+
+/// The model the start flags name (or the Granite placeholder of the device default): the
+/// spec's file, its hash and alias, with the reply length stored for the file's hash, else the
+/// default.
+async fn flags_model(
+    spec: String,
+    config: &RuntimeConfig,
+    records: &records::SqlRecords,
+) -> Result<runtime::models::Model, String> {
+    let name = model::local_name(&spec)?;
+    let (sha256, max_tokens) = model::resolve(&spec, config.model_sha256.as_deref())?;
+    let alias = match &config.model_alias {
+        Some(alias) => alias.clone(),
+        None => model::default_alias(&spec)?,
+    };
+    if !model::valid_alias(&alias) {
+        return Err(
+            "--assistant-model-alias must be 1 to 128 characters from [A-Za-z0-9._-]".into(),
+        );
+    }
+    let max_tokens = records::Records::length(records, &sha256)
+        .await?
+        .unwrap_or(max_tokens);
+    Ok(runtime::models::Model {
+        spec,
+        name,
+        sha256,
+        alias,
+        max_tokens,
+        size: None,
+    })
 }
 
 /// The models folder the downloads fill: `--models-dir`, else `<data dir>/models`, absolute.
