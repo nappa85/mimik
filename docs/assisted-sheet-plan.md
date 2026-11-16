@@ -366,7 +366,7 @@ natively for these tests (ASSIST-40).
   cannot start (for example no Vulkan loader) is a GPU failure. The CPU path uses the CPU
   build.
 - **Transitions** (attempt = spawn, endpoint check, `/health` within 60 s, priming within
-  300 s, calibration within twice the path's run-deadline cap; owner actions are owner-only
+  300 s, calibration within 1,020 s; owner actions are owner-only
   and CSRF-checked):
 
   | Event | Action | Failure count |
@@ -398,20 +398,20 @@ natively for these tests (ASSIST-40).
   token density matches real sheets (labels and values of the shipped demo and 2b synthetic
   sheets; the density is recorded), since every request is separately held to N(B) tokens;
   the two fillers differ from their first byte so neither reuses the other's cache;
-  `max_tokens` the model's, `ignore_eos: true` and no schema, so each sample generates exactly
-  `max_tokens` tokens. From each sample: wall time W, `timings.prompt_n`, `prompt_ms` and the
+  64 tokens, `ignore_eos: true` and no schema, so each sample generates exactly 64 tokens (the
+  owner's reply length enters the estimate through the measured speed). From each sample: wall time W, `timings.prompt_n`, `prompt_ms` and the
   cached prompt tokens (the evaluated prompt tokens include any uncached tail of the fixed
   prefix and the envelope and template tokens around the filler), `predicted_n` and
   `predicted_ms`; and from `/tokenize`, each filler's token count N₁ and N₂ (equal byte
   lengths do not give equal token counts). All must be present,
-  finite and positive, `predicted_n` must equal `max_tokens`, each tail tᵢ = `prompt_n` − Nᵢ
+  finite and positive, `predicted_n` must equal 64, each tail tᵢ = `prompt_n` − Nᵢ
   must not be negative, and the cached tokens must be at least 75 % of the fixed prefix's
   tokens measured by priming (2b saw 83 to 88 %), or the attempt fails (a timing criterion,
   not a content one). Both are outside the breaker. The grammar question is settled once, in
   2c-2, not at each start: a live measurement compares per-token generation time with and
   without the grammar on both paths; if the grammar costs more than 10 %, the shipped
   calibration measures g from schema-carrying samples (then `predicted_n` need only be at
-  least 32 and generation time is g × `max_tokens`), otherwise it stays as above.
+  least 32 and generation time is g × the reply length), otherwise it stays as above.
 - **Budgets (ASSIST-31, ASSIST-32; recomputed at every start, a latency estimate within hard
   caps, not a worst-case bound):** per sample i: per-token prompt time pᵢ = `prompt_ms` /
   `prompt_n`, per-token generation time gᵢ = `predicted_ms` / `predicted_n`, overhead oᵢ =
@@ -419,16 +419,18 @@ natively for these tests (ASSIST-40).
   smaller count, N_cal = min(N₁, N₂) (conservative: a request may not exceed the leaner
   filler's density). For a candidate bound B, N(B) = floor(N_cal × B / cap), Tᵢ(B) = oᵢ + pᵢ ×
   (tᵢ + N(B)) + gᵢ × `max_tokens` with the same N(B) in both, and T(B) = max(T₁(B), T₂(B)). Candidates: GPU 4,096, 2,048, 1,024; CPU 1,024, 768, 512. B is the
-  largest candidate with R(B) = max(15, round up to 5 s of 1.25 × T(B)) within the path's
-  limits: GPU R ≤ 60 s; CPU R ≤ 90 s. Queue: GPU D = max(1, min(4, floor((120 − R) / R))) and
-  Q = D × R (the 2b rule; Q + R ≤ 120 holds since R ≤ 60); CPU D = 1 and Q = 120 − R, so Q +
-  R ≤ 120 s, and the admission rule (`docs/assisted-entry.md`, "Interpretation assistant", Jobs) refuses as busy a start that cannot begin in
+  largest candidate with R(B) = max(15, round up to 5 s of 1.25 × T(B)) within the 600 s
+  ceiling (both paths) and with room in the context (prefix tokens + N(B) + `max_tokens` + 64
+  ≤ 8,192). Total wait = max(120 s, 2 × R); queue: GPU D = max(1, min(4, floor((total − R) /
+  R))) and Q = D × (R + busy); CPU D = 1 and Q = total − R + busy, where busy is the busy-after-expiry slack (the calibrated prompt term, which a job queued behind one cancelled at R also waits), so Q + R ≤ max(120 s, 2 × R) plus D × busy, and the
+  admission rule (`docs/assisted-entry.md`, "Interpretation assistant", Jobs) refuses as busy a start that cannot begin in
   time. Every request also obeys N(B) tokens (`docs/assisted-entry.md`), so its prompt is no longer than the
   calibration's; the hard run deadline holds when the estimate is wrong, and two consecutive
   expiries restart and re-measure (the transitions above). On the GPU path, no fitting
-  candidate is a GPU failure (CPU fallback). On the CPU path, if 1,024 does not fit, 768 and
+  candidate because of speed is a GPU failure (CPU fallback); a reply too large for the context
+  is not (nothing about the path changes it): it is held as unavailable with its message. On the CPU path, if 1,024 does not fit, 768 and
   then 512 are taken; only when 512 does not fit is the assistant unavailable ("too slow on
-  this machine: about N s needed, the cap is M s"), with the measurement shown; entry is never
+  this machine: about N s needed, the ceiling is M s"), with the measurement shown; entry is never
   affected: "too slow" on the CPU path turns the assistant off for that machine until a
   Restart measures again. Expected outcomes, with the prompt term written out as p × (t +
   N(B)): t is the uncached tail of the fixed prefix (2b saw 170 to 250 of its about 1,460
@@ -436,22 +438,9 @@ natively for these tests (ASSIST-40).
   GPU path the 2b numbers (about 1,100 prompt and 80 generated tokens per second on the
   RX 6650 XT) give T about 4 s, so B 4,096, R 15, D 4, Q 60. On the CPU path the outcome is
   set by the first native calibration on this host, a measurement step of 2c-2 recorded in
-  `docs/results.md`. An illustration from the 2b container figures (p about 88 ms and g
-  about 213 ms per token at 2 threads, o about 1 s, about 3.5 bytes per token, Granite's 192
-  tokens about 41 s), not taken with this procedure or filler:
-
-  | B | N(B) | T with t 170 to 250 | 1.25 × T | Fits 90 s? |
-  |---|---|---|---|---|
-  | 1,024 | about 296 | about 83 to 90 s | about 104 to 113 s | no |
-  | 768 | about 222 | about 77 to 84 s | about 96 to 105 s | no |
-  | 512 | about 148 | about 70 to 77 s | about 88 to 96 s | only at the low end (R 90, D 1, Q 30) |
-
-  The table uses 2b's 192 tokens; under schema v2 the default Granite file has `max_tokens`
-  352 (about 75 s of generation at 2 threads). With t at the 75 % bound, or with `max_tokens`
-  256 or more (every model now, the default Granite file included), nothing fits, so the CPU baseline of ASSIST-27 is not assured with the
-  default model at 2 threads; ASSIST-41 raises the default to the physical cores minus one,
-  and the native calibration at that setting decides. In 2c-2 these are formula fixtures,
-  not evidence.
+  `docs/results.md`. The 2b container illustration under the old 90 s cap no longer applies: the outcome on a
+  CPU is set by the native calibration and the owner's reply length (`docs/results.md`), and
+  in 2c-2 the formulas are fixtures, not evidence.
 
 ### 1.5 Bundles and reminders (3)
 
@@ -589,76 +578,6 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
   panel at two viewports; (5) the release binary refusing a certificate outside the system
   store on a clean machine (the unit tests cover the verifier with an isolated store).
 
-### 2d-3 Reply length setting (owner request, 2026-11-16)
-
-Why: the schema's largest reply takes 857–971 tokens with realistic 64-character IDs (up to
-2,261 with IDs built to tokenize badly) against `max_tokens` 352, and a cut-off reply shows
-nothing (`docs/results.md`, 2026-11-16; ASSIST-L52 (d)). Owner decisions: raise it; the reply
-length is part of what adapts to the hardware, tuned by the owner, and the run deadline follows
-the measured speed instead of fixed caps. Reviewed (Opus, approve with changes; applied below).
-
-- **Constants.** `MIN` 256, `MAX` 2,560, `STEP` 128, `DEFAULT` 1,024 (one place, used by the
-  form, the CHECK and the runtime). They replace `DEFAULT_MAX_TOKENS`,
-  `GPU_DEFAULT_MAX_TOKENS`, `OTHER_MAX_TOKENS`, `TRIAL_MEASURE_TOKENS`, `MIN_TRIAL_TOKENS`,
-  the trial's derivation (`measured_max_tokens`, `trial_max_tokens`) and `resolve`'s per-hash
-  values: every model starts at `DEFAULT`; `largest_predicted` stays in the trial record as
-  information.
-- **Setting.** "Longest reply" for the active model on `/admin/assistant`: its own POST route
-  (`owner_auth` + `csrf_admission`, as the other model actions), server-side check of bounds
-  and step (crafted values refused). It does not run the five phrases (the page says so): it
-  makes a new `assistant_models` row (or reuses one through the record match: file, hash,
-  alias, `max_tokens`) copying the trial record, and restarts once with re-calibration. A start
-  that fails or comes out "too slow" goes back to the previous row, as a failed Switch does.
-  Admitted one at a time with Try, Switch, Switch back and Restart. The setting applies to
-  both paths: a value tuned on the GPU may be "too slow" on the CPU fallback (the page shows R
-  for the path running).
-- **Trial.** For a new file only: the five phrases run at `DEFAULT` and must be
-  schema-valid and untruncated; the phrase bound is 2 × the R of a `DEFAULT` reply on the
-  candidate's measured speed, at most the ceiling (phrases end on EOS).
-- **Calibration.** The two samples generate 64 tokens (`ignore_eos`) instead of
-  `max_tokens`; validity: `predicted_n` = 64. Each sample times out at 480 s (any W above
-  that already means R > 600 s), so a hopeless machine says "too slow" within about 16
-  minutes, not 21. The first token comes from the prompt pass (about 1.6 % optimistic bias on
-  g; noted in `docs/model-runtime.md`).
-- **Context growth.** g is measured at the sample's context (about 2.1k tokens on the CPU,
-  3.1k on the GPU) but a long reply ends deeper (up to about 5.6k), where each token reads
-  more KV cache. The live check measures the real per-token time at the end of a 2,560-token
-  reply on both paths against the prediction; if the ratio exceeds 1.1, the estimate gains a
-  context factor ((prefix + N + max_tokens / 2) / sample context) before the margin, which
-  stays for sample spread only.
-- **Deadlines.** The run cap (90 s CPU, 60 s GPU) becomes one safety ceiling of 600 s on both
-  paths: R = max(15, 1.25 × T rounded up to 5 s) as today, "too slow" only above 600 s. B
-  keeps its candidates (CPU 1 KiB at most, ASSIST-31) and takes the largest that fits both
-  the ceiling and the context (below). Total wait = max(120 s, 2 × R): CPU depth 1 with queue
-  = total − R; GPU depth = clamp((total − R) / R, 1, 4), so 1 once R ≥ 40 s.
-- **Context.** In `budgets::derive`, B must also satisfy prefix tokens (priming's
-  measurement) + N(B) + `max_tokens` + 64 (template margin) ≤ `CTX_SIZE` (8,192); if no B
-  does, the start fails with "reply length too large for the context" (never cut silently).
-- **Page.** For the active model: the setting, R on the running path ("a reply can take up to
-  R s"), the per-token time, and the worst case a player can see (about 2 × R with one job
-  queued). Players' "Thinking…" has no client limit (polling continues; options live 600 s
-  after the job ends), so nothing breaks with a long R.
-- **Migration** (next free number at merge). Pre-release data (no backfill rule): rebuild
-  both tables in one migration (drop `assistant_model_choice`, drop `assistant_models`,
-  create both with the new CHECK `max_tokens BETWEEN 256 AND 2560 AND max_tokens % 128 = 0`)
-  and copy the rows with `max_tokens` set to 1,024, keeping ids so the choice row still
-  points at them. Test on a populated database (active and previous rows at 352).
-- **Decisions and limits.** ASSIST-31 and ASSIST-32 lose the fixed caps (the 600 s ceiling
-  is a limit on stuck requests, both paths); new ASSIST-57 for the setting. A stuck server is
-  declared after two expiries in a row, which now takes up to 2 × R (6–20 minutes), and a
-  breaker probe can hold the server for R: recorded as a limitation next to ASSIST-L47/L52
-  (an inactivity check, no token for k × g, is a later item). `busy_after_expiry` covers
-  only the prompt term and is unaffected (a dropped request stops generating).
-- **Tests.** Constants used by form, CHECK and runtime; the migration on populated rows with
-  the foreign key; route: bounds, step, crafted values, CSRF, Owner only, admitted alone,
-  one restart, revert on a failed or too-slow start, trial record copied and phrases not run;
-  calibration at 64 tokens derives R from g × setting (hand values); the 480 s sample
-  timeout; the ceiling; the context refusal; queue at R = 20, 40 and 300 s; the trial at
-  `DEFAULT` and its phrase bound; the page shows R, per-token time and the 2 × R worst case.
-- **Live check (owner present, CPU and GPU):** a 2,560-token generation on both paths,
-  predicted against measured per-token time at the end (the context factor above), start-up
-  time, and one job end to end at 1,024.
-
 ### 3 Bundles and reminders
 
 Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,
@@ -744,10 +663,9 @@ dangling key shows no link; p95 measured.
 
 ## 4. Risks and later
 
-Risks: the CPU path may not meet its caps at all (§1.4a: from the 2b container figures, with
-the uncached prefix tail included, Granite at 2 threads fits only B 512 at best, and a model
-with `max_tokens` 256 or more fits nothing), and `starting` takes priming of about 117 s plus
-two calibration samples of about 85 s each plus hashing the model before the assistant is
+Risks: the CPU path may be too slow for a long reply length (§1.4a: R over the 600 s ceiling at
+every bound is "too slow", and a reply-length change that comes out so goes back), and
+`starting` takes priming of about 117 s plus two calibration samples of 64 tokens plus hashing the model before the assistant is
 ready; all from container measurements; model quality is unknown and the bar is waived (the display
 and confirmation are the safeguard); reminder prompts carry catalogue text (contained, not
 prevented); one revision per Enter makes history long (no-ops write nothing, no cap; D-U);

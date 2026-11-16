@@ -1,30 +1,38 @@
 //! The model spec (`docs/model-runtime.md`, "Owner model setting"): the grammar of `--assistant-model` and of the
 //! owner's "Model" field (`local:<name>.gguf`, default the Granite 4.2 3B file with its
 //! SHA-256 compiled in), `--assistant-model-sha256` (required for any other file) and
-//! `--assistant-model-alias`, and the `max_tokens` rules.
+//! `--assistant-model-alias`, and the reply length's bounds.
+/// The reply length (`max_tokens`) the owner sets for the active model (`docs/model-runtime.md`,
+/// "Reply length"): the one place its bounds live. The form, the stored setting's CHECK
+/// (migration 032) and the runtime all use these.
+pub(crate) mod reply_length {
+    /// The shortest reply the owner may allow, in tokens.
+    pub(crate) const MIN: u32 = 256;
+    /// The longest.
+    pub(crate) const MAX: u32 = 2560;
+    /// The setting moves in steps of this many tokens.
+    pub(crate) const STEP: u32 = 128;
+    /// What every model starts with (the schema's largest reply takes 857 to 971 tokens with
+    /// realistic 64-character IDs).
+    pub(crate) const DEFAULT: u32 = 1024;
+
+    /// Whether `tokens` is a setting the owner may choose: within the bounds and a whole step.
+    pub(crate) fn valid(tokens: u32) -> bool {
+        (MIN..=MAX).contains(&tokens) && tokens.is_multiple_of(STEP)
+    }
+}
+
 /// The default model spec and the SHA-256 compiled in for it: the Granite 4.2 3B
 /// `Q4_K_M` file, equal to the Hub's LFS SHA-256 at revision `c40945d…`.
 pub const DEFAULT_MODEL: &str = "local:granite-4.2-3b-Q4_K_M.gguf";
 pub const DEFAULT_MODEL_SHA256: &str =
     "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5";
-/// `max_tokens` of the default file, by the 2b rule (round up to a multiple of 32 of 1.25 ×
-/// the largest `predicted_n` of a valid, untruncated reply, at most 384) over the 2c-1
-/// screen of the v2-short prefix: largest 263, 1.25 × 263 = 328.75, so 352. The shipped
-/// v2-compact prefix (ASSIST-52) asks for shorter replies, so 352 still holds; re-deriving it
-/// from a screen of the shipped prefix is owed (`TODO.md`).
-pub(crate) const DEFAULT_MAX_TOKENS: u32 = 352;
 /// The default model on the GPU path (ASSIST-55): the Qwen3.5-9B `Q4_K_M` file
 /// (unsloth/Qwen3.5-9B-GGUF at revision `3885219b`, Apache-2.0), 5 680 522 464 bytes, with
 /// its SHA-256 compiled in. The CPU path keeps [`DEFAULT_MODEL`].
 pub const GPU_DEFAULT_MODEL: &str = "local:Qwen3.5-9B-Q4_K_M.gguf";
 pub const GPU_DEFAULT_MODEL_SHA256: &str =
     "03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8";
-/// `max_tokens` of the 9B file: 352, from the 352-token field-reference screens, where no
-/// reply was truncated. A derivation by the 2b rule from a screen of the shipped
-/// v2-compact prefix is owed (ASSIST-L47), as for Granite.
-pub(crate) const GPU_DEFAULT_MAX_TOKENS: u32 = 352;
-/// Any other file until the 2d trial measures it (never below 256).
-pub(crate) const OTHER_MAX_TOKENS: u32 = 256;
 
 /// The Hugging Face spec and size of the Granite default file (ASSIST-55): the downloads fetch
 /// exactly this file, checked against [`DEFAULT_MODEL_SHA256`].
@@ -326,11 +334,11 @@ pub(crate) fn valid_sha256(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The SHA-256 and `max_tokens` a spec resolves to, before any trial: the hash given with
+/// The SHA-256 and `max_tokens` a spec resolves to, before any setting: the hash given with
 /// `--assistant-model-sha256`, else the compiled-in hash of the spec's own default file (the
-/// Granite or the Qwen3.5-9B file); `max_tokens` 352 for either default file by its SHA-256,
-/// 256 otherwise. Every place that turns a spec into a model (the flags, the development
-/// endpoint, the probe) uses this.
+/// Granite or the Qwen3.5-9B file); `max_tokens` is [`reply_length::DEFAULT`] for every file.
+/// Every place that turns a spec into a model (the flags, the development endpoint, the
+/// probe) uses this.
 pub(crate) fn resolve(spec: &str, sha256: Option<&str>) -> Result<(String, u32), String> {
     local_name(spec)?;
     let sha256 = match sha256 {
@@ -340,17 +348,7 @@ pub(crate) fn resolve(spec: &str, sha256: Option<&str>) -> Result<(String, u32),
         None if spec == GPU_DEFAULT_MODEL => GPU_DEFAULT_MODEL_SHA256,
         None => return Err("--assistant-model-sha256 is required for this model".into()),
     };
-    let tokens = compiled_in_max_tokens(sha256).unwrap_or(OTHER_MAX_TOKENS);
-    Ok((sha256.to_owned(), tokens))
-}
-
-/// The `max_tokens` of a file whose hash is compiled in (the two defaults), by its SHA-256.
-fn compiled_in_max_tokens(sha256: &str) -> Option<u32> {
-    match sha256 {
-        DEFAULT_MODEL_SHA256 => Some(DEFAULT_MAX_TOKENS),
-        GPU_DEFAULT_MODEL_SHA256 => Some(GPU_DEFAULT_MAX_TOKENS),
-        _ => None,
-    }
+    Ok((sha256.to_owned(), reply_length::DEFAULT))
 }
 
 /// The largest model file a trial accepts (the stored size's limit, ASSIST-35).
@@ -363,30 +361,6 @@ pub(crate) fn valid_alias(alias: &str) -> bool {
         && alias
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-/// The `max_tokens` a trial's phrases are sent with (the measurement cap) and the most any
-/// model may have.
-pub(crate) const TRIAL_MEASURE_TOKENS: u32 = 384;
-/// The least a trial sets (five phrases cannot measure a tail).
-pub(crate) const MIN_TRIAL_TOKENS: u32 = 256;
-
-/// The trial's rule: `min(384, max(256, round up to 32 of 1.25 × the largest
-/// predicted_n))`, over the five phrases' replies. The default Granite file keeps
-/// [`DEFAULT_MAX_TOKENS`], identified by its SHA-256, never by name
-/// ([`trial_max_tokens`]).
-pub(crate) fn measured_max_tokens(largest_predicted_n: u32) -> u32 {
-    // 1.25 × n rounded up to a whole token, then to a multiple of 32.
-    let scaled = u64::from(largest_predicted_n) * 5;
-    let tokens = scaled.div_ceil(4);
-    let rounded = tokens.div_ceil(32) * 32;
-    let capped = rounded.clamp(u64::from(MIN_TRIAL_TOKENS), u64::from(TRIAL_MEASURE_TOKENS));
-    u32::try_from(capped).unwrap_or(TRIAL_MEASURE_TOKENS)
-}
-
-/// The `max_tokens` a passed trial of the file with `sha256` records.
-pub(crate) fn trial_max_tokens(sha256: &str, largest_predicted_n: u32) -> u32 {
-    compiled_in_max_tokens(sha256).unwrap_or_else(|| measured_max_tokens(largest_predicted_n))
 }
 
 #[cfg(test)]

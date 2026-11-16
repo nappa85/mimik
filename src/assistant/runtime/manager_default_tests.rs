@@ -12,7 +12,7 @@ const GPU_CONFIG: Config = Config {
 };
 
 fn placeholder() -> Model {
-    Model::test("granite-4.2-3b-Q4_K_M.gguf", DEFAULT_MODEL_SHA256, 352)
+    Model::test("granite-4.2-3b-Q4_K_M.gguf", DEFAULT_MODEL_SHA256, 1024)
 }
 
 fn spawn_default(
@@ -57,7 +57,7 @@ async fn the_gpu_path_runs_the_9b_when_its_file_is_there() {
     assert_eq!(status.path, Path::Gpu);
     assert_eq!(selected_shas(&launcher), [GPU_DEFAULT_MODEL_SHA256]);
     assert_eq!(status.model.active.spec, GPU_DEFAULT_MODEL);
-    assert_eq!(status.model.active.max_tokens, 352);
+    assert_eq!(status.model.active.max_tokens, 1024);
     assert!(status.model.device_default.is_on());
     assert_eq!(status.model.device_default.note(), None);
 }
@@ -321,7 +321,7 @@ async fn a_9b_trial_while_the_device_default_is_on_runs_the_candidate_and_stores
     };
     assert_eq!(report.path, config.path);
     assert_eq!(report.model.sha256, GPU_DEFAULT_MODEL_SHA256);
-    assert_eq!(report.model.max_tokens, 352);
+    assert_eq!(report.model.max_tokens, 1024);
     assert_eq!(
         selected_shas(&launcher),
         [
@@ -373,7 +373,7 @@ async fn an_explicit_9b_with_the_wrong_hash_stays_unavailable() {
             Arc::clone(&launcher) as Arc<dyn Launcher>,
             GPU_CONFIG,
             ModelSetup {
-                active: Model::test("Qwen3.5-9B-Q4_K_M.gguf", GPU_DEFAULT_MODEL_SHA256, 352),
+                active: Model::test("Qwen3.5-9B-Q4_K_M.gguf", GPU_DEFAULT_MODEL_SHA256, 1024),
                 previous: None,
                 records: None,
                 from_owner_setting: false,
@@ -430,4 +430,129 @@ async fn a_restart_keeps_the_device_default_and_try_the_gpu_again_picks_the_9b_a
             GPU_DEFAULT_MODEL_SHA256
         ]
     );
+}
+
+async fn settled(handle: &Handle, generation: u64) {
+    let probe = handle.clone();
+    super::tests::until(Duration::from_hours(1), move || {
+        let status = probe.status();
+        status.generation >= generation && status.state == State::Ready && !status.restarting
+    })
+    .await;
+}
+
+fn slow() -> Start {
+    Start::Ok(Behaviour {
+        g: 0.28,
+        ..Behaviour::default()
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reply_length_leaves_the_device_default_in_force_and_a_revert_does_too() {
+    // GPU, g 0.28 s a token: 1,536 tokens (1,618.6 with the slowdown) take 454.8 s, R 570 s,
+    // within the ceiling; 2,560 do not.
+    let launcher = FakeLauncher::scripted([slow(), slow(), slow(), slow()]);
+    let records = Arc::new(MemRecords::default());
+    let (assistant, handle) =
+        spawn_default(&launcher, GPU_CONFIG, true, Some(Arc::clone(&records)));
+    ready(&assistant).await;
+    assert_eq!(handle.set_length(7, 1536).await, SetLength::Accepted);
+    settled(&handle, 2).await;
+    let status = handle.status();
+    // The 9B keeps being the device default; only its length changed, and no model row,
+    // previous model or choice was stored.
+    assert!(status.model.device_default.is_on());
+    assert_eq!(status.model.active.sha256, GPU_DEFAULT_MODEL_SHA256);
+    assert_eq!(status.model.active.max_tokens, 1536);
+    assert_eq!(status.model.previous, None);
+    assert!(!status.model.from_owner_setting);
+    assert_eq!(
+        *records.stored.lock().unwrap(),
+        crate::assistant::records::Stored::default()
+    );
+    assert_eq!(
+        launcher
+            .selected
+            .lock()
+            .unwrap()
+            .last()
+            .map(|m| m.max_tokens),
+        Some(1536)
+    );
+    // A too-long length is reverted and the default is still the default.
+    assert_eq!(handle.set_length(7, 2560).await, SetLength::Accepted);
+    settled(&handle, 4).await;
+    let status = handle.status();
+    assert!(status.model.device_default.is_on());
+    assert_eq!(status.model.active.sha256, GPU_DEFAULT_MODEL_SHA256);
+    assert_eq!(status.model.active.max_tokens, 1536);
+    assert!(
+        status
+            .model
+            .note
+            .is_some_and(|note| note.contains("too slow"))
+    );
+    assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu; 4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_gpu_fallback_runs_granite_with_its_own_stored_length_or_the_default() {
+    for (granite_length, expected) in [(Some(1280), 1280), (None, 1024)] {
+        let launcher = FakeLauncher::scripted([
+            Start::Other("the model server exited before it was ready"),
+            Start::Ok(Behaviour::default()),
+        ]);
+        let records = Arc::new(MemRecords::default());
+        {
+            let mut lengths = records.lengths.lock().unwrap();
+            lengths.insert(GPU_DEFAULT_MODEL_SHA256.to_owned(), 2048);
+            if let Some(tokens) = granite_length {
+                lengths.insert(DEFAULT_MODEL_SHA256.to_owned(), tokens);
+            }
+        }
+        let (assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, Some(records));
+        ready(&assistant).await;
+        let selected: Vec<_> = launcher
+            .selected
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|model| (model.sha256.clone(), model.max_tokens))
+            .collect();
+        // The 9B starts with its length; after its failure Granite runs on the CPU with
+        // Granite's own, not the 9B's.
+        assert_eq!(
+            selected,
+            [
+                (GPU_DEFAULT_MODEL_SHA256.to_owned(), 2048),
+                (DEFAULT_MODEL_SHA256.to_owned(), expected)
+            ]
+        );
+        let status = handle.status();
+        assert_eq!(status.path, Path::Cpu);
+        assert_eq!(status.model.active.max_tokens, expected);
+        assert_eq!(assistant.budgets().unwrap().max_tokens, expected);
+        assert!(status.model.device_default.is_on());
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stored_length_that_cannot_be_read_leaves_the_device_default_with_the_default_length() {
+    let launcher = FakeLauncher::scripted([]);
+    let records = Arc::new(MemRecords::default());
+    records
+        .lengths
+        .lock()
+        .unwrap()
+        .insert(GPU_DEFAULT_MODEL_SHA256.to_owned(), 2048);
+    *records.fail.lock().unwrap() = Some("the reply length cannot be read".into());
+    let (assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, Some(records));
+    ready(&assistant).await;
+    // The read failed: the pick keeps the length the compiled-in model has, and starts.
+    let status = handle.status();
+    assert_eq!(status.model.active.sha256, GPU_DEFAULT_MODEL_SHA256);
+    assert_eq!(status.model.active.max_tokens, 1024);
+    assert_eq!(assistant.budgets().unwrap().max_tokens, 1024);
 }

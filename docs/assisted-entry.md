@@ -410,8 +410,8 @@ Without it there is no client, no worker, no child and no job route (the three p
 | Client and transport | `src/assistant/interpreter.rs`, `src/assistant/transport.rs` |
 | Jobs, admission, runtime events | `src/assistant/jobs.rs` |
 | Circuit breaker | `src/assistant/breaker.rs` |
-| Model spec, flags and `max_tokens` rules | `src/assistant/model.rs`, `src/main.rs` |
-| Owner model setting (trial, Switch, stored choice) | `src/assistant/runtime/manager_model.rs`, `src/assistant/records.rs` ([model-runtime.md](model-runtime.md)) |
+| Model spec, flags and reply-length bounds | `src/assistant/model.rs`, `src/main.rs` |
+| Owner model setting (trial, Switch, reply length, stored choice) | `src/assistant/runtime/manager_model.rs`, `src/assistant/records.rs` ([model-runtime.md](model-runtime.md)) |
 | Model runtime | `src/assistant/runtime/` ([model-runtime.md](model-runtime.md)) |
 | Development endpoint (tests) | `src/assistant/development.rs` |
 | Context of a job | `src/campaigns/interpret.rs`, read sets in `src/definitions/formula/mod.rs` (`Compiled::read_sets`) |
@@ -427,13 +427,10 @@ and `--assistant-model-alias` (the request's model name and the server's `--alia
 the file name without `.gguf`, lower case); the runtime's `--models-dir`,
 `--assistant-runtime` and `--assistant-threads` ([model-runtime.md](model-runtime.md),
 "Options"). The owner's stored model setting, when there is one, replaces the model flags
-([model-runtime.md](model-runtime.md), "Owner model setting"). `max_tokens` is 352 for the file
-whose SHA-256 is the compiled-in `e0406663…` (the 2b rule over the 2c-1 screen of the v2-short
-prefix: largest `predicted_n` 263, × 1.25, rounded up to a multiple of 32, capped at 384;
-re-deriving it from a screen of the shipped prefix is owed, ASSIST-L47; the Qwen3.5-9B default
-has 352 too, from the 352-token field-reference screens, ASSIST-L51), 256 for any other file named by the flags, and for a
-model the owner tried, what the trial derived (`min(384, max(256, 1.25 × the five phrases'
-largest predicted_n, rounded up to a multiple of 32))`). The budgets (B, N(B), R,
+([model-runtime.md](model-runtime.md), "Owner model setting"). `max_tokens` is the owner's reply length ("Longest reply" on `/admin/assistant`, 256 to 2,560
+tokens in steps of 128, `model::reply_length`): 1,024 for every file until the owner sets it,
+and it belongs to the model file (one row per SHA-256, apart from the model rows and the choice; [model-runtime.md](model-runtime.md), "Reply length").
+The budgets (B, N(B), R,
 D, Q) come from each generation's calibration and arrive in its `ready` event (generation
 started, ended with its reason, ready with the budgets). Builds with the `dev-endpoint`
 feature (never a release; `smoke_release.py` checks the release binary has none) also take

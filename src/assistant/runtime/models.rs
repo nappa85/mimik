@@ -162,12 +162,13 @@ pub(crate) struct PhraseResult {
 pub(crate) struct TrialReport {
     pub key: TrialKey,
     pub by: i64,
-    /// The candidate with the `max_tokens` the trial derived.
+    /// The candidate, with the default reply length as `max_tokens`.
     pub model: Model,
     pub path: Path,
     pub priming: Duration,
     pub phrases: Vec<PhraseResult>,
-    /// The largest `predicted_n` of the phrases, which sets `max_tokens`.
+    /// The largest `predicted_n` of the phrases (information: the reply length is the owner's
+    /// setting).
     pub largest_predicted: u32,
     pub calibration: Calibration,
     pub budgets: Budgets,
@@ -294,18 +295,16 @@ impl DeviceDefault {
     }
 }
 
-/// The whole trial may take this long: priming, five phrases at their deadline and two
-/// calibration samples at twice the cap.
-pub(crate) fn trial_bound(path: Path) -> Duration {
-    Duration::from_secs(match path {
-        Path::Cpu => 30 * 60,
-        Path::Gpu => 20 * 60,
-    })
+/// The whole trial may take this long, on either path: hashing and starting, priming, two
+/// calibration samples at their timeout and five phrases at their longest bound.
+pub(crate) fn trial_bound() -> Duration {
+    Duration::from_mins(90)
 }
 
-/// Each phrase has twice the path's run-deadline cap (180 s on the CPU, 120 s on the GPU).
-pub(crate) fn phrase_bound(path: Path) -> Duration {
-    Duration::from_secs(2 * path.run_cap())
+/// Each phrase has twice `run`, the run deadline of a default-length reply on the candidate's
+/// measured speed, at most the ceiling (phrases end on EOS, so this is far above their time).
+pub(crate) fn phrase_bound(run: Duration) -> Duration {
+    (2 * run).min(Duration::from_secs(super::budgets::RUN_CEILING_S))
 }
 
 /// The model the start flags describe, for a manager that has no stored setting.
@@ -332,14 +331,14 @@ mod tests {
         use crate::assistant::model::{
             DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL, GPU_DEFAULT_MODEL_SHA256,
         };
-        // GPU path, file there: the 9B with its compiled-in hash and 352 tokens.
+        // GPU path, file there: the 9B with its compiled-in hash and the default reply length.
         let (model, note) = default_model(true, true, NineB::Present, "/m");
         assert_eq!(model.spec, GPU_DEFAULT_MODEL);
         assert_eq!(model.name, "Qwen3.5-9B-Q4_K_M.gguf");
         assert_eq!(model.sha256, GPU_DEFAULT_MODEL_SHA256);
         assert_eq!(
             (model.alias.as_str(), model.max_tokens),
-            ("qwen3.5-9b-q4_k_m", 352)
+            ("qwen3.5-9b-q4_k_m", 1024)
         );
         assert_eq!(note, None);
         // GPU path, file with another hash: Granite, and why.
@@ -390,10 +389,23 @@ mod tests {
     }
 
     #[test]
-    fn bounds_follow_the_path() {
-        assert_eq!(phrase_bound(Path::Cpu), Duration::from_mins(3));
-        assert_eq!(phrase_bound(Path::Gpu), Duration::from_mins(2));
-        assert_eq!(trial_bound(Path::Cpu), Duration::from_mins(30));
-        assert_eq!(trial_bound(Path::Gpu), Duration::from_mins(20));
+    fn the_phrase_bound_is_twice_the_default_reply_run_deadline_at_most_the_ceiling() {
+        assert_eq!(
+            phrase_bound(Duration::from_secs(15)),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            phrase_bound(Duration::from_secs(200)),
+            Duration::from_secs(400)
+        );
+        assert_eq!(
+            phrase_bound(Duration::from_secs(300)),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            phrase_bound(Duration::from_secs(600)),
+            Duration::from_secs(600)
+        );
+        assert_eq!(trial_bound(), Duration::from_mins(90));
     }
 }

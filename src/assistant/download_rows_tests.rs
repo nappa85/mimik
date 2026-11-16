@@ -116,7 +116,7 @@ async fn the_model_choice_decides_whether_a_file_is_in_use() {
         .run(|db| {
             for (name, id) in [("a.gguf", 1), ("b.gguf", 2), ("c.gguf", 3)] {
                 db.execute(
-                    "INSERT INTO assistant_models(id,spec,file_name,sha256,size,alias,max_tokens,trial,recorded_at) VALUES(?1,?2,?3,?4,10,'alias',256,NULL,1)",
+                    "INSERT INTO assistant_models(id,spec,file_name,sha256,size,alias,trial,recorded_at) VALUES(?1,?2,?3,?4,10,'alias',NULL,1)",
                     rusqlite::params![id, format!("local:{name}"), name, SHA],
                 )?;
             }
@@ -136,6 +136,8 @@ async fn the_model_choice_decides_whether_a_file_is_in_use() {
 
 #[tokio::test]
 async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_check() {
+    // Migration 032 (the reply length per file) rebuilds both model tables on top of 023,
+    // keeping ids, trials and the choice.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mimik.sqlite3");
     {
@@ -144,7 +146,7 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
             .run(|db| {
                 for (name, id) in [("a.gguf", 1), ("b.gguf", 2)] {
                     db.execute(
-                        "INSERT INTO assistant_models(id,spec,file_name,sha256,size,alias,max_tokens,trial,recorded_at) VALUES(?1,?2,?3,?4,10,'alias',300,'{\"a\":1}',5)",
+                        "INSERT INTO assistant_models(id,spec,file_name,sha256,size,alias,trial,recorded_at) VALUES(?1,?2,?3,?4,10,'alias','{\"a\":1}',5)",
                         rusqlite::params![id, format!("local:{name}"), name, SHA],
                     )?;
                 }
@@ -154,7 +156,9 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
                 )?;
                 // Rewind to a populated schema 22.
                 crate::sources::documents::rewind_schema(db)?;
-                db.execute_batch("DROP TABLE assistant_downloads; PRAGMA user_version=22;")?;
+                db.execute_batch(
+                    "DROP TABLE assistant_reply_lengths; DROP TABLE assistant_downloads; PRAGMA user_version=22;",
+                )?;
                 Ok(())
             })
             .await
@@ -171,7 +175,7 @@ async fn migration_023_keeps_populated_022_tables_and_passes_the_foreign_key_che
                 .count();
             Ok((
                 count("PRAGMA user_version")?,
-                count("SELECT count(*) FROM assistant_models WHERE max_tokens=300 AND trial='{\"a\":1}'")?,
+                count("SELECT count(*) FROM assistant_models WHERE trial='{\"a\":1}'")?,
                 count("SELECT count(*) FROM assistant_model_choice WHERE active_model=2 AND previous_model=1 AND changed_by=7 AND changed_at=9")?,
                 violations,
                 count("SELECT count(*) FROM assistant_downloads")?,

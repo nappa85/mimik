@@ -3,12 +3,14 @@
 //! which fills the prompt cache (priming is the readiness gate: no job is admitted before
 //! the prefix is cached); then two calibration samples, fixed synthetic jobs
 //! shipped with Mimik (no sheet or player text), each with a dynamic part of exactly the
-//! path's byte cap built from filler shaped like real context items, `max_tokens` the
-//! model's, `ignore_eos` and no schema, so each generates exactly `max_tokens` tokens. The
+//! path's byte cap built from filler shaped like real context items, 64 tokens
+//! ([`budgets::SAMPLE_TOKENS`]), `ignore_eos` and no schema, so each generates exactly 64
+//! tokens (the first comes from the prompt pass, which makes the generation speed about 1.6 %
+//! optimistic). The reply length the owner allows enters the estimate through that speed. The
 //! two fillers differ from their first byte, so neither reuses the other's cache. Neither
 //! counts toward the breaker.
 use super::Path;
-use super::budgets::{self, Derived, Measured, NoBudgets, Sample};
+use super::budgets::{self, Derived, Measured, NoBudgets, SAMPLE_TIMEOUT_S, SAMPLE_TOKENS, Sample};
 use super::server::{Server, Timings};
 use crate::assistant::contract::{Envelope, EnvelopeTarget, TARGET_ALIAS, envelope};
 use crate::assistant::interpreter::Failure;
@@ -96,10 +98,10 @@ pub(crate) enum Interrupted {
     Priming(Failure),
     Sample(Failure),
     Tokenize(Failure),
-    /// A sample ran past the path's run cap: nothing can fit then (R at the smallest bound
-    /// would exceed it too), so it is "too slow", not a failure.
-    SampleOverCap {
-        cap_s: u64,
+    /// A sample ran past [`SAMPLE_TIMEOUT_S`]: R would exceed the ceiling at every bound, so
+    /// it is "too slow", not a failure.
+    SampleTimedOut {
+        limit_s: u64,
     },
 }
 
@@ -110,8 +112,8 @@ impl Interrupted {
             Self::Priming(failure) => ("the priming request", failure),
             Self::Sample(failure) => ("a calibration sample", failure),
             Self::Tokenize(failure) => ("/tokenize", failure),
-            Self::SampleOverCap { cap_s } => {
-                return format!("a calibration sample took more than {cap_s} s");
+            Self::SampleTimedOut { limit_s } => {
+                return format!("a calibration sample took more than {limit_s} s");
             }
         };
         match failure {
@@ -156,7 +158,8 @@ fn sample(timings: Timings, wall_ms: f64, filler_tokens: usize) -> Sample {
     }
 }
 
-/// The two samples and the budgets they derive (after [`prime`]).
+/// The two samples and the budgets they derive for replies of up to `max_tokens` (after
+/// [`prime`]).
 ///
 /// # Errors
 ///
@@ -175,13 +178,14 @@ pub(crate) async fn calibrate(
         let text = filler(cap, variant);
         let tokens = server.tokens(&text).await.map_err(Interrupted::Tokenize)?;
         let started = tokio::time::Instant::now();
-        let cap_s = path.run_cap();
         let timings = tokio::time::timeout(
-            std::time::Duration::from_secs(cap_s),
-            server.plain(&text, max_tokens, true),
+            std::time::Duration::from_secs(SAMPLE_TIMEOUT_S),
+            server.plain(&text, SAMPLE_TOKENS, true),
         )
         .await
-        .map_err(|_| Interrupted::SampleOverCap { cap_s })?
+        .map_err(|_| Interrupted::SampleTimedOut {
+            limit_s: SAMPLE_TIMEOUT_S,
+        })?
         .map_err(Interrupted::Sample)?;
         let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
         samples.push(sample(timings, wall_ms, tokens));

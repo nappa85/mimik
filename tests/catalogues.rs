@@ -473,7 +473,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     // Schema 20 (change notes) is newer than the rewind target too.
     db.execute_batch("DROP TABLE private_sheet_notes;").unwrap();
     // So is the assistant's model setting (schema 22).
-    db.execute_batch("DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;")
+    db.execute_batch("DROP TABLE assistant_reply_lengths; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;")
         .unwrap();
     db.execute_batch("PRAGMA user_version=18;").unwrap();
     let catalogue_objects = |db: &rusqlite::Connection| -> i64 {
@@ -509,7 +509,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     );
     // Schema 19 added the catalogues; schemas 20 (change notes), 21 (row notes), 22 (the
     // assistant's model setting) and 23 (the downloads) apply on the same upgrade.
-    assert_eq!(mimik::SCHEMA_VERSION, 31);
+    assert_eq!(mimik::SCHEMA_VERSION, 32);
     assert_eq!(counts(&db), before);
     let saved = reopened
         .save_catalogue_draft(serde_json::to_vec(&fixture.catalogue()).unwrap(), 0)

@@ -1266,14 +1266,24 @@ AUTH_DENIED_PATHS = (
 )
 
 
+# The shared header's form on every signed-in page (templates/layout.html), not a page form.
+HEADER_FORMS = ("/auth/logout",)
+
+
+def editor_action(forms):
+    """The one page form's action, the header's Sign out form left aside."""
+    actions = [action for action in forms if action not in HEADER_FORMS]
+    require(len(actions) == 1, "Expected one private editor form")
+    return actions[0]
+
+
 def workspace_form(path, cookie, action=None):
     response = auth_request(path, cookie=cookie)
     require(response[0] == 200, "Workspace page unavailable")
     parser = FormFields()
     parser.feed(response[2])
     if action is None:
-        require(len(parser.forms) == 1, "Expected one private editor form")
-        action = next(iter(parser.forms))
+        action = editor_action(parser.forms)
     require(action in parser.forms, "Scoped workspace form missing")
     return action, dict(parser.forms[action]), response[2]
 

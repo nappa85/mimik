@@ -10,6 +10,7 @@ from smoke_release import (
     DEFINITION_CONFLICT,
     FormFields,
     corrected_evidence,
+    editor_action,
     registry_cli,
     require_secret_free,
     smoke_invalid_flags,
@@ -265,5 +266,21 @@ class VersionSelectionTests(unittest.TestCase):
             version_link('<a href="/campaigns/4/sheets/new?version=21">', "/campaigns/4", 2)
 
 
+class EditorActionTests(unittest.TestCase):
+    def test_the_header_sign_out_form_is_not_the_editor_form(self):
+        parser = FormFields()
+        parser.feed(
+            '<header><form method="post" action="/auth/logout"><input name="csrf" value="x">'
+            '</form></header><main><form method="post" action="/characters/1/edit">'
+            '<input name="name" value="A"></form></main>'
+        )
+        self.assertEqual(editor_action(parser.forms), "/characters/1/edit")
+
+    def test_two_page_forms_are_still_refused(self):
+        with self.assertRaises(AssertionError):
+            editor_action({"/a": {}, "/b": {}, "/auth/logout": {}})
+
+
 if __name__ == "__main__":
     unittest.main()
+

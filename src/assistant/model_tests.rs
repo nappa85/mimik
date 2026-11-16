@@ -11,32 +11,31 @@ fn max_tokens(spec: &str, sha256: Option<&str>) -> Result<u32, String> {
 }
 
 #[test]
-fn each_compiled_in_file_resolves_to_its_own_hash_and_budget() {
+fn each_compiled_in_file_resolves_to_its_own_hash_and_the_default_reply_length() {
     assert_eq!(
         resolve(DEFAULT_MODEL, None),
-        Ok((DEFAULT_MODEL_SHA256.to_owned(), 352))
+        Ok((DEFAULT_MODEL_SHA256.to_owned(), 1024))
     );
     assert_eq!(
         resolve(GPU_DEFAULT_MODEL, None),
-        Ok((GPU_DEFAULT_MODEL_SHA256.to_owned(), 352))
+        Ok((GPU_DEFAULT_MODEL_SHA256.to_owned(), 1024))
     );
-    // An explicit hash is kept, and a compiled-in one gives its budget under any name.
+    // An explicit hash is kept; every file starts at the same reply length.
     assert_eq!(
         resolve("local:renamed.gguf", Some(GPU_DEFAULT_MODEL_SHA256)),
-        Ok((GPU_DEFAULT_MODEL_SHA256.to_owned(), 352))
+        Ok((GPU_DEFAULT_MODEL_SHA256.to_owned(), 1024))
     );
     assert_eq!(
         resolve(GPU_DEFAULT_MODEL, Some(&"a".repeat(64))),
-        Ok(("a".repeat(64), 256))
+        Ok(("a".repeat(64), 1024))
     );
     assert!(resolve("local:other.gguf", None).is_err());
 }
 
 #[test]
-fn the_gpu_default_has_its_hash_and_budget_compiled_in() {
+fn the_gpu_default_has_its_hash_compiled_in() {
     assert!(valid_sha256(GPU_DEFAULT_MODEL_SHA256));
-    assert_eq!(max_tokens(GPU_DEFAULT_MODEL, None), Ok(352));
-    assert_eq!(trial_max_tokens(GPU_DEFAULT_MODEL_SHA256, 100), 352);
+    assert_eq!(max_tokens(GPU_DEFAULT_MODEL, None), Ok(1024));
     assert_eq!(
         default_alias(GPU_DEFAULT_MODEL).unwrap(),
         "qwen3.5-9b-q4_k_m"
@@ -218,21 +217,21 @@ fn every_rule_has_its_own_message() {
 }
 
 #[test]
-fn flags_derive_the_alias_and_the_unmeasured_max_tokens() {
+fn flags_derive_the_alias_and_the_default_max_tokens() {
     assert_eq!(
         default_alias(DEFAULT_MODEL).unwrap(),
         "granite-4.2-3b-q4_k_m"
     );
-    assert_eq!(max_tokens(DEFAULT_MODEL, None), Ok(352));
+    assert_eq!(max_tokens(DEFAULT_MODEL, None), Ok(1024));
     assert_eq!(
         max_tokens(DEFAULT_MODEL, Some(DEFAULT_MODEL_SHA256)),
-        Ok(352)
+        Ok(1024)
     );
-    // Whatever its name, another file is 256.
-    assert_eq!(max_tokens(DEFAULT_MODEL, Some(&"a".repeat(64))), Ok(256));
+    // Whatever its name or hash, a file starts at the default.
+    assert_eq!(max_tokens(DEFAULT_MODEL, Some(&"a".repeat(64))), Ok(1024));
     assert_eq!(
         max_tokens("local:other.gguf", Some(DEFAULT_MODEL_SHA256)),
-        Ok(352)
+        Ok(1024)
     );
     assert!(max_tokens("local:other.gguf", None).is_err());
     assert!(max_tokens("local:other.gguf", Some("ABC")).is_err());
@@ -248,38 +247,17 @@ fn flags_derive_the_alias_and_the_unmeasured_max_tokens() {
 }
 
 #[test]
-fn the_trial_rule_is_the_phrases_largest_predicted_n_with_the_floor_and_the_cap() {
-    // 1.25 x n rounded up to a multiple of 32, never below 256, at most 384.
-    for (largest, expected) in [
-        (0, 256),
-        (1, 256),
-        (200, 256),
-        (204, 256),
-        (205, 288),
-        (230, 288),
-        (231, 320),
-        (256, 320),
-        (257, 352),
-        (263, 352),
-        (281, 352),
-        (282, 384),
-        (307, 384),
-        (384, 384),
-        (u32::MAX, 384),
-    ] {
-        assert_eq!(measured_max_tokens(largest), expected, "{largest}");
+fn the_reply_length_bounds_are_one_set_of_constants_with_a_validity_rule() {
+    use reply_length::{DEFAULT, MAX, MIN, STEP, valid};
+    assert_eq!((MIN, MAX, STEP, DEFAULT), (256, 2560, 128, 1024));
+    assert!(valid(MIN) && valid(DEFAULT) && valid(MAX));
+    // The default is on the grid and inside the bounds.
+    const { assert!(MIN <= DEFAULT && DEFAULT <= MAX && DEFAULT.is_multiple_of(STEP)) };
+    for refused in [0, 128, 255, 257, 1023, 1025, 2561, 2688, u32::MAX] {
+        assert!(!valid(refused), "{refused}");
     }
-}
-
-#[test]
-fn the_default_file_keeps_352_by_hash_and_a_file_with_its_name_does_not() {
-    // By hash: the default file keeps 352 whatever the phrases measured.
-    assert_eq!(trial_max_tokens(DEFAULT_MODEL_SHA256, 100), 352);
-    assert_eq!(trial_max_tokens(DEFAULT_MODEL_SHA256, 384), 352);
-    // Any other hash gets the measured rule, whatever name its file has.
-    assert_eq!(trial_max_tokens(&"b".repeat(64), 100), 256);
-    assert_eq!(trial_max_tokens(&"b".repeat(64), 263), 352);
-    assert_eq!(trial_max_tokens(&"b".repeat(64), 300), 384);
+    // Every step of the grid is accepted.
+    assert!((MIN..=MAX).step_by(STEP as usize).all(valid));
 }
 
 #[test]

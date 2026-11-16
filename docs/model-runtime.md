@@ -27,8 +27,8 @@ with the server is in [assisted-entry.md](assisted-entry.md), "Interpretation as
 | Generations and transitions | `src/assistant/runtime/manager.rs` |
 | Model setting: model, trial key and report, bounds | `src/assistant/runtime/models.rs` |
 | Trial, Switch, Switch back | `src/assistant/runtime/manager_model.rs`, `src/assistant/runtime/trial.rs` |
-| Model spec grammar, `max_tokens` rules | `src/assistant/model.rs` |
-| Stored setting (migration 022) | `src/assistant/records.rs`, `migrations/022_assistant_models.sql` |
+| Model spec grammar, reply-length bounds | `src/assistant/model.rs` |
+| Stored setting (migrations 022, 032) | `src/assistant/records.rs`, `migrations/022_assistant_models.sql`, `migrations/032_assistant_reply_length.sql` |
 | Thread count | `src/assistant/runtime/threads.rs` |
 | Device choice (render nodes, listing, ranking) | `src/assistant/runtime/device.rs` |
 | Owner page | `src/auth/assistant.rs`, `templates/admin_assistant.html` |
@@ -44,7 +44,7 @@ model of a database that has no stored setting; once the owner has switched mode
 setting wins and the flags are ignored (the page says so). **Default by device (ASSIST-55):**
 without `--assistant-model` and without a stored setting, the manager picks the model at each
 start (`default_model` in `src/assistant/runtime/models.rs`): on the GPU path the Qwen3.5-9B
-`Q4_K_M` file (`Qwen3.5-9B-Q4_K_M.gguf`, Apache-2.0, SHA-256 and `max_tokens` 352 compiled in)
+`Q4_K_M` file (`Qwen3.5-9B-Q4_K_M.gguf`, Apache-2.0, SHA-256 compiled in; reply length 1,024 unless the owner stored one for this file)
 when it is in the models folder, otherwise Granite 4.2 3B with "Qwen3.5-9B not found or not
 readable in <absolute models folder>; using Granite 4.2 3B" on `/admin/assistant` (a warning,
 not a block); the same when the 9B file fails its pinned hash at the load ("Qwen3.5-9B in
@@ -53,7 +53,7 @@ and its note. "Try the GPU again" (even while Granite runs on the GPU) or Mimik'
 checks the 9B file again. An explicit or stored 9B is refused instead, as any model whose file
 changed. On the CPU path
 (`--assistant-device cpu`, no usable GPU, or a GPU start that fell back) Granite 4.2 3B
-(file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 and `max_tokens` 352 compiled in), with a note when
+(file `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 compiled in; reply length 1,024 unless the owner stored one for this file), with a note when
 the GPU was wanted. "Try the GPU again" picks again. An explicit flag or the stored setting is
 never replaced; a Switch or Switch back ends the default, and "Switch back" returns to the
 model that was running. `--reasoning off` is in every start's arguments, so Qwen3.5's thinking
@@ -521,10 +521,10 @@ for the breaker); a child exit is never a breaker event. On shutdown Mimik stops
 
 An attempt is: start (preflight once per start from level 1: the pidfile, the run directory,
 the model's size; then each level's probe), spawn and the endpoint check, `/health` within
-60 s (250 ms polls), priming within 300 s, calibration within twice the path's run cap plus
-60 s (the two samples and the two `/tokenize` calls; GPU 180 s, CPU 240 s) and each
-calibration sample within the run cap (a sample past it makes the machine "too slow",
-not a counted failure). On the GPU path a start first lists the selected node again in its own
+60 s (250 ms polls), priming within 300 s, calibration within 1,020 s (the two samples at
+480 s each and the two `/tokenize` calls) and each calibration sample within 480 s (a sample
+past it makes the machine "too slow", not a counted failure: a wait above 480 s already means
+R over the 600 s ceiling). On the GPU path a start first lists the selected node again in its own
 sandbox (it must still show one hardware GPU with the recorded description; `--device` gets
 that listing's name), and after `/health` the child's offload line must show every layer on
 the GPU (N = M, within 5 s; a device error or N < M fails the attempt). GPU transitions (any
@@ -546,7 +546,7 @@ transitions:
 | Child exits while ready | restart now | +1 only within 10 minutes of `ready` |
 | Two consecutive run-deadline expiries without a completed exchange between | stop as hung, restart, measure again | as a child exit |
 | Failure count reaches 4 | `unavailable` until Restart | — |
-| Budgets do not derive | `unavailable` ("too slow on this machine: about N s needed, the cap is M s"), no retry | — |
+| Budgets do not derive | `unavailable` ("too slow on this machine: about N s needed, the ceiling is 600 s", or "reply length too large for the context"), no retry; on the first start after a reply-length change the file's earlier length returns and starts (breaker not reset) | — |
 | `ready` for 10 minutes | count back to 0 | reset |
 | Restart (or Mimik's start) | stop, start again from level 1, breaker reset; it interrupts a preflight, probe or start in progress, and further presses are ignored until `ready` or `unavailable` | reset |
 
@@ -557,17 +557,27 @@ states, levels, reasons and measurements, never prompt text, URLs with tokens or
 ## Priming, calibration and budgets
 
 Priming is the readiness gate: the fixed prefix with a minimal envelope and `max_tokens` 1
-fills the prompt cache before any job is admitted. Then two samples, non-streamed, `max_tokens`
-the model's, `ignore_eos`, no schema, each with a filler of exactly the path's byte cap (CPU
+fills the prompt cache before any job is admitted. Then two samples, non-streamed, 64 tokens
+(whatever the owner's reply length), `ignore_eos`, no schema, each with a filler of exactly the path's byte cap (CPU
 1,024) made of context items shaped as requests carry them (ID, label and type, no value),
 from the IDs and labels of the shipped demo and 2b synthetic sheets (GPU 4,096; one opens with `[`, the other with `{`, so neither
 reuses the other's cache), each counted by `/tokenize`. Timings must be present, finite and
-positive, `predicted_n` equal to `max_tokens`, the tail `prompt_n` − Nᵢ not negative and the
+positive, `predicted_n` equal to 64, the tail `prompt_n` − Nᵢ not negative and the
 cached tokens at least 75 % of priming's prompt tokens, or the attempt fails. The budgets
 follow `assisted-sheet-plan.md` §1.4a "Budgets" (ASSIST-31, ASSIST-32): T(B) is the larger of
 the two samples' estimates per candidate (CPU 1,024, 768, 512; GPU 4,096, 2,048, 1,024), R =
-max(15, 1.25 × T rounded up to 5 s) within 90 s on the CPU path (D 1, Q = 120 − R) and 60 s on
-the GPU path (D = max(1, min(4, floor((120 − R) / R))), Q = D × R). After a run-deadline expiry, or when a running job
+max(15, 1.25 × T rounded up to 5 s), at most the 600 s ceiling on both paths (a limit on stuck
+requests, not a wait), with T using the measured per-token time g over the owner's reply
+length L slowed by the context each token adds, g × L × (1 + α × L / 2), α 2.1e-4 on the CPU
+path and 7.0e-5 on the GPU path (`Path::slowdown`, measured on 2,560-token replies,
+`docs/results.md`; ASSIST-L47). The 64-token samples give g; the first token comes from the
+prompt pass, which makes g about 1.6 % optimistic. The total wait is max(120 s, 2 × R): on the CPU path D 1 and Q =
+total − R + busy, on the GPU path D = max(1, min(4, floor((total − R) / R))) and
+Q = D × (R + busy), where busy is the calibrated prompt term (the time the server stays busy
+after a request cancelled at R, which a queued job waits too), so D is 1 once R reaches 40 s. B must also leave room in the context: the fixed prefix (priming's
+measurement) + N(B) + the reply length + 64 tokens of template margin within the 8,192-token
+context, or the next smaller candidate is taken; with none left the start fails with "reply
+length too large for the context" (a reply is never cut silently). After a run-deadline expiry, or when a running job
 is superseded or cancelled, the next job waits the larger sample's prompt term at B (the request may still be in prompt evaluation), and
 admission counts that wait, so one expiry no longer makes the next job miss its deadline too.
 The measurement and the budgets are on the page.
@@ -592,16 +602,18 @@ running generation (players see "starting"; there is never a second model server
 hashes the file (the SHA-256 it will be held to at every load, remembered by the file's
 identity so the load does not read it again); starts the candidate on the path the runtime is
 on (the GPU path unless it fell back or `--assistant-device cpu`; no fallback inside a trial)
-at level 1; primes it; sends five synthetic phrases shipped with Mimik (`trial.rs`; no sheet
-or player text) as a job would be sent (the reply schema limits `ref` to `t` and the phrase's
-context IDs), at `max_tokens` 384, each of which must be
-schema-valid and untruncated; sets `max_tokens` to `min(384, max(256, 1.25 × the largest
-predicted_n rounded up to a multiple of 32))`, except that the two default files (Granite and
-the Qwen3.5-9B), identified by their SHA-256 and never by name, keep 352; and calibrates with that `max_tokens`
-and derives the budgets. It passes when the phrases and the calibration succeed ("too slow"
+at level 1; primes it; calibrates it (two 64-token samples) for the default reply length and
+derives the budgets (the trial report shows the reply length the file will use: the length
+stored for it, else the default); then sends five synthetic phrases shipped with Mimik (`trial.rs`; no
+sheet or player text) as a job would be sent (the reply schema limits `ref` to `t` and the
+phrase's context IDs), at the default reply length (1,024 tokens), each of which must be
+schema-valid and untruncated. The largest `predicted_n` of the phrases is recorded as
+information; the reply length of a file is the owner's to set (below), and a trial leaves it
+as it is. It passes when the calibration and the phrases succeed ("too slow"
 fails with the numbers). Whether a phrase's expected value was among the options is shown and
-decides nothing (D-D). Bounds: each phrase 2 × the path's run-deadline cap (180 s CPU, 120 s
-GPU), the whole trial including hashing 30 minutes on the CPU path and 20 on the GPU; "Cancel"
+decides nothing (D-D). Bounds: each phrase 2 × R of a default-length reply on the candidate's
+measured speed, at most the 600 s ceiling (phrases end on EOS), the whole trial including
+hashing 90 minutes on either path; "Cancel"
 stops it at any time, and so do a Restart and Mimik's shutdown. A failed, expired or cancelled
 trial stops the candidate and the previous model starts again. A passed trial stops the
 candidate too and the previous model starts again at once, so players are not left waiting for
@@ -622,17 +634,54 @@ setting's limit).
 **Switch.** "Switch" carries the passed trial's key (`<number>.<generation>.<sha256>`), accepted
 only if it names the latest finished passed trial (another hash, an older trial or an older
 generation is refused as stale and nothing changes). The manager stores the model first
-(`assistant_models`: spec, file name, SHA-256, size, alias, `max_tokens`, the trial's
+(`assistant_models`: spec, file name, SHA-256, size, alias, the trial's
 measurements as JSON, with the SHA-256 of the prompt prefix they ran under; `assistant_model_choice`: the active and the previous model, who and
-when), then starts a session with it: restart, priming, calibration with its recorded
-`max_tokens`. A store failure changes nothing and the page says why. A stored model whose trial recorded
+when), then starts a session with it: restart, priming, calibration for the reply length
+stored for its file (else the default; read again at the Switch, in case it was set since the
+trial). "Switch back" uses the previous model as the manager holds it in memory, which a
+reply-length change keeps in step (`set_active_length`). A store failure changes nothing and the page says why. A stored model whose trial recorded
 another prompt prefix than the current one (or none, as before ASSIST-56) is shown with a
-line saying its `max_tokens` and speeds were measured with an older prompt and that trying it
+line saying its speeds were measured with an older prompt and that trying it
 again measures it with the current one; nothing is blocked or re-tried by itself. "Switch back" swaps the
 active and the previous model in the same way and restarts with it. A model that fails to
 become ready after a switch can be switched away from the same way. All actions are
 owner-only, CSRF-checked, strict forms (an extra, duplicate or missing key is a 422) and
 bounded at 4 KiB.
+
+**Reply length.** "Longest reply" (POST `/admin/assistant/model/length`, owner-only,
+CSRF-checked, strict form) sets the reply length (`max_tokens`) of the active model's file,
+256 to 2,560 tokens in steps of 128 (`model::reply_length`: `MIN`, `MAX`, `STEP` and the
+default 1,024 are the one place the stored CHECK and the runtime read). The route only
+parses the text as a number; the runtime manager alone validates it (out of bounds or off the
+step is refused as invalid, the same value again changes nothing). The length is stored per
+model file: one row of `assistant_reply_lengths` (SHA-256 of the file, length, who, when), a
+table of its own that neither has rows of `assistant_models` nor touches the model choice.
+A file without a row uses the default; every model's effective length (session start, Switch,
+Switch back, the trial report, the device default, the start flags' model) is the length
+stored for its SHA-256. Setting a length is one upsert of the file's row, stored before
+anything stops (a store failure changes nothing, restarts nothing and the page says why); it
+does not change the active or the previous model or the device default (the Qwen3.5-9B stays
+the GPU default and Granite the CPU's; after a GPU failure Granite runs with Granite's own
+length). Switching to another file and back keeps each file's length, and a new trial of a file
+keeps the length stored for it (its phrases and calibration still run at the default). Then the
+server restarts once, primes and calibrates for the new length; it does not run the five
+phrases and consumes no trial number. It applies to both paths: a value tuned on the GPU may
+be "too slow" on the CPU fallback (the page shows R for the path running). A first start that
+fails its budgets because of the length (the estimate over the 600 s ceiling, or a reply too
+large for the context) restores the file's earlier value (the previous row, or no row when
+there was none; stored first) and starts again, with a note naming the measured reason and
+without resetting the circuit breaker (only Restart and Mimik's start do). Any other outcome
+follows its normal path and keeps the new setting: ready, a sandbox or other failure, a
+changed model file, a calibration sample timeout (a 64-token sample is independent of the
+length), a Restart or another request. A reply too large for the context is never a GPU
+failure: the GPU is not slow or broken, the length and the file do not fit the context, so on
+the GPU path it is held as unavailable with its message and the owner fixes the length, instead
+of falling back to the CPU (where, for the device default, Granite would run with its own
+length and hide the problem). Admitted one at a time with Try, Switch, Switch back and Restart ("a model change
+or a restart is already being carried out"), refused while a trial runs. Migration 032 created
+the table and rebuilt the model tables without the old `max_tokens` column. A stuck server is
+still declared after two run-deadline expiries in a row, which now takes up to 2 × R
+(ASSIST-L63).
 
 **Changed file.** A load whose file no longer has the recorded SHA-256 is not retried: the
 assistant is unavailable with "the model file changed", until the owner tries a model again,
@@ -648,11 +697,13 @@ name, PCI address, render node and memory; render nodes not used, with why; "CPU
 measurements. Restart (POST, CSRF-checked) stops the server and starts again from level 1; "Try
 the GPU again" (POST `/admin/assistant/try-gpu`, CSRF-checked) is shown while the GPU is wanted
 and either the CPU path runs or the GPU device default shows a fallback note; a second press of
-either while one runs starts nothing ("A restart is already running"). The Model section shows the active model (spec, SHA-256, `max_tokens`, and
+either while one runs starts nothing ("A restart is already running"). The Model section shows the active model (spec, SHA-256, longest reply, and
 whether it comes from the stored setting or the start flags), the previous model with "Switch
-back", the field with "Try" (the refusal and the kept input beside it), and the latest trial:
-its phase and Cancel while it runs; when it passed, the device, times, speeds, `max_tokens`,
-B, N(B), R, D and Q and each phrase; the reason when it failed or was cancelled. With the
+back", the "Longest reply" field (the bounds, the running path, "a reply can take up to R s",
+the measured time per token and the longest a player can wait, the queue wait plus R, and that setting it does not run the five phrases), the Model field with "Try" (the
+refusal and the kept input beside it), and the latest trial:
+its phase and Cancel while it runs; when it passed, the device, times, speeds, the largest
+phrase reply, B, N(B), R, D and Q and each phrase; the reason when it failed or was cancelled. With the
 development endpoint the model cannot be changed and the page says so. The Downloads
 section (review, progress, pinned defaults, downloaded models) is described in
 [model-downloads.md](model-downloads.md).

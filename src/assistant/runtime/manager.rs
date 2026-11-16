@@ -4,7 +4,7 @@
 //! budgets) and never reports a child exit to the breaker.
 //!
 //! An attempt is: start (spawn and the endpoint check), `/health` within 60 s, priming within
-//! 300 s, calibration within twice the path's run-deadline cap. On the CPU path:
+//! 300 s, calibration within twice the sample timeout plus 60 s. On the CPU path:
 //!
 //! | Event | Action | Failure count |
 //! |---|---|---|
@@ -13,7 +13,7 @@
 //! | Child exits while ready | restart now | +1 only within 10 minutes of `ready` |
 //! | Two consecutive run-deadline expiries | stop as hung, restart, re-measure | as a child exit |
 //! | Failure count reaches 4 | `unavailable` until Restart | — |
-//! | Budgets do not derive ("too slow") | `unavailable` with the numbers, no retry | — |
+//! | Budgets do not derive ("too slow", or a reply too large for the context) | `unavailable` with the numbers, no retry; after a reply-length change, back to the previous setting | — |
 //! | `ready` for 10 minutes | failure count back to 0 | reset |
 //! | Restart (or Mimik's start) | stop, new attempt from level 1, breaker reset | reset |
 //!
@@ -24,16 +24,16 @@
 //! again"; a Restart keeps it.
 //!
 //! Every timer is Tokio's, so tests drive the clock.
-use super::budgets::NoBudgets;
+use super::budgets::{self, NoBudgets};
 use super::calibration::{self, Calibration};
 use super::models::{
     DeviceDefault, Measurement, Model, ModelFile, ModelStatus, NineB, OlderPrompt, TrialKey,
-    TrialReport, TrialState, default_model, gpu_default_name, phrase_bound, trial_bound,
+    TrialReport, TrialState, default_model, gpu_default_name, trial_bound,
 };
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
-use crate::assistant::model::GPU_DEFAULT_MODEL_SHA256;
+use crate::assistant::model::{GPU_DEFAULT_MODEL_SHA256, reply_length};
 use crate::assistant::records::{Record, Records};
 use async_trait::async_trait;
 use std::future::Future;
@@ -262,8 +262,22 @@ enum Command {
 /// A model request: carried out after the running generation has ended.
 enum ModelCommand {
     Trial(TrialRequest),
-    Switch { key: TrialKey, by: i64 },
-    SwitchBack { by: i64 },
+    Switch {
+        key: TrialKey,
+        by: i64,
+    },
+    SwitchBack {
+        by: i64,
+    },
+    /// The owner's reply length for the active model's file (`model::reply_length`), already
+    /// stored for the file with `sha256` (the one the handle read as active); `from` is what
+    /// was stored for it before (none: the default applied).
+    SetLength {
+        max_tokens: u32,
+        by: i64,
+        sha256: String,
+        from: Option<u32>,
+    },
 }
 
 /// The owner's "Try": the candidate file and who asked.
@@ -319,6 +333,8 @@ pub(crate) struct Handle {
     commands: mpsc::UnboundedSender<Command>,
     /// The owner's Cancel of a running trial.
     cancel: Arc<Cancel>,
+    /// Where reply lengths are stored (the same records the manager holds).
+    records: Option<Arc<dyn Records>>,
 }
 
 /// The owner's Cancel: which trial it is for, so a Cancel that arrives early, or late, never
@@ -401,6 +417,24 @@ pub(crate) enum Chosen {
     NoPrevious,
     /// Another model change or a restart is being carried out: nothing else is started.
     Pending,
+}
+
+/// What the owner's reply-length setting answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetLength {
+    Accepted,
+    /// A trial is running, or the model setting is not supported here.
+    Busy,
+    /// Another model change or a restart is being carried out: nothing else is started.
+    Pending,
+    /// Not a setting `model::reply_length` allows (out of bounds or off the step).
+    Invalid,
+    /// The active model already has this reply length.
+    Unchanged,
+    /// The setting could not be stored: nothing changed and no server restarts.
+    NotStored,
+    /// This assistant keeps no model setting (the development endpoint, fixed models).
+    Unsupported,
 }
 
 /// What the owner's Cancel did.
@@ -551,6 +585,70 @@ impl Handle {
         Chosen::Accepted
     }
 
+    /// The owner's reply length for the active model's file: stored first (one row per file,
+    /// independent of the model rows and of the model choice), then the model server restarts
+    /// once and is measured again with it; a first start that fails because of the length goes
+    /// back to the file's earlier setting. A store failure changes nothing and restarts
+    /// nothing. Admitted like Switch back. The work runs in its own task, so a dropped request
+    /// cannot leave the admission flags set.
+    pub(crate) async fn set_length(&self, by: i64, max_tokens: u32) -> SetLength {
+        let handle = self.clone();
+        tokio::spawn(async move { handle.store_length(by, max_tokens).await })
+            .await
+            .unwrap_or(SetLength::NotStored)
+    }
+
+    async fn store_length(&self, by: i64, max_tokens: u32) -> SetLength {
+        let Some(records) = self.records.clone() else {
+            // Nothing to store into: the model setting is not supported here.
+            return SetLength::Unsupported;
+        };
+        let sha256 = {
+            let mut status = self.lock();
+            if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
+                return SetLength::Busy;
+            }
+            if status.model.pending || status.restarting || status.model.work {
+                return SetLength::Pending;
+            }
+            if !crate::assistant::model::reply_length::valid(max_tokens) {
+                return SetLength::Invalid;
+            }
+            if status.model.active.max_tokens == max_tokens {
+                return SetLength::Unchanged;
+            }
+            status.model.note = None;
+            status.model.pending = true;
+            status.restarting = true;
+            status.model.active.sha256.clone()
+        };
+        let stored = match records.length(&sha256).await {
+            Ok(from) => records
+                .set_length(&sha256, Some(max_tokens), by)
+                .await
+                .map(|()| from),
+            Err(why) => Err(why),
+        };
+        match stored {
+            Ok(from) => {
+                let _ = self.commands.send(Command::Model(ModelCommand::SetLength {
+                    max_tokens,
+                    by,
+                    sha256,
+                    from,
+                }));
+                SetLength::Accepted
+            }
+            Err(why) => {
+                let mut status = self.lock();
+                status.model.pending = false;
+                status.restarting = false;
+                status.model.note = Some(format!("{why}; the current setting stays"));
+                SetLength::NotStored
+            }
+        }
+    }
+
     /// The owner's "Keep the current model": dismisses a finished trial. The previous model
     /// already runs again (every trial ends by restarting it), so nothing restarts.
     pub(crate) fn keep(&self) -> Chosen {
@@ -681,7 +779,12 @@ pub(crate) fn spawn(
     launcher: Arc<dyn Launcher>,
     config: Config,
 ) -> Handle {
-    spawn_with(assistant, launcher, config, ModelSetup::fixed(352))
+    spawn_with(
+        assistant,
+        launcher,
+        config,
+        ModelSetup::fixed(crate::assistant::model::reply_length::DEFAULT),
+    )
 }
 
 /// Starts the manager task for `assistant` with `models` as the owner's model setting.
@@ -692,6 +795,7 @@ pub(crate) fn spawn_with(
     models: ModelSetup,
 ) -> Handle {
     let status = Arc::new(Mutex::new(Status::new(config.path, &models)));
+    let records = models.records.clone();
     let (commands, incoming) = mpsc::unbounded_channel();
     let (signal_sender, signals) = mpsc::unbounded_channel();
     assistant.subscribe(signal_sender);
@@ -715,12 +819,14 @@ pub(crate) fn spawn_with(
         records: models.records,
         cancel: Arc::clone(&cancel),
         trial: 0,
+        length_change: None,
     };
     tokio::spawn(manager.run());
     Handle {
         status,
         commands,
         cancel,
+        records,
     }
 }
 
@@ -728,7 +834,15 @@ pub(crate) fn spawn_with(
 enum Attempt {
     Ready(Arc<dyn Child>, Box<Calibration>, Budgets),
     Failed(Fail),
+    /// Too slow for the path's caps in a way the reply length does not change (a calibration
+    /// sample timed out).
     TooSlow(String),
+    /// No budgets for the reply length: the estimate is over the ceiling (`too_large` false)
+    /// or the reply does not fit the context (`too_large`).
+    LengthLimit {
+        why: String,
+        too_large: bool,
+    },
     Interrupted(Command),
 }
 
@@ -754,6 +868,9 @@ enum Next {
     },
     /// The owner's model request, carried out with no model server running.
     Model(ModelCommand),
+    /// Start a session again with the breaker and the GPU choice as they are (a reply length
+    /// went back to the file's earlier setting).
+    Again,
     Stop(oneshot::Sender<()>),
 }
 
@@ -780,6 +897,16 @@ impl From<Command> for Next {
             Command::Model(command) => Next::Model(command),
         }
     }
+}
+
+/// What a reply-length change keeps to go back to when its first start fails because of the
+/// length.
+struct LengthChange {
+    by: i64,
+    /// The file the length is stored for.
+    sha256: String,
+    /// What was stored for the file before (none: nothing, the default applied).
+    from: Option<u32>,
 }
 
 struct Manager {
@@ -811,6 +938,8 @@ struct Manager {
     cancel: Arc<Cancel>,
     /// The trial being carried out (0: none).
     trial: u64,
+    /// A reply-length change whose first start has not ended yet: where to go back to.
+    length_change: Option<LengthChange>,
     /// Whether `/health` answered in the current attempt: from then on a failure (priming,
     /// calibration, the offload check) is not a library that failed to load.
     health_answered: Arc<AtomicBool>,
@@ -869,8 +998,18 @@ impl Manager {
                 // The model server is gone; whatever the request does, a session starts
                 // next (with the previous model after a trial, the new one after a switch).
                 // A trial leaves Restart available: it ends the trial.
+                // (A trial is treated apart, below.)
+                let trial = matches!(command, ModelCommand::Trial(_));
                 next = self.model_command(command).await;
                 self.update(|status| status.model.pending = false);
+                if next.is_none() && !trial {
+                    // The session that follows a Switch, Switch back or length change is part
+                    // of the request: it stays "being carried out" until `ready` or
+                    // `unavailable`, even if `ready` cleared the flag while the request was
+                    // being stored. A trial's result is the owner's to act on while the
+                    // previous model starts again, so it is left out.
+                    self.update(|status| status.restarting = true);
+                }
             }
             reset_breaker = false;
             match next {
@@ -880,6 +1019,7 @@ impl Manager {
                     return shut(reply);
                 }
                 Some(Next::Fresh { gpu }) => {
+                    self.length_change = None;
                     // Fresh always follows the owner's command: it stays "being carried out"
                     // until the session ends in `ready` or `unavailable`, even if one of them
                     // cleared the flag just before the command was taken.
@@ -890,13 +1030,14 @@ impl Manager {
                         self.nine_b_mismatch = false;
                     }
                 }
-                Some(Next::Model(_)) | None => {}
+                Some(Next::Model(_) | Next::Again) | None => {}
             }
         }
     }
 
     /// Unavailable with `why` until the owner's Restart or shutdown.
     async fn hold(&mut self, why: String) -> Next {
+        self.length_change = None;
         self.unavailable(why);
         match self.wait(None).await {
             Wake::Restart { gpu } => Next::Fresh { gpu },
@@ -1038,6 +1179,8 @@ impl Manager {
             if let Some(note) = &note {
                 log(note);
             }
+            // The reply length is the file's own, whichever model the device picks.
+            let model = self.with_stored_length(model).await;
             self.active = model.clone();
             self.update(|status| {
                 status.model.active = model;
@@ -1048,6 +1191,20 @@ impl Manager {
         if !self.active.name.is_empty() {
             self.launcher.select(&self.active);
         }
+    }
+
+    /// `model` with the reply length stored for its file (the default when there is none).
+    /// A storage failure keeps the length the model has.
+    pub(super) async fn with_stored_length(&self, mut model: Model) -> Model {
+        let Some(records) = &self.records else {
+            return model;
+        };
+        match records.length(&model.sha256).await {
+            Ok(Some(tokens)) => model.max_tokens = tokens,
+            Ok(None) => model.max_tokens = crate::assistant::model::reply_length::DEFAULT,
+            Err(why) => log(&format!("{why}; using {}", model.max_tokens)),
+        }
+        model
     }
 
     /// The GPU path failed: the CPU path is used from now on, until Mimik restarts or the
@@ -1137,7 +1294,12 @@ impl Manager {
                 return PathEnd::Next(self.hold(why).await);
             };
             let generation = self.begin(level);
-            match self.attempt(generation, level, path).await {
+            let attempt = self.attempt(generation, level, path).await;
+            let attempt = match self.revert_length(generation, attempt).await {
+                Ok(attempt) => attempt,
+                Err(next) => return PathEnd::Next(next),
+            };
+            match attempt {
                 Attempt::Ready(child, calibration, budgets) => {
                     let ended = self.ready(generation, &child, *calibration, budgets).await;
                     child.stop().await;
@@ -1161,6 +1323,9 @@ impl Manager {
                 Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) if gpu => {
                     self.ended(generation, EndReason::Exited);
                     return PathEnd::GpuFailed(self.hinted(path, why));
+                }
+                Attempt::LengthLimit { why, too_large } => {
+                    return self.length_limit(generation, gpu, why, too_large).await;
                 }
                 Attempt::TooSlow(why) if gpu => {
                     self.ended(generation, EndReason::Exited);
@@ -1203,6 +1368,82 @@ impl Manager {
                 }
             }
         }
+    }
+
+    /// A start whose budgets fail for the reply length (and no length change reverted it). A
+    /// reply too large for the context is not the GPU's failure: no other path changes what
+    /// the reply needs, so it is held as unavailable with its message. One over the ceiling
+    /// is the GPU path's failure (the CPU path next) and is held on the CPU path.
+    async fn length_limit(
+        &mut self,
+        generation: u64,
+        gpu: bool,
+        why: String,
+        too_large: bool,
+    ) -> PathEnd {
+        if gpu && !too_large {
+            self.ended(generation, EndReason::Exited);
+            return PathEnd::GpuFailed(why);
+        }
+        PathEnd::Next(self.hold(why).await)
+    }
+
+    /// After the first start of a reply-length change: a start whose budgets fail because of
+    /// the length (the estimate over the ceiling, or the reply too large for the context) goes
+    /// back to the file's earlier setting (stored first) and the session starts again, without
+    /// resetting the breaker. Every other outcome (ready, interrupted, a sandbox or other
+    /// failure, a model-file change, a calibration sample timeout) follows its normal path and
+    /// keeps the new setting.
+    async fn revert_length(&mut self, generation: u64, attempt: Attempt) -> Result<Attempt, Next> {
+        let Some(change) = self.length_change.take() else {
+            return Ok(attempt);
+        };
+        let Attempt::LengthLimit { why, .. } = &attempt else {
+            return Ok(attempt);
+        };
+        if self.active.sha256 != change.sha256 {
+            return Ok(attempt);
+        }
+        let why = why.clone();
+        self.ended(generation, EndReason::Exited);
+        let Some(records) = self.records.clone() else {
+            return Err(Next::Again);
+        };
+        let tried = self.active.max_tokens;
+        let back = change.from.unwrap_or(reply_length::DEFAULT);
+        match records.set_length(&change.sha256, change.from, change.by).await {
+            Ok(()) => {
+                self.set_active_length(back);
+                self.note(format!(
+                    "a reply length of {tried} tokens was not used: {why}; the length is back to {back} tokens"
+                ));
+            }
+            Err(stored) => self.note(format!(
+                "a reply length of {tried} tokens was not used: {why}; the earlier setting could not be restored ({stored})"
+            )),
+        }
+        Err(Next::Again)
+    }
+
+    /// Gives the file of the active model (and the previous model, when it is the same file)
+    /// the reply length `tokens`, here and on the page. Nothing else about the choice changes.
+    pub(super) fn set_active_length(&mut self, tokens: u32) {
+        let sha256 = self.active.sha256.clone();
+        self.active.max_tokens = tokens;
+        if let Some(previous) = self.previous.as_mut().filter(|p| p.sha256 == sha256) {
+            previous.max_tokens = tokens;
+        }
+        self.update(|status| {
+            status.model.active.max_tokens = tokens;
+            if let Some(previous) = status
+                .model
+                .previous
+                .as_mut()
+                .filter(|p| p.sha256 == sha256)
+            {
+                previous.max_tokens = tokens;
+            }
+        });
     }
 
     /// What follows a ready phase: `None` starts the same level again (a counted exit).
@@ -1471,19 +1712,27 @@ async fn warm(
 enum NotCalibrated {
     /// Too slow for the path's caps; the measurement, when the samples completed.
     TooSlow(String, Option<Box<Calibration>>),
+    /// No budgets for the reply length: over the ceiling, or (`too_large`) too large for the
+    /// context. The measurement is kept.
+    Length {
+        why: String,
+        too_large: bool,
+        calibration: Box<Calibration>,
+    },
     Failed(String),
 }
 
-/// The two calibration samples at `max_tokens` and the budgets they derive (after [`warm`]).
+/// The two calibration samples and the budgets they derive for replies of up to `max_tokens`
+/// (after [`warm`]).
 async fn calibrate_budgets(
     server: &dyn Server,
     path: Path,
     max_tokens: u32,
     prefix: f64,
 ) -> Result<(Calibration, Budgets), NotCalibrated> {
-    // Each sample is held to the run cap; this bounds the whole (two samples, two
+    // Each sample is held to its timeout; this bounds the whole (two samples, two
     // `/tokenize` calls).
-    let within = Duration::from_secs(2 * path.run_cap() + 60);
+    let within = Duration::from_secs(2 * budgets::SAMPLE_TIMEOUT_S + 60);
     let calibration = match tokio::time::timeout(
         within,
         calibration::calibrate(server, path, max_tokens, prefix),
@@ -1491,9 +1740,10 @@ async fn calibrate_budgets(
     .await
     {
         Ok(Ok(calibration)) => calibration,
-        Ok(Err(calibration::Interrupted::SampleOverCap { cap_s })) => {
+        Ok(Err(calibration::Interrupted::SampleTimedOut { limit_s })) => {
             let why = format!(
-                "too slow on this machine: a calibration sample took more than {cap_s} s, the cap is {cap_s} s"
+                "too slow on this machine: a calibration sample took more than {limit_s} s, so a reply could take longer than the {} s ceiling",
+                budgets::RUN_CEILING_S
             );
             log(&format!("measured: {why}"));
             return Err(NotCalibrated::TooSlow(why, None));
@@ -1518,10 +1768,26 @@ async fn calibrate_budgets(
         }
         Err(NoBudgets::TooSlow { needed_s, cap_s }) => {
             let why = format!(
-                "too slow on this machine: about {needed_s} s needed, the cap is {cap_s} s"
+                "too slow on this machine: about {needed_s} s needed, the ceiling is {cap_s} s"
             );
             log(&format!("measured: {}", measured(&calibration, None)));
-            Err(NotCalibrated::TooSlow(why, Some(Box::new(calibration))))
+            Err(NotCalibrated::Length {
+                why,
+                too_large: false,
+                calibration: Box::new(calibration),
+            })
+        }
+        Err(NoBudgets::ReplyTooLarge) => {
+            let why = format!(
+                "reply length too large for the context: no request bound leaves room in {} tokens for the fixed prefix, a reply of {max_tokens} tokens and the template margin; choose a shorter reply length",
+                super::launch::CTX_SIZE
+            );
+            log(&format!("measured: {why}"));
+            Err(NotCalibrated::Length {
+                why,
+                too_large: true,
+                calibration: Box::new(calibration),
+            })
         }
         Err(NoBudgets::Invalid(why)) => Err(NotCalibrated::Failed((*why).to_owned())),
     }
@@ -1553,6 +1819,17 @@ async fn measure(
                     .calibration = Some(*calibration);
             }
             Err(Attempt::TooSlow(why))
+        }
+        Err(NotCalibrated::Length {
+            why,
+            too_large,
+            calibration,
+        }) => {
+            status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .calibration = Some(*calibration);
+            Err(Attempt::LengthLimit { why, too_large })
         }
         Err(NotCalibrated::Failed(why)) => Err(Attempt::Failed(Fail::Other(why))),
     }

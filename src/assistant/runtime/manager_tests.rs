@@ -29,6 +29,8 @@ pub(crate) struct Behaviour {
     pub(crate) phrase_tokens: [f64; 5],
     /// How long each trial phrase takes.
     pub(crate) phrase_delay: Duration,
+    /// The fixed prefix's tokens as priming reports them.
+    pub(crate) prefix_tokens: f64,
 }
 
 /// What a fake server gets wrong.
@@ -41,7 +43,7 @@ pub(crate) enum Fault {
     TokenizeFails,
     /// The samples come back without their prompt timing.
     MissingTiming,
-    /// The third trial phrase's reply stops at the measurement cap.
+    /// The third trial phrase's reply stops at the default reply length.
     TruncatedPhrase,
     /// The second trial phrase's reply is not valid against the schema.
     InvalidPhrase,
@@ -60,6 +62,7 @@ impl Default for Behaviour {
             fault: Fault::None,
             phrase_tokens: [60.0, 70.0, 80.0, 65.0, 75.0],
             phrase_delay: Duration::from_millis(100),
+            prefix_tokens: 1460.0,
         }
     }
 }
@@ -103,7 +106,7 @@ impl Server for FakeServer {
             }
             self.primed.fetch_add(1, Ordering::SeqCst);
             return Ok(Timings {
-                prompt_n: Some(1460.0),
+                prompt_n: Some(self.behaviour.prefix_tokens),
                 prompt_ms: Some(1460.0),
                 cache_n: Some(0.0),
                 predicted_n: Some(1.0),
@@ -119,7 +122,7 @@ impl Server for FakeServer {
         Ok(Timings {
             prompt_n: Some(prompt_n),
             prompt_ms: (self.behaviour.fault != Fault::MissingTiming).then_some(prompt_ms),
-            cache_n: Some(1290.0),
+            cache_n: Some(self.behaviour.prefix_tokens * 0.9),
             predicted_n: Some(predicted),
             predicted_ms: Some(predicted_ms),
         })
@@ -131,7 +134,10 @@ impl Server for FakeServer {
         _: &[String],
         max_tokens: u32,
     ) -> Result<Structured, Failure> {
-        assert_eq!(max_tokens, 384, "phrases go out at the measurement cap");
+        assert_eq!(
+            max_tokens, 1024,
+            "phrases go out at the default reply length"
+        );
         let n = self.phrases.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.behaviour.phrase_delay).await;
         Ok(Structured {
@@ -729,11 +735,11 @@ async fn two_consecutive_expiries_stop_the_child_as_hung_and_restart() {
 
 #[tokio::test(start_paused = true)]
 async fn too_slow_is_unavailable_with_the_numbers_and_no_retry() {
-    // Each sample completes (about 76 s, both within the 180 s calibration limit), but
-    // even B 512 needs 1.25 × 74 s, over the 90 s cap.
+    // Each sample completes (about 40 s, well within its 480 s timeout), but a reply of the
+    // default 1,024 tokens at 0.6 s each puts even B 512 over the 600 s ceiling.
     let slow = Behaviour {
         p: 0.01,
-        g: 0.2,
+        g: 0.6,
         ..Behaviour::default()
     };
     let launcher = FakeLauncher::scripted([Start::Ok(slow)]);
@@ -745,7 +751,7 @@ async fn too_slow_is_unavailable_with_the_numbers_and_no_retry() {
     .await;
     let status = handle.status();
     assert!(
-        matches!(&status.state, State::Unavailable(why) if why.starts_with("too slow on this machine: about ") && why.ends_with("the cap is 90 s")),
+        matches!(&status.state, State::Unavailable(why) if why.starts_with("too slow on this machine: about ") && why.ends_with("the ceiling is 600 s")),
         "{:?}",
         status.state
     );
@@ -757,18 +763,18 @@ async fn too_slow_is_unavailable_with_the_numbers_and_no_retry() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_sample_past_the_run_cap_is_too_slow_not_a_counted_failure() {
-    // Each sample would take about 140 s: past the 90 s cap, the attempt ends "too slow" with
-    // what it saw instead of retrying.
+async fn a_sample_past_its_timeout_is_too_slow_not_a_counted_failure() {
+    // Each sample would take about 520 s: past the 480 s timeout, the attempt ends "too slow"
+    // instead of retrying.
     let slow = Behaviour {
         p: 0.05,
-        g: 0.35,
+        g: 8.0,
         ..Behaviour::default()
     };
     let launcher = FakeLauncher::scripted([Start::Ok(slow)]);
     let (_assistant, handle) = manager(&launcher);
     let probe = handle.clone();
-    until(Duration::from_mins(15), move || {
+    until(Duration::from_mins(30), move || {
         matches!(probe.status().state, State::Unavailable(_))
     })
     .await;
@@ -776,7 +782,7 @@ async fn a_sample_past_the_run_cap_is_too_slow_not_a_counted_failure() {
     assert_eq!(
         status.state,
         State::Unavailable(
-            "too slow on this machine: a calibration sample took more than 90 s, the cap is 90 s"
+            "too slow on this machine: a calibration sample took more than 480 s, so a reply could take longer than the 600 s ceiling"
                 .into()
         )
     );
@@ -989,7 +995,8 @@ async fn the_gpu_path_reaches_ready_with_gpu_budgets() {
     assert_eq!(status.gpu_note, None);
     let budgets = status.budgets.unwrap();
     assert_eq!(budgets.bounds.bytes, 4096);
-    assert_eq!(budgets.run, Duration::from_secs(15));
+    // 10 ms per token over 1,024 × (1 + 7e-5 × 512) tokens plus 1.6 s of prompt: T 12.2 s.
+    assert_eq!(budgets.run, Duration::from_secs(20));
     assert_eq!(budgets.depth, 4);
     assert_eq!(*launcher.paths.lock().unwrap(), [Path::Gpu]);
     assert_eq!(*launcher.probed.lock().unwrap(), [Path::Gpu]);
@@ -1007,8 +1014,8 @@ async fn starts(launcher: &Arc<FakeLauncher>, n: usize) {
 #[tokio::test(start_paused = true)]
 async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
     let too_slow = Behaviour {
-        p: 0.01,
-        g: 0.2,
+        p: 0.001,
+        g: 8.0,
         ..Behaviour::default()
     };
     let not_loaded = Behaviour {
@@ -1036,11 +1043,11 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
         fault: Fault::MissingTiming,
         ..Behaviour::default()
     };
-    // Each sample (52 s) is under the 60 s cap, but no candidate bound fits a deadline of
-    // 1.25 times its estimate: the budgets do not derive.
+    // Each sample (38 s) is under its timeout, but a default-length reply at 0.6 s a token
+    // puts every candidate bound over the 600 s ceiling: the budgets do not derive.
     let no_budgets = Behaviour {
         p: 0.001,
-        g: 0.148,
+        g: 0.6,
         ..Behaviour::default()
     };
     for (gpu, why) in [
@@ -1091,7 +1098,14 @@ async fn a_gpu_failure_at_each_phase_moves_to_the_cpu_at_once_uncounted() {
         // CPU budgets, and the CPU start followed at once (no 2-minute retry).
         assert_eq!(status.budgets.unwrap().bounds.bytes, 1024, "{why}");
         let starts = launcher.starts.lock().unwrap().clone();
-        assert!(starts[1].2 - starts[0].2 < RETRY_AFTER, "{why}");
+        // A sample that times out at 480 s is the attempt itself taking that long, not a retry
+        // pause.
+        let limit = if why.starts_with("a calibration sample") {
+            Duration::from_secs(500)
+        } else {
+            RETRY_AFTER
+        };
+        assert!(starts[1].2 - starts[0].2 < limit, "{why}");
         assert!(!launcher.coexisted.load(Ordering::SeqCst), "{why}");
         assert!(assistant.breaker_closed(), "{why}");
     }

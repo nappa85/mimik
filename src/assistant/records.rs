@@ -2,6 +2,7 @@
 //! the models the owner switched to with their trial measurements, and which one is active
 //! and which previous. The runtime manager is the only writer: it stores a switch before it
 //! applies it.
+use super::model::reply_length;
 use super::runtime::models::{Model, OlderPrompt};
 use crate::store::Store;
 use async_trait::async_trait;
@@ -17,7 +18,7 @@ pub(crate) struct Record {
 
 impl Record {
     /// Whether the record's trial measured the model with a prompt other than the current one
-    /// (ASSIST-56): `max_tokens` and the speeds of such a model predate the prompt in force.
+    /// (ASSIST-56): the speeds of such a model predate the prompt in force.
     /// A record without a trial (a model the start flags named) is not flagged.
     pub(crate) fn older_prompt(&self) -> bool {
         self.trial.as_deref().is_some_and(|trial| {
@@ -55,17 +56,33 @@ pub(crate) trait Records: Send + Sync {
     async fn activate(&self, new: &Record, old: Option<&Record>, by: i64) -> Result<(), String>;
     /// Swaps the active and the previous model.
     async fn swap(&self, by: i64) -> Result<(), String>;
+    /// The reply length stored for the file with `sha256`, if any (`model::reply_length`).
+    async fn length(&self, sha256: &str) -> Result<Option<u32>, String>;
+    /// Stores the reply length of the file with `sha256` (`None` deletes it, so the file uses
+    /// the default again): one row per file, independent of the model rows and of the choice.
+    async fn set_length(
+        &self,
+        sha256: &str,
+        max_tokens: Option<u32>,
+        by: i64,
+    ) -> Result<(), String>;
 }
 
-/// Drops migration 022's and 023's tables (tests that rewind the schema).
+/// Drops migration 022's, 023's and 032's tables (tests that rewind the schema).
 #[cfg(test)]
-pub(crate) const DROP_SCHEMA: &str = "DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;";
+pub(crate) const DROP_SCHEMA: &str = "DROP TABLE assistant_reply_lengths; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;";
 
 /// The records in the application's database.
 #[derive(Clone)]
 pub(crate) struct SqlRecords(pub Store);
 
-const SELECT: &str = "SELECT m.spec,m.file_name,m.sha256,m.size,m.alias,m.max_tokens,m.trial FROM assistant_models m";
+/// A model row with the reply length stored for its file (the default when there is none).
+fn select() -> String {
+    format!(
+        "SELECT m.spec,m.file_name,m.sha256,m.size,m.alias,COALESCE((SELECT l.max_tokens FROM assistant_reply_lengths l WHERE l.sha256=m.sha256),{}),m.trial FROM assistant_models m",
+        reply_length::DEFAULT
+    )
+}
 
 fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     let size: Option<i64> = row.get(3)?;
@@ -86,30 +103,28 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
 fn insert(db: &rusqlite::Connection, record: &Record) -> rusqlite::Result<i64> {
     let size = record.model.size.and_then(|n| i64::try_from(n).ok());
     db.execute(
-        "INSERT INTO assistant_models(spec,file_name,sha256,size,alias,max_tokens,trial,recorded_at) VALUES(?1,?2,?3,?4,?5,?6,?7,mimik_auth_now())",
+        "INSERT INTO assistant_models(spec,file_name,sha256,size,alias,trial,recorded_at) VALUES(?1,?2,?3,?4,?5,?6,mimik_auth_now())",
         params![
             record.model.spec,
             record.model.name,
             record.model.sha256,
             size,
             record.model.alias,
-            record.model.max_tokens,
             record.trial,
         ],
     )?;
     Ok(db.last_insert_rowid())
 }
 
-/// The row of a model with the same file, hash and `max_tokens` (a model the owner switched
+/// The row of a model with the same file, hash and alias (a model the owner switched
 /// away from keeps its row), or a new one.
 fn find_or_insert(db: &rusqlite::Connection, record: &Record) -> rusqlite::Result<i64> {
     let found: Option<i64> = db
         .query_row(
-            "SELECT id FROM assistant_models WHERE file_name=?1 AND sha256=?2 AND max_tokens=?3 AND alias=?4 ORDER BY id DESC LIMIT 1",
+            "SELECT id FROM assistant_models WHERE file_name=?1 AND sha256=?2 AND alias=?3 ORDER BY id DESC LIMIT 1",
             params![
                 record.model.name,
                 record.model.sha256,
-                record.model.max_tokens,
                 record.model.alias
             ],
             |row| row.get(0),
@@ -132,7 +147,7 @@ impl SqlRecords {
             .run(|db| {
                 let by_id = |id: Option<i64>| -> rusqlite::Result<Option<Record>> {
                     id.map_or(Ok(None), |id| {
-                        db.query_row(&format!("{SELECT} WHERE m.id=?1"), [id], record)
+                        db.query_row(&format!("{} WHERE m.id=?1", select()), [id], record)
                             .optional()
                     })
                 };
@@ -176,6 +191,49 @@ impl Records for SqlRecords {
             })
             .await
             .map_err(|_| "the model setting cannot be stored".to_owned())
+    }
+
+    async fn length(&self, sha256: &str) -> Result<Option<u32>, String> {
+        let sha256 = sha256.to_owned();
+        self.0
+            .run(move |db| {
+                let tokens: Option<i64> = db
+                    .query_row(
+                        "SELECT max_tokens FROM assistant_reply_lengths WHERE sha256=?1",
+                        [sha256],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                Ok(tokens.and_then(|n| u32::try_from(n).ok()))
+            })
+            .await
+            .map_err(|_| "the reply length cannot be read".to_owned())
+    }
+
+    async fn set_length(
+        &self,
+        sha256: &str,
+        max_tokens: Option<u32>,
+        by: i64,
+    ) -> Result<(), String> {
+        let sha256 = sha256.to_owned();
+        self.0
+            .run(move |db| {
+                match max_tokens {
+                    Some(tokens) => db.execute(
+                        "INSERT INTO assistant_reply_lengths(sha256,max_tokens,changed_by,changed_at) VALUES(?1,?2,?3,mimik_auth_now())
+                         ON CONFLICT(sha256) DO UPDATE SET max_tokens=excluded.max_tokens,changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+                        params![sha256, tokens, by],
+                    )?,
+                    None => db.execute(
+                        "DELETE FROM assistant_reply_lengths WHERE sha256=?1",
+                        [sha256],
+                    )?,
+                };
+                Ok(())
+            })
+            .await
+            .map_err(|_| "the reply length cannot be stored".to_owned())
     }
 
     async fn swap(&self, by: i64) -> Result<(), String> {

@@ -131,9 +131,9 @@ async fn right_replies_pass_with_their_tokens_and_the_expected_value_offered() {
     assert_eq!(results.len(), 5);
     assert!(results.iter().all(|r| r.expected_offered), "{results:?}");
     assert_eq!(largest_predicted(&results), 90);
-    // Every phrase went out at the measurement cap with its own dynamic part.
+    // Every phrase went out at the default reply length with its own dynamic part.
     let seen = script.seen.lock().unwrap();
-    assert!(seen.iter().all(|(_, _, max_tokens)| *max_tokens == 384));
+    assert!(seen.iter().all(|(_, _, max_tokens)| *max_tokens == 1024));
     assert_eq!(seen.len(), 5);
 }
 
@@ -157,7 +157,7 @@ async fn a_truncated_or_invalid_reply_or_a_failed_exchange_fails_the_trial() {
             Ok(Structured {
                 text: r#"{"kind":"opt"#.into(),
                 truncated: true,
-                predicted_n: Some(384.0),
+                predicted_n: Some(1024.0),
             }),
             PhraseFailure::Truncated {
                 note: "took 6 damage",
@@ -240,7 +240,7 @@ async fn a_phrase_past_its_deadline_fails_naming_the_deadline() {
 }
 
 #[test]
-fn the_largest_predicted_n_rounds_up_and_stops_at_the_cap() {
+fn the_largest_predicted_n_rounds_up_and_stops_at_the_default_reply_length() {
     let result = |predicted_n| PhraseResult {
         note: "x",
         predicted_n,
@@ -252,6 +252,7 @@ fn the_largest_predicted_n_rounds_up_and_stops_at_the_cap() {
         263
     );
     assert_eq!(largest_predicted(&[result(262.2)]), 263);
-    assert_eq!(largest_predicted(&[result(900.0)]), 384);
+    assert_eq!(largest_predicted(&[result(900.0)]), 900);
+    assert_eq!(largest_predicted(&[result(5000.0)]), 1024);
     assert_eq!(largest_predicted(&[]), 0);
 }
