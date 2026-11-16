@@ -589,6 +589,76 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
   panel at two viewports; (5) the release binary refusing a certificate outside the system
   store on a clean machine (the unit tests cover the verifier with an isolated store).
 
+### 2d-3 Reply length setting (owner request, 2026-11-16)
+
+Why: the schema's largest reply takes 857–971 tokens with realistic 64-character IDs (up to
+2,261 with IDs built to tokenize badly) against `max_tokens` 352, and a cut-off reply shows
+nothing (`docs/results.md`, 2026-11-16; ASSIST-L52 (d)). Owner decisions: raise it; the reply
+length is part of what adapts to the hardware, tuned by the owner, and the run deadline follows
+the measured speed instead of fixed caps. Reviewed (Opus, approve with changes; applied below).
+
+- **Constants.** `MIN` 256, `MAX` 2,560, `STEP` 128, `DEFAULT` 1,024 (one place, used by the
+  form, the CHECK and the runtime). They replace `DEFAULT_MAX_TOKENS`,
+  `GPU_DEFAULT_MAX_TOKENS`, `OTHER_MAX_TOKENS`, `TRIAL_MEASURE_TOKENS`, `MIN_TRIAL_TOKENS`,
+  the trial's derivation (`measured_max_tokens`, `trial_max_tokens`) and `resolve`'s per-hash
+  values: every model starts at `DEFAULT`; `largest_predicted` stays in the trial record as
+  information.
+- **Setting.** "Longest reply" for the active model on `/admin/assistant`: its own POST route
+  (`owner_auth` + `csrf_admission`, as the other model actions), server-side check of bounds
+  and step (crafted values refused). It does not run the five phrases (the page says so): it
+  makes a new `assistant_models` row (or reuses one through the record match: file, hash,
+  alias, `max_tokens`) copying the trial record, and restarts once with re-calibration. A start
+  that fails or comes out "too slow" goes back to the previous row, as a failed Switch does.
+  Admitted one at a time with Try, Switch, Switch back and Restart. The setting applies to
+  both paths: a value tuned on the GPU may be "too slow" on the CPU fallback (the page shows R
+  for the path running).
+- **Trial.** For a new file only: the five phrases run at `DEFAULT` and must be
+  schema-valid and untruncated; the phrase bound is 2 × the R of a `DEFAULT` reply on the
+  candidate's measured speed, at most the ceiling (phrases end on EOS).
+- **Calibration.** The two samples generate 64 tokens (`ignore_eos`) instead of
+  `max_tokens`; validity: `predicted_n` = 64. Each sample times out at 480 s (any W above
+  that already means R > 600 s), so a hopeless machine says "too slow" within about 16
+  minutes, not 21. The first token comes from the prompt pass (about 1.6 % optimistic bias on
+  g; noted in `docs/model-runtime.md`).
+- **Context growth.** g is measured at the sample's context (about 2.1k tokens on the CPU,
+  3.1k on the GPU) but a long reply ends deeper (up to about 5.6k), where each token reads
+  more KV cache. The live check measures the real per-token time at the end of a 2,560-token
+  reply on both paths against the prediction; if the ratio exceeds 1.1, the estimate gains a
+  context factor ((prefix + N + max_tokens / 2) / sample context) before the margin, which
+  stays for sample spread only.
+- **Deadlines.** The run cap (90 s CPU, 60 s GPU) becomes one safety ceiling of 600 s on both
+  paths: R = max(15, 1.25 × T rounded up to 5 s) as today, "too slow" only above 600 s. B
+  keeps its candidates (CPU 1 KiB at most, ASSIST-31) and takes the largest that fits both
+  the ceiling and the context (below). Total wait = max(120 s, 2 × R): CPU depth 1 with queue
+  = total − R; GPU depth = clamp((total − R) / R, 1, 4), so 1 once R ≥ 40 s.
+- **Context.** In `budgets::derive`, B must also satisfy prefix tokens (priming's
+  measurement) + N(B) + `max_tokens` + 64 (template margin) ≤ `CTX_SIZE` (8,192); if no B
+  does, the start fails with "reply length too large for the context" (never cut silently).
+- **Page.** For the active model: the setting, R on the running path ("a reply can take up to
+  R s"), the per-token time, and the worst case a player can see (about 2 × R with one job
+  queued). Players' "Thinking…" has no client limit (polling continues; options live 600 s
+  after the job ends), so nothing breaks with a long R.
+- **Migration** (next free number at merge). Pre-release data (no backfill rule): rebuild
+  both tables in one migration (drop `assistant_model_choice`, drop `assistant_models`,
+  create both with the new CHECK `max_tokens BETWEEN 256 AND 2560 AND max_tokens % 128 = 0`)
+  and copy the rows with `max_tokens` set to 1,024, keeping ids so the choice row still
+  points at them. Test on a populated database (active and previous rows at 352).
+- **Decisions and limits.** ASSIST-31 and ASSIST-32 lose the fixed caps (the 600 s ceiling
+  is a limit on stuck requests, both paths); new ASSIST-57 for the setting. A stuck server is
+  declared after two expiries in a row, which now takes up to 2 × R (6–20 minutes), and a
+  breaker probe can hold the server for R: recorded as a limitation next to ASSIST-L47/L52
+  (an inactivity check, no token for k × g, is a later item). `busy_after_expiry` covers
+  only the prompt term and is unaffected (a dropped request stops generating).
+- **Tests.** Constants used by form, CHECK and runtime; the migration on populated rows with
+  the foreign key; route: bounds, step, crafted values, CSRF, Owner only, admitted alone,
+  one restart, revert on a failed or too-slow start, trial record copied and phrases not run;
+  calibration at 64 tokens derives R from g × setting (hand values); the 480 s sample
+  timeout; the ceiling; the context refusal; queue at R = 20, 40 and 300 s; the trial at
+  `DEFAULT` and its phrase bound; the page shows R, per-token time and the 2 × R worst case.
+- **Live check (owner present, CPU and GPU):** a 2,560-token generation on both paths,
+  predicted against measured per-token time at the end (the context factor above), start-up
+  time, and one job end to end at 1,024.
+
 ### 3 Bundles and reminders
 
 Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,
