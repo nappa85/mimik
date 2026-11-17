@@ -581,57 +581,15 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
 
 ### 3 Bundles and reminders
 
-Scope: §1.5. Slices 3b and 3c remain (3a, the catalogue member and linking on view, is built:
-`docs/assisted-entry.md`), each with its own branch, failing-first tests, implementation review
-and merge, in this order; the demo stays usable after each.
-
-#### 3b Bundles: multi-change proposals, apply and Undo
-
-- **Proposal model.** `Proposal` becomes 1–4 `Change {address, before, after, expr | enum |
-  bool, refs}` with distinct targets (a duplicate target or a 5th change drops the option).
-  Targets: integer, enum or boolean addresses, scalars or saved-row cells by host ID, no row
-  adds or removes. An integer change is an expression checked as in 2c (provenance, checked
-  evaluation); an enum change names a declared option ID; a boolean change a value; a change
-  equal to the current value drops the option. Interpretation options stay one integer change
-  on their target. The content hash covers every change and every bound value; its domain tag
-  becomes `mimik-proposal-v2`.
-- **Job kind and origin.** `Job` carries an explicit kind (`Interpretation`, `Reminder`; the
-  reminder kind's producer lands in 3c). Apply checks the origin per kind: interpretation, the
-  current `unresolved` note on the target (as today); reminder, the decrease note still current
-  on its field and that field still holding its `after`. Both bound inside the `IMMEDIATE`
-  transaction (`bound_notes_hold`). Confirmed notes: `raw` = the phrase for an interpretation;
-  for a reminder, the decrease note's phrase (the hint, model text, is never stored). Migration
-  33 adds op `reminded` (the op CHECK and `Op`) for a reminder's applied changes, displayed and
-  undone like `confirmed`, so a reminder's write is told apart from an interpretation's.
-- **Apply.** One revision; one `confirmed` note per change, all with one new bundle number; a
-  row that disappeared or a target outside the pin is 409. The JSON answer carries every
-  changed unit (`units`, in change order; the module redraws each like a save answer); the
-  single `unit` member of apply answers is replaced within this slice. A refused apply or bundle
-  Undo answers 409 with the fixed message and, for a bundle Undo, the labels of the members
-  that changed.
-- **Bundle Undo.** `Stored` gains `bundle`; migration 33 also adds the index
-  `(sheet_id, bundle)` (bounded member lookup and `max(bundle)` without a scan). Undo on a
-  member whose current note belongs to a bundle with more than one note reverts every member,
-  only if each member's current note is still that bundle's note and still holds its `after`;
-  then one revision with one `reverted` note per member sharing a new bundle number (so Undo of
-  that Undo works the same way). Otherwise nothing is written and the 409 page lists the members
-  that changed; a member whose row was removed, or restored under a new host ID, is one of
-  them. The answer carries every reverted unit. The offer on a member says "Last change: …
-  (with N other fields)": one bundle-size query per page for the bundles of its current notes
-  (at most 4 members each), counted in the worst-case page and query fixtures. A single-member
-  bundle behaves as today.
-- **Tests.** A 4-change proposal (built by a test producer) applied in one revision with one
-  bundle number and all units answered; a 5th change and a duplicate target each drop the
-  option; one member changed → 409; the reminder-kind origin check (decrease note superseded,
-  field changed → 409); bundle Undo all-or-nothing, the 409 list (value changed, row removed),
-  Undo of the bundle Undo; the bundle index used (query plan); existing interpretation tests
-  unchanged. Contextual bindings (row names, keys, versions) are tested in 3c with their
-  producer.
+Scope: §1.5. Slices 3a (catalogue member, linking on view) and 3b (bundles: multi-change
+proposals, apply and Undo) are built (`docs/assisted-entry.md`); slice 3c remains, with its own
+branch, failing-first tests, implementation review and merge. Migration 034 (3b) carries the
+op `reminded` and the bundle index; 3c's setting uses migration 035.
 
 #### 3c Reminders
 
 - **Setting (ASSIST-60).** "Reminders" on `/admin/assistant`, on or off, stored like the reply
-  length (migration 34; one row, not per model file); unset means on for the GPU path and off
+  length (migration 035; one row, not per model file); unset means on for the GPU path and off
   for the CPU path. Beside it, from the current generation's calibration: the path, threads and
   model; the estimated reminder time (the reminder prefix's evaluation, scaled from the
   measured priming rate by its token count, plus its reply bound at the measured per-token

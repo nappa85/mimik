@@ -140,6 +140,21 @@ pub(crate) fn locate<'a>(
     }
 }
 
+/// How a message names the cell at `address`: its label as the page shows it when it is
+/// on the sheet, else (a row removed, or restored under a new host ID) its property and
+/// list. Used where a refusal lists the members of a bundle that changed.
+pub(crate) fn label(definition: &Definition, data: &Value, address: &str) -> String {
+    if let Some(located) = locate(definition, data, address) {
+        return located.label;
+    }
+    match target(definition, address) {
+        Some(Target::Row { list, property, .. }) => {
+            format!("{} of a removed row of {}", property.label, list.label)
+        }
+        _ => "A field".to_owned(),
+    }
+}
+
 impl Located<'_> {
     /// The list and host ID of a whole-row address (`row:`), else `None`.
     pub(crate) fn line(&self) -> Option<(&Field, &str)> {
@@ -328,6 +343,7 @@ pub(crate) fn undoable(stored: &Stored, current: Option<&NoteValue>) -> bool {
             | Op::SignLiteral
             | Op::Switched
             | Op::Confirmed
+            | Op::Reminded
             | Op::Reverted
             | Op::Erased
     ) && note

@@ -16,6 +16,7 @@ fn stored(op: Op, raw: &str, before: Option<NoteValue>, after: NoteValue) -> Sto
             after,
             target: None,
         },
+        bundle: None,
     }
 }
 

@@ -13,8 +13,9 @@
 use super::{AppError, AssistantAnswer, AuthState, SheetPage, StatusCode, error, sheet_json};
 use crate::{
     assistant::jobs::{
-        self, Answer, Assistant, JobId, Origin, Poll, Proposal, Refusal, RuntimeState,
+        self, Answer, Assistant, Edit, JobId, Kind, Origin, Poll, Proposal, Refusal, RuntimeState,
     },
+    assistant::proposal::MAX_CHANGES,
     auth,
     campaigns::{
         assist, interpret,
@@ -175,6 +176,7 @@ pub(super) async fn start(
         sheet: id,
         target: address,
         revision,
+        kind: Kind::Interpretation,
     };
     match assistant.start(&registration, auth.account_id(), origin, draft) {
         Ok((job, repeat)) => Ok(reply(
@@ -292,16 +294,20 @@ fn done(sheet: i64, job: JobId, answer: &Answer) -> Value {
 }
 
 fn option_json(sheet: i64, job: JobId, n: usize, option: &Proposal) -> Value {
-    let before = option
-        .before
-        .map_or_else(|| "?".to_owned(), |value| value.to_string());
+    // An interpretation option is one integer change; a longer proposal shows its first.
+    let change = &option.changes[0];
+    let before = match &change.before {
+        NoteValue::Unknown => "?".to_owned(),
+        other => other.text(),
+    };
+    let after = change.after().text();
     json!({
         "n": n.to_string(),
         "current": before,
-        "expression": option.shown,
-        "value": option.candidate.value.to_string(),
-        "effect": format!("{before} \u{2192} {}", option.candidate.value),
-        "explanation": option.candidate.explanation,
+        "expression": change.shown(),
+        "value": after,
+        "effect": format!("{before} \u{2192} {after}"),
+        "explanation": option.explanation,
         "action": format!("/private-sheets/{sheet}/proposals/{}/{n}", job.text()),
     })
 }
@@ -359,9 +365,10 @@ pub(super) async fn apply(
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some((unit, host)) = planned else {
+    let Some(units) = planned else {
         return Ok(changed());
     };
+
     match state
         .store()
         .private_save_keeping(auth.clone(), view, permit)
@@ -375,10 +382,10 @@ pub(super) async fn apply(
                     .private_read(auth, id, None, permit)
                     .await
                     .map_err(error)?;
-                sheet_json::answer(
+                sheet_json::answer_units(
                     view,
                     permit,
-                    (unit, host),
+                    units,
                     (
                         sheet_json::Outcome::Saved,
                         "The assistant's reading was used.".into(),
@@ -402,16 +409,20 @@ fn changed() -> Response {
     )
 }
 
-/// The apply's checks on the live sheet (plan §1.4, "Apply"): the origin note current, the
-/// target holding its bound value, every reference holding its bound value in a row that
-/// still exists, and the expression giving the shown value again. Writes the value into
-/// `view` with a `confirmed` note in a new bundle, bound to the origin note. Returns the
-/// unit for the JSON answer.
-fn plan(
+/// The apply's checks on the live sheet (plan §1.4, "Apply", and §1.5, "Bundles"): the origin
+/// note as its kind requires (an interpretation's current `unresolved` note; a reminder's
+/// decrease note, current on its field, the field still holding its `after`), then for every
+/// change its target still on the sheet and holding its bound value, every reference holding
+/// its bound value in a row that still exists, the expression giving the shown value again,
+/// an enum option the pin declares. Writes every value into `view` with one note per change
+/// (`confirmed` with the phrase, or `reminded` with the decrease note's phrase), all in one
+/// new bundle, bound to the origin note. Returns the unit of each change, in change order,
+/// for the JSON answer.
+pub(in crate::campaigns) fn plan(
     view: &mut SheetView,
     origin: &Origin,
     proposal: &Proposal,
-) -> Option<(Unit, Option<String>)> {
+) -> Option<Vec<(Unit, Option<String>)>> {
     let pin = view.immutable.as_ref()?;
     let definition = pin.definition();
     let data = &view.snapshot.data;
@@ -419,43 +430,124 @@ fn plan(
         .notes
         .current
         .get(&origin.target)
-        .filter(|stored| stored.revision == origin.revision && stored.note.op == Op::Unresolved)?
+        .filter(|stored| stored.revision == origin.revision)?
         .clone();
-    let located = assist::locate(definition, data, &origin.target)?;
-    let before = proposal.before.map_or(NoteValue::Unknown, NoteValue::Int);
-    if assist::value_at(&located, data)? != before {
+    let (op, held) = match origin.kind {
+        Kind::Interpretation => (Op::Confirmed, stored.note.op == Op::Unresolved),
+        Kind::Reminder => {
+            let here = assist::locate(definition, data, &origin.target)?;
+            let holds = assist::value_at(&here, data).as_ref() == Some(&stored.note.after);
+            (Op::Reminded, holds)
+        }
+    };
+    let changes = &proposal.changes;
+    let targets: std::collections::BTreeSet<&str> = changes
+        .iter()
+        .map(|change| change.address.as_str())
+        .collect();
+    // An interpretation is exactly one integer expression on its own target (plan §1.5).
+    let one_expression = origin.kind != Kind::Interpretation
+        || matches!(
+            changes.as_slice(),
+            [change] if change.address == origin.target && matches!(change.edit, Edit::Expr { .. })
+        );
+    if !held
+        || !one_expression
+        || changes.is_empty()
+        || changes.len() > MAX_CHANGES
+        || targets.len() != changes.len()
+    {
         return None;
     }
-    let mut now = std::collections::BTreeMap::new();
-    for (id, supplied) in &proposal.candidate.refs {
-        let at = assist::locate(definition, data, &supplied.address)?;
-        let NoteValue::Int(value) = assist::value_at(&at, data)? else {
-            return None;
-        };
-        if Some(value) != supplied.value {
+    let mut writes = Vec::new();
+    let mut notes = Vec::new();
+    let mut units = Vec::new();
+    for change in changes {
+        let located = assist::locate(definition, data, &change.address)?;
+        if assist::value_at(&located, data)? != change.before {
             return None;
         }
-        now.insert(id.clone(), value);
+        let after = change.after();
+        if after == change.before || !fits(definition, &change.address, &change.edit) {
+            return None;
+        }
+        if let Edit::Expr { candidate, .. } = &change.edit {
+            let mut now = std::collections::BTreeMap::new();
+            for (id, supplied) in &candidate.refs {
+                let at = assist::locate(definition, data, &supplied.address)?;
+                let NoteValue::Int(value) = assist::value_at(&at, data)? else {
+                    return None;
+                };
+                if Some(value) != supplied.value {
+                    return None;
+                }
+                now.insert(id.clone(), value);
+            }
+            let value =
+                crate::assistant::output::recompute(&candidate.expr, &|id| now.get(id).copied())?;
+            if value != candidate.value {
+                return None;
+            }
+        }
+        units.push(unit(definition, data, &change.address)?);
+        notes.push(Note {
+            address: change.address.clone(),
+            op,
+            raw: stored.note.raw.clone(),
+            before: Some(change.before.clone()),
+            after: after.clone(),
+            target: None,
+        });
+        writes.push((located, after));
     }
-    let value =
-        crate::assistant::output::recompute(&proposal.candidate.expr, &|id| now.get(id).copied())?;
-    if value != proposal.candidate.value {
-        return None;
+    // Every check passed: only now is the data written (the `located` borrows end here).
+    let mut written = view.snapshot.data.clone();
+    for (located, after) in &writes {
+        assist::set(located, &mut written, after).ok()?;
     }
-    let after = NoteValue::Int(value);
-    let unit = unit(definition, data, &origin.target)?;
-    assist::set(&located, &mut view.snapshot.data, &after).ok()?;
-    view.notes.pending = vec![Note {
-        address: origin.target.clone(),
-        op: Op::Confirmed,
-        raw: stored.note.raw.clone(),
-        before: Some(before),
-        after,
-        target: None,
-    }];
+    view.snapshot.data = written;
+    view.notes.pending = notes;
     view.notes.bound = vec![stored];
     view.notes.bundle = true;
-    Some(unit)
+    Some(units)
+}
+
+/// Whether the edit suits the control of the target at `address`: an expression an integer, an
+/// option ID an enum (one the pin declares for that field or property), a boolean a boolean.
+/// `bind` cannot check it for an unknown or unset value before, which fits any kind.
+fn fits(definition: &crate::definitions::Definition, address: &str, edit: &Edit) -> bool {
+    use crate::definitions::Control;
+    let (control, options) = if let Some(field) = address.strip_prefix("field:") {
+        let Some(field) = definition
+            .fields
+            .iter()
+            .find(|candidate| candidate.id == field)
+        else {
+            return false;
+        };
+        (field.control, field.options.as_deref())
+    } else {
+        let property = address.strip_prefix("cell:").and_then(|path| {
+            let mut parts = path.splitn(3, '/');
+            let (list, _, property) = (parts.next()?, parts.next()?, parts.next()?);
+            let list = definition.fields.iter().find(|field| field.id == list)?;
+            values::properties(list)
+                .iter()
+                .find(|item| item.id == property)
+        });
+        let Some(property) = property else {
+            return false;
+        };
+        (property.control, property.options.as_deref())
+    };
+    match edit {
+        Edit::Expr { .. } => control == Control::Integer,
+        Edit::Bool(_) => control == Control::Boolean,
+        Edit::Enum(id) => {
+            control == Control::Enumeration
+                && options.is_some_and(|options| options.iter().any(|option| &option.id == id))
+        }
+    }
 }
 
 /// The unit of the JSON answer for a target address: a field by index, a row cell by its

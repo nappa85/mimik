@@ -59,8 +59,10 @@ piece and the result are always shown in full.
 
 Table `private_sheet_notes(sheet_id, revision, address, op, raw, before, after, bundle,
 target)`, primary key `(sheet_id, revision, address)`, foreign key to the history row, index
-`(sheet_id, address, revision)` for the current note (migration 020, rebuilt by migration
-021 to admit row addresses; `SCHEMA_VERSION` 21).
+`(sheet_id, address, revision)` for the current note and index `(sheet_id, bundle)` for a
+bundle's members and `max(bundle)` (migration 020, rebuilt by migration 021 to admit row
+addresses and by migration 034 to admit the op `reminded` and add the bundle index;
+`SCHEMA_VERSION` 34).
 
 - **Scope:** integer, enum and boolean cells only. Text, multiline, Name and General notes get
   no notes; history holds every revision of them.
@@ -69,8 +71,10 @@ target)`, primary key `(sheet_id, revision, address)`, foreign key to the histor
   which nothing writes yet. CHECK: 6–256 bytes, no NUL, one of the four prefixes, each with a
   non-empty rest.
 - **Ops:** `literal`, `sum`, `sign_literal`, `switched`, `unresolved`, `erased`, `reverted`
-  and `confirmed` (an applied assistant reading) are written. `bundle` numbers the notes of one
-  applied proposal (per sheet, from 1); `target` is the revision an Undo reverted.
+  and `confirmed` (an applied assistant reading) are written; `reminded` (an applied reminder,
+  step 3c, displayed and undone like `confirmed`) is admitted. `bundle` numbers the notes of
+  one applied proposal or one bundle Undo (per sheet, from 1); `target` is the revision an
+  Undo reverted.
 - **Typed values** (`NoteValue`), canonical JSON ≤ 80 bytes (`MAX_VALUE_BYTES`):
   `{"absent":true}` (optional property not set, distinct from unknown), `{"unknown":true}`,
   `{"int":"-15"}` (decimal string), `{"enum":"<id>"}`, `{"bool":true}`, `{"row":"present"|
@@ -120,12 +124,23 @@ On a saved page the reader may edit, the current note of a cell may offer:
   CSS-only checkbox ("Hide the suggestion"); nothing is stored, so the offer returns on
   reload while its note is current.
 - **Undo** (D-N, D-X1): "Last change: was 84 [Undo]" for a current note with op `literal`,
-  `sum`, `sign_literal`, `switched`, `confirmed`, `reverted` or `erased`, a recorded `before`
+  `sum`, `sign_literal`, `switched`, `confirmed`, `reminded`, `reverted` or `erased`, a recorded `before`
   that differs from `after`, and the cell still holding `after`. Not for scribbles, new
   cells, row notes, text cells or pages without edit rights. Undo of an Undo works. Enum
   values show their option IDs. When the note's `before` is `{"absent":true}` (an optional
   property that was not set), Undo makes the property absent again, not `null`
   (`assist.rs`, `NoteValue::Absent`).
+- **Bundle Undo** (step 3b): the notes of one applied proposal share a bundle number. On a
+  member of a bundle of several notes the offer reads "Last change: was 70 (with 3 other
+  fields)" (the members come from one bounded query per page read, through the
+  `(sheet_id, bundle)` index; only members still current are counted), and Undo reverts every member, all or nothing: each member's
+  current note must still be that bundle's note with its cell holding its `after`. Then one
+  revision holds one `reverted` note per member sharing a new bundle number, so the Undo of
+  that Undo works the same way. Otherwise nothing is written and the 409 page names the
+  members that changed by label (a member whose row was removed, or restored under a new host
+  ID, as its property and list); the writer rechecks every member inside its transaction. A
+  single-note bundle behaves as a single Undo. Undo is a form post that reloads the page, so
+  every reverted unit shows on the redrawn page.
 - **Row removed · Undo** (D-V): a list whose latest row note is a removal whose row is still
   away shows "Row removed · Undo" (one per list; "Undo Row removed Equipment"). Undo reads
   the row from the revision before the removal (read with L), re-inserts it at its old index
@@ -568,7 +583,7 @@ layer's error page through `AssistantAnswer`):
 |---|---|---|
 | `POST /private-sheets/{id}/interpretations` | exactly `csrf`, `note` | 202 `{job, poll}` (200 for a repeat); 400 malformed or not an integer field or cell of the pin; 403 no edit rights; 409 not the current `unresolved` note; 429 busy; 503 starting, unavailable or breaker open; 413 over 8 KiB |
 | `GET /private-sheets/{id}/interpretations/{job}` | — | `thinking`, then `options` (`n`, `current`, `expression`, `value`, `effect`, `explanation`, `action`), `readings`, or a message (`nothing`, `too_long`, `unavailable`, `ask_again`, `superseded`, `stale`); 404 "ask again" for an unknown, evicted, another account's or another sheet's job; 403 without edit rights |
-| `POST /private-sheets/{id}/proposals/{job}/{n}` | exactly `csrf` | 200 the unit's JSON save answer; 409 "Something this proposal used has changed: ask again."; 403; the styled busy 503 after the D-X3 wait |
+| `POST /private-sheets/{id}/proposals/{job}/{n}` | exactly `csrf` | 200 the JSON save answer with `units` (every changed unit, in change order) in place of `unit`; 409 "Something this proposal used has changed: ask again."; 403; the styled busy 503 after the D-X3 wait |
 
 The `note` key is the one the JSON save answer now carries in `unit.note.key` whenever the
 note is `unresolved` (`<revision>:<address>`, a row cell as `cell:<list>/<host>/<property>`);
@@ -581,13 +596,28 @@ bundle number of the sheet, bound to the origin note inside the `IMMEDIATE` tran
 consumes the job after the commit. Any mismatch or expiry writes nothing and never falls back
 to a literal. Undo of the applied value works like any Undo.
 
+**Proposals and bundles** (step 3b). A `Proposal` is one to four `Change`s (typed address,
+value before, and an integer expression, an enum option ID or a boolean) with distinct
+targets: integer, enum or boolean fields and saved-row cells by host ID, never a row add or
+remove. A duplicate target, a fifth change, a change equal to the value before or one that does
+not fit it drops the option. Interpretation options stay one integer change on their target (the apply requires exactly that, and an edit that suits the target's control: expression to integer, option ID to enum, boolean to boolean).
+The content hash (`mimik-proposal-v2`) covers the job, option index, kind, origin and every
+change with its bound values. Origin and kind: `Origin` carries the job's kind. An
+interpretation is bound to the target's current `unresolved` note; a reminder (its producer is
+step 3c) to the decrease note still current on its field with the field still holding its
+`after`. Apply requires, per change, the target on the sheet holding its value before, the
+references and expression as above and, for an enum, an option the pin declares; then one
+revision, one note per change sharing one new bundle number (`confirmed` with the phrase;
+`reminded` with the decrease note's phrase). Any refusal is the one 409 with the fixed
+message.
+
 **Module.** After a save whose answer has an `unresolved` note with a key, the module starts a
 job (once the start answers 404 it stops trying for the page) and shows "Thinking…" in the
 cell's `role="status"` box (`assist-<key>`, described by the cell); it polls at 500 ms backing
 off to 2 s; a newer save of the cell supersedes it. Options show "Now <value>:", the
 expression in `<bdi>`, "= <value>" and the explanation in `<bdi>`, with a Use button named
 "Use <expression> = <value>"; readings show in `<bdi>` without Use; other answers show their
-message. Use posts the apply route as the cell's flight, like a save (a draft typed meanwhile is kept, a save asked for meanwhile waits), and draws the answer like a save. Everything is
+message. Use posts the apply route as the cell's flight, like a save (a draft typed meanwhile is kept, a save asked for meanwhile waits), and draws the answer like a save: the answer's `units` name every changed unit, and the module redraws each (the unit that asked as its flight, another unit of the page unless it has a request in flight, is orphaned or holds a draft). Everything is
 `textContent`.
 
 ## Adaptive sheet presentation

@@ -14,8 +14,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   values) is merged too, and so is 2d-2 (model downloads, `docs/model-downloads.md`). There is
   no level 2 (ASSIST-48). Owed for 2d-2: live checks 4 (browser, Downloads panel) and 5 (certificate
   outside the system store, clean machine) (`docs/assisted-sheet-plan.md`, "2d-2"). Checks 1-3
-  ran (`docs/results.md`). Step 3a (catalogue member, linking on view) is merged; next: 3b
-  (bundles), then 3c (reminders). Level 3's return is its
+  ran (`docs/results.md`). Steps 3a (catalogue member, linking on view) and 3b (bundles) are
+  merged; next: 3c (reminders; its plan change for ASSIST-60 needs review first). Level 3's return is its
   own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
@@ -158,6 +158,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `catalogue_browser.py`/`material_browser.py` up to date, then run it in every gate.
 - Gates must use `--all-features` (the auth-feature suites hid a stale `<nav>` assertion until
   2026-11-17).
+- Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled
+  Undo offer runs `changed_members` (about 32,000 `locate` calls on the worst page); compute once
+  per bundle if slow. The module's multi-unit redraw (`settleApplied`: drafted, held and in-flight
+  units skipped; the asking unit not among the changes) has no automated test; cover it in 3c's
+  browser check, when reminders produce multi-change proposals.
 - Catalogues (3a review, Minor): no failure-injection test that a failed `names::replace_rows`
   rolls the whole seal back.
 

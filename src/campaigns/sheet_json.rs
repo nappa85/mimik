@@ -52,18 +52,54 @@ impl Outcome {
     }
 }
 
+/// The answer of an applied proposal (step 3b): every changed unit as the page would render
+/// it, in change order, as `units` in place of a save answer's single `unit`.
+pub(super) async fn answer_units(
+    view: SheetView,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    units: Vec<(Unit, Option<String>)>,
+    shown: (Outcome, String),
+    status: StatusCode,
+) -> super::ResultResponse {
+    respond(view, permit, units, Shape::Many, shown, status).await
+}
+
+/// Whether an answer names one unit (`unit`) or every unit an apply changed (`units`).
+#[derive(Clone, Copy)]
+enum Shape {
+    One,
+    Many,
+}
+
 /// The answer for `unit` from `view` (the live revision), holding the runtime permit while
 /// the view model is built.
 pub(super) async fn answer(
     view: SheetView,
     permit: tokio::sync::OwnedSemaphorePermit,
-    (unit, host): (Unit, Option<String>),
+    unit: (Unit, Option<String>),
+    shown: (Outcome, String),
+    status: StatusCode,
+) -> super::ResultResponse {
+    respond(view, permit, vec![unit], Shape::One, shown, status).await
+}
+
+/// The one body of both answers: the projection of `units` at the live revision, in the shape
+/// asked for.
+async fn respond(
+    view: SheetView,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    units: Vec<(Unit, Option<String>)>,
+    shape: Shape,
     (outcome, message): (Outcome, String),
     status: StatusCode,
 ) -> super::ResultResponse {
     let text = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        projection(&view, (unit, host.as_deref()), outcome, &message).map(|value| value.to_string())
+        let units: Vec<(Unit, Option<&str>)> = units
+            .iter()
+            .map(|(unit, host)| (*unit, host.as_deref()))
+            .collect();
+        projection(&view, &units, shape, outcome, &message).map(|value| value.to_string())
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -80,7 +116,8 @@ pub(super) async fn answer(
 
 fn projection(
     view: &SheetView,
-    (unit, host): (Unit, Option<&str>),
+    units: &[(Unit, Option<&str>)],
+    shape: Shape,
     outcome: Outcome,
     message: &str,
 ) -> Result<Value, crate::AppError> {
@@ -92,21 +129,32 @@ fn projection(
         (None, true),
         &mut AssistForms::default(),
     )?;
-    let fields = groups.iter().flat_map(|group| &group.fields);
-    let mut answer = unit_json(view, fields, (unit, host));
+    let mut answers: Vec<Value> = units
+        .iter()
+        .map(|(unit, host)| {
+            let fields = groups.iter().flat_map(|group| &group.fields);
+            unit_json(view, fields, (*unit, *host))
+        })
+        .collect();
+    // A refusal names its one unit (`Shape::One`).
     if outcome.refused()
+        && let (Some(answer), Some((unit, _))) = (answers.first_mut(), units.first())
         && let Some(members) = answer.as_object_mut()
     {
-        let current = current(members, integer(view, unit));
+        let current = current(members, integer(view, *unit));
         members.retain(|key, _| key == "address" || key == "action");
         members.insert("current".into(), current.map_or(Value::Null, Value::String));
     }
+    let shown = match shape {
+        Shape::One => ("unit", answers.into_iter().next().unwrap_or(Value::Null)),
+        Shape::Many => ("units", Value::Array(answers)),
+    };
     let validity = Validity::of(formulas.as_ref(), view.immutable.is_some());
     Ok(json!({
         "status": outcome.word(),
         "message": message,
         "revision": view.snapshot.revision.to_string(),
-        "unit": answer,
+        (shown.0): shown.1,
         "derived": formulas.as_ref().map_or_else(Vec::new, derived),
         "not_computed": formulas
             .as_ref()
@@ -282,14 +330,19 @@ fn extend(
         })
     });
     answer["actions"] = actions.map_or(Value::Null, |actions| {
-        json!({
+        let mut shown = json!({
             "note": actions.note,
             "offer": actions
                 .offer
                 .as_ref()
                 .map(|offer| json!({"text": offer.text, "value": offer.value})),
             "undo": actions.undo,
-        })
+        });
+        // The other fields an Undo reverts with this one (a bundle, step 3b), only when any.
+        if actions.with > 0 {
+            shown["with"] = json!(actions.with.to_string());
+        }
+        shown
     });
 }
 

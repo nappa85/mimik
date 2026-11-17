@@ -1159,8 +1159,8 @@ async fn row_notes_and_six_byte_meta_addresses_are_admitted() {
     }
 }
 
-/// Migration 021 upgrades a schema-20 database: every note is kept byte for byte, with the
-/// three triggers, the current-note index and the primary key, and a row removal then
+/// Migrations 021 and 034 upgrade a schema-20 database: every note is kept byte for byte, with the
+/// three triggers, the current-note and bundle indexes and the primary key, and a row removal then
 /// writes its note.
 #[tokio::test]
 async fn schema_20_upgrades_to_21_keeping_every_note() {
@@ -1231,7 +1231,10 @@ async fn schema_20_upgrades_to_21_keeping_every_note() {
         .unwrap();
     assert_eq!(version, crate::SCHEMA_VERSION);
     assert_eq!(after, before, "notes kept byte for byte");
-    assert_eq!(objects, 5, "three triggers, the index and the primary key");
+    assert_eq!(
+        objects, 6,
+        "three triggers, the two indexes and the primary key"
+    );
     let app = crate::auth::app(reopened.clone()).await.unwrap();
     let html =
         body(super::router_request(&app, &setup.auth[1], "/private-sheets/1", None).await).await;

@@ -219,6 +219,12 @@ function clearActions(unit) {
   }
 }
 
+/** " (with N other fields)": the fields a bundle's Undo reverts together with this one. */
+function withOthers(actions) {
+  const others = typeof actions.with === 'string' && DIGITS.test(actions.with) ? actions.with : '0';
+  return others === '0' ? '' : ` (with ${others} other field${others === '1' ? '' : 's'})`;
+}
+
 function showActions(unit, actions, revision, at) {
   const shown = names(unit);
   clearActions(unit);
@@ -271,7 +277,7 @@ function showActions(unit, actions, revision, at) {
       element(
         'p',
         { class: 'entry-undo' },
-        element('span', { id: `was-${key}` }, `Last change: was ${actions.undo}`),
+        element('span', { id: `was-${key}` }, `Last change: was ${actions.undo}${withOthers(actions)}`),
         element(
           'button',
           {
@@ -514,6 +520,7 @@ function validUnit(unit, refused) {
       (record(actions) &&
         text(actions.note) &&
         textOrNull(actions.undo) &&
+        (actions.with === undefined || (text(actions.with) && DIGITS.test(actions.with))) &&
         (actions.offer === null ||
           (record(actions.offer) && text(actions.offer.text) && text(actions.offer.value)))))
   );
@@ -537,8 +544,9 @@ function validChecks(checks) {
   );
 }
 
-/** The answer has the shape the module draws from; anything else is a failure. */
-function valid(answer) {
+/** The answer has the shape the module draws from; anything else is a failure. `many`: an
+ * apply's answer, which names every changed unit in `units` (step 3b), not one in `unit`. */
+function valid(answer, many = false) {
   if (!record(answer) || !STATUSES.has(answer.status)) {
     return false;
   }
@@ -549,7 +557,9 @@ function valid(answer) {
     text(answer.revision) &&
     DIGITS.test(answer.revision) &&
     text(answer.message) &&
-    validUnit(answer.unit, refused) &&
+    (many
+      ? Array.isArray(answer.units) && answer.units.length > 0 && answer.units.every((one) => validUnit(one, refused))
+      : validUnit(answer.unit, refused)) &&
     Array.isArray(answer.derived) &&
     answer.derived.every((item) => record(item) && text(item.id) && text(item.text) && textOrNull(item.code)) &&
     (missing === null || (record(missing) && text(missing.text) && text(missing.id) && text(missing.label))) &&
@@ -590,7 +600,7 @@ function orphan(unit, message) {
 /** Applies an answer; returns whether a save queued meanwhile is dropped: after a
  * conflict or an orphaned unit (the player must see that first), not after a refused
  * value (the queued entry is a later one and goes). */
-function settle(unit, flight, answer, status, submitter) {
+function settle(unit, flight, answer, status, submitter, quiet = false) {
   if (flight.seq < unit.applied) {
     return false;
   }
@@ -638,7 +648,9 @@ function settle(unit, flight, answer, status, submitter) {
     interpret(unit, answer.unit.note);
     unit.sent = answerKey(unit, answer.unit);
     unit.ack = current ? entryKey(unit.form) : unit.sent;
-    announce(answer.message);
+    if (!quiet) {
+      announce(answer.message);
+    }
     if (focusBack) {
       unit.control.focus();
     }
@@ -945,7 +957,56 @@ function showAssistant(unit, token, answer) {
   box.replaceChildren(heading);
 }
 
-/** Use: posts the apply route; the answer is a unit save's answer. It is the unit's flight
+/** The unit of the page, other than `except`, whose form posts to `action`. */
+function unitAt(action, except) {
+  for (const form of document.forms) {
+    const other = units.get(form);
+    if (other && other !== except && new URL(form.action, document.baseURI).pathname === action) {
+      return other;
+    }
+  }
+  return null;
+}
+
+/** An apply's answer names every changed unit. The unit that asked draws its own member as a
+ * save answer; when it is not among them (a reminder's Use from a field it does not change)
+ * its flight just ends, announcing the message, and it is not drawn. Every other member's
+ * unit is redrawn like a save answer too, but only when it is idle: a unit with a request in
+ * flight (its own answer is the later one), an orphan, a held unit (ASSIST-23: only Enter or
+ * Save resend) or one holding a draft keeps its base and its control, so its next save meets
+ * the normal conflict instead of overwriting the applied value. The message is announced
+ * once. */
+function settleApplied(unit, flight, answer) {
+  const own = new URL(unit.form.action, document.baseURI).pathname;
+  const mine = answer.units.find((one) => one.action === own);
+  let drop = false;
+  if (mine) {
+    drop = settle(unit, flight, { ...answer, unit: mine }, 200, null);
+  } else {
+    unit.applied = Math.max(unit.applied, flight.seq);
+    announce(answer.message);
+  }
+  for (const member of answer.units) {
+    if (member === mine || typeof member.action !== 'string') {
+      continue;
+    }
+    const other = unitAt(member.action, unit);
+    if (!other || other.flight || other.orphan || other.hold) {
+      continue;
+    }
+    if (entryKey(other.form) !== other.ack) {
+      continue;
+    }
+    other.seq += 1;
+    settle(other, { key: null, gen: other.gen, seq: other.seq, submitter: null }, { ...answer, unit: member }, 200, null, true);
+  }
+  if (!mine) {
+    project(answer, BigInt(answer.revision));
+  }
+  return drop;
+}
+
+/** Use: posts the apply route; the answer names every changed unit in `units`. It is the unit's flight
  * like a save: the draft generation and sequence are taken before the request, a save asked
  * for meanwhile waits in the unit's queue, and page posts wait for it, so a draft typed while
  * Use is on its way is kept. */
@@ -961,9 +1022,9 @@ async function applyOption(unit, token, action, button) {
   unit.form.setAttribute('aria-busy', 'true');
   const result = await postForm(action, [['csrf', csrfOf(unit)]]);
   land(unit, () => {
-    if (result.status === 200 && valid(result.answer)) {
+    if (result.status === 200 && valid(result.answer, true)) {
       stopAssist(unit);
-      return settle(unit, flight, result.answer, 200, null);
+      return settleApplied(unit, flight, result.answer);
     }
     if (token === unit.assist) {
       assistText(

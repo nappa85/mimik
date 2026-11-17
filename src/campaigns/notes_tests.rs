@@ -1317,8 +1317,8 @@ async fn populated_schema19_upgrade_adds_the_note_table() {
     assert_eq!(version, crate::SCHEMA_VERSION);
     assert_eq!(upgraded, history, "history kept byte for byte");
     assert_eq!(count, 0, "existing revisions have no notes");
-    // Three triggers, the current-note index and the primary key's autoindex.
-    assert_eq!(objects, 5);
+    // Three triggers, the current-note and bundle indexes and the primary key's autoindex.
+    assert_eq!(objects, 6);
     let app = crate::auth::app(reopened.clone()).await.unwrap();
     let edit = form(2, &[("value-hp", "69 + 1")], &[row("r1-1", "1")]);
     let response =

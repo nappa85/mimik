@@ -175,7 +175,7 @@ where
 #[path = "assist_web.rs"]
 mod assist_web;
 #[path = "interpret_web.rs"]
-mod interpret_web;
+pub(in crate::campaigns) mod interpret_web;
 #[path = "sheet_json.rs"]
 mod sheet_json;
 #[path = "unit_web.rs"]
@@ -710,6 +710,8 @@ struct Actions {
     offer: Option<Offer>,
     /// The value Undo restores, when Undo is offered.
     undo: Option<String>,
+    /// How many other fields that Undo reverts with this one (a bundle, step 3b); 0 for none.
+    with: usize,
 }
 
 struct Offer {
@@ -769,6 +771,25 @@ impl Actions {
                 .as_ref()
                 .map_or_else(String::new, super::notes::NoteValue::text)
         });
+        // The bundle's other members, from the page's one bundle query.
+        // A bundled note offers Undo only while every member can still be undone together
+        // (their notes current, their cells holding their values), as a single Undo is
+        // withheld once its cell changed; `with` counts the other members of an offered Undo.
+        let mut undo = undo;
+        let mut with = 0;
+        if undo.is_some()
+            && let Some(bundle) = stored.bundle
+        {
+            match view.notes.bundles.get(&bundle) {
+                Some(members)
+                    if members.len() <= super::notes::MAX_BUNDLE
+                        && assist_web::changed_members(view, members).is_none() =>
+                {
+                    with = members.len().saturating_sub(1);
+                }
+                _ => undo = None,
+            }
+        }
         forms.switch |= offer.is_some();
         forms.undo |= undo.is_some();
         (offer.is_some() || undo.is_some()).then(|| Self {
@@ -780,6 +801,7 @@ impl Actions {
             ),
             offer,
             undo,
+            with,
         })
     }
 }
