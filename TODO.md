@@ -149,13 +149,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
-- **`tools/browser_smoke.py` is stale since navigation slice 1 (b269454):** with `--auth` it fails at
-  the Owner landing check ("Open administration" link), in `material_browser.py` (a
-  `wait_for_function` string refused by the CSP), in `catalogue_browser.py` (the shared header's
-  logo image and script) and after the restart ("session lost", with the account step skipped).
-  The principal check now reads the header's display name. The 3a check ran from a scratch copy
-  skipping those parts (assisted sheet with and without JS, both viewports). Bring the tool and
-  `catalogue_browser.py`/`material_browser.py` up to date, then run it in every gate.
+- Browser smoke CSP coverage (review 2026-11-17, Minor): the signed-in scenario checks for CSP
+  violations only on the page each Owner stage ends on (the probe resets per page), and
+  `tools/lan_client.py` installs no probe; record violations across navigations (a
+  context-level list) and add the probe to the LAN gate.
 - Gates must use `--all-features` (the auth-feature suites hid a stale `<nav>` assertion until
   2026-11-17).
 - Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled

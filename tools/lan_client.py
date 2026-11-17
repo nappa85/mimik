@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from material_browser import run_material_browser
-from smoke_release import require
+from smoke_release import require, wait_until
 
 OWNER_PASSWORD = "Synthetic initial password 2026!"
 STAGE = "startup"
@@ -206,7 +206,7 @@ def copy_link(browser, page, origin, insecure):
             "HTTP LAN copy test accidentally uses secure-context privileges",
         )
     page.get_by_role("button", name="Copy link", exact=True).click()
-    page.wait_for_function('document.getElementById("copy-status").textContent === "Link copied."')
+    wait_until(page, 'document.getElementById("copy-status").textContent === "Link copied."')
     link = read_clipboard(browser, page)
     require(
         link.startswith(origin + "/auth/")
@@ -337,8 +337,9 @@ def scenario(browser, address, origin, viewport, name, verification=None, proxy=
             and urlsplit(request.url).query == "fresh=1"
         ):
             recipient.get_by_role("link", name="Open a fresh form", exact=True).click()
-        recipient.wait_for_function(
-            'location.hash === "" && document.querySelector(\'input[name="token"]\')?.value.length === 64'
+        wait_until(
+            recipient,
+            'location.hash === "" && document.querySelector(\'input[name="token"]\')?.value.length === 64',
         )
         require(
             not urlsplit(recipient.url).fragment
