@@ -605,9 +605,16 @@ time right after a reminder prompt of realistic size, (c) with llama.cpp's host-
 cache (`--cache-ram <MiB>`, sized to two prefixes) against (a) re-priming the interpretation
 prefix after every reminder (`calibration::prime`, held in `busy_until`). Record RAM cost,
 times and the choice in `docs/results.md`; prefer (c) (llama.cpp's own mechanism) when it
-restores the prefix within the measured noise of a cached interpretation. A shared system
-message is excluded (two conflicting tasks, earlier review). The chosen mechanism and its
-measured cost feed 3c-1's budgets and page estimates.
+restores the prefix: after a reminder, the interpretation's `cache_n` is at least 75 % of the
+prefix (the calibration rule), not only a short time to first token. Also measure: on the
+hybrid default models (Qwen3.5's linear-attention layers; check Granite 4.2) whether the reuse
+point is a context checkpoint at or before the prefix's end; the size of one cache entry (a
+whole prompt's state and checkpoints), so `--cache-ram` is sized from it, and that a
+reminder → interpretation → reminder → interpretation sequence keeps the interpretation entry;
+the selection rule of b12110 itself; the GPU path's host↔device copy time. `--cache-ram` is in
+the measurement-relevant flag vector (`launch.rs`): choosing (c) re-checks calibration and
+updates that vector's text and test. A shared system message is excluded (two conflicting
+tasks, earlier review). The chosen mechanism and its measured cost feed 3c-1.
 
 ##### 3c-1 Reminders with item names
 
@@ -618,7 +625,9 @@ measured cost feed 3c-1's budgets and page estimates.
   and enters the live-progress signature (stored choice and effective value,
   `assistant_live.rs`). Beside the setting, for the current generation: path, threads, model;
   the estimated reminder time; the worst extra wait of a scribble reading right after one (the
-  rest of a cancelled reminder's prompt plus the prefix restore of 3c-0); on the CPU path
+  whole prompt of a cancelled reminder, template tokens excluded and stated, plus the prefix
+  restore of 3c-0, labelled as measured on the dev host when it is 3c-0's constant); on the CPU
+  path
   "item names only: catalogue text does not fit". Inputs, all measured at start: priming's
   `prompt_n` and `prompt_ms` (kept in `Calibration`; today `prime` discards them), the reminder
   system message's token count (`/tokenize` at start, outside the breaker, a live-progress
@@ -633,11 +642,17 @@ measured cost feed 3c-1's budgets and page estimates.
   own run deadline (reminder prompt at the measured prompt rate plus the reply bound at the
   per-token speed and slowdown), their own busy term `p × (reminder prompt + N(B))` used by
   `presume_busy` after a cancelled or expired reminder and by interpretation admission
-  (`admissible`) while one runs. After every reminder that started (finished, cancelled or
-  expired) the 3c-0 mechanism restores the interpretation prefix: with (a) the worker re-primes
-  before the next job and the time is held in `busy_until`, so R stays valid and admission
-  counts it against Q. A regression test: an interpretation after a reminder whose stub takes
-  prefix-plus-normal time does not expire.
+  (`admissible`) while one runs (the whole reminder prompt: a cancel can come before its first
+  token). After every reminder that started (finished, cancelled or expired) the 3c-0
+  mechanism restores the interpretation prefix: with (a) the worker re-primes before the next
+  job, and `busy_until` ends when that request actually completes, so R stays valid and
+  admission counts it against Q; with (c) the restore happens inside the next interpretation's
+  request, so the measured restore cost is added to R's prompt term (or shown by 3c-0 to fit
+  the 1.25 margin). At Ready, reminders are unavailable for the generation, with the reason on
+  the page, unless the reminder busy term plus the restore is at most Q, so a reminder never
+  makes a scribble reading refused. A regression test, for the chosen mechanism: an
+  interpretation after a reminder whose stub takes prefix-plus-normal time does not expire;
+  and one for the Q rule.
 - **Prompt and interface.** A pinned reminder system message (reminder instructions, the
   heading and the reminder schema's compact text; SHA-256 pinned in Rust and
   `tools/test_assist_eval.py`), not primed. `Interpreter::complete` takes the request kind:
@@ -650,7 +665,9 @@ measured cost feed 3c-1's budgets and page estimates.
 - **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; 202 `{job, poll}`),
   polled through the existing job route. It re-derives the trigger from the stored note
   (current; top-level integer field; allowed op; known `before` > `after`; the field still
-  holding `after`), else 409. A note whose reminder option was applied starts no new one (409);
+  holding `after`), else 409. A note whose reminder option was applied starts no new one (409),
+  judged from the stored notes (a `reminded` bundle bound to that decrease note), not from the
+  in-memory records;
   a re-post of a note whose reminder ended without an applied option may start again (bounded
   by the per-account rule below).
 - **Scheduling.** Outside the one-live-job rule, repeat detection, D, Q and the interpretation
@@ -676,7 +693,8 @@ measured cost feed 3c-1's budgets and page estimates.
   rule with the decrease's phrase as the phrase, plus the decrease's `before`, `after` and their
   difference (§1.5). `relevant: false` ends the job with nothing shown.
 - **Read set and hash.** `Proposal` gains `reads` (every value sent: the decrease, fields, enum
-  values; every row's name with its host ID) in the content hash, tag `mimik-proposal-v3`;
+  values; every row's name with its host ID) in the content hash, tag `mimik-proposal-v3`
+  (interpretations carry empty `reads`);
   apply re-reads them by address and host ID (409 on any difference). Tests: a row renamed, a
   row removed, a sent field changed with the changes' numbers unchanged → 409.
 - **Display.** Below the decreased field, a `role="status"` box: "Reminder: <hint>" (and the
@@ -707,10 +725,12 @@ measured cost feed 3c-1's budgets and page estimates.
   as sent in this request (the 2c phrase-number lexer; a sign or a die size such as `d6` is not
   part of the number); a cited row whose text was dropped or absent admits none; a number only
   in another row's text drops the option. The option shows "from <entry name>: …" with the
-  number's surrounding words (≤ 64 characters) in `<bdi>`; `Proposal` gains that `source`.
+  number's surrounding words (≤ 64 characters) in `<bdi>`; `Proposal` gains that `source`,
+  which enters the content hash with the catalogue reads (tag `mimik-proposal-v4`).
 - **Read set.** Each entry text sent adds its catalogue ID, sealed version and entry key to
   `reads`; apply re-reads them through the catalogue store (latest sealed version and the
-  row's link); a newer sealed version, a changed link or key → 409.
+  row's link); a newer sealed version, a changed link or key → 409, and so does a failed or
+  timed-out lookup (never read as unchanged or as no link).
 - **Tests.** Duplicate names without a key → no entry text; entry text cut to 2,000;
   injection in entry text → at most a fully shown option; a number in the cited entry →
   allowed and shown with its source; a number only in an uncited row's text, or in a cited
