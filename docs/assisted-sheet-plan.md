@@ -580,18 +580,153 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
 
 ### 3 Bundles and reminders
 
-Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,
-reminder jobs and hints). Tests: a bundle of 4 in one revision, a 5th change dropped, duplicate
-targets dropped; one member changed → apply refused; contextual freshness (row name,
-remembered key, entry version or context enum changed with every number unchanged → refused);
-bundle Undo all-or-nothing; a reminder only on a decrease of a top-level integer, none with the
-assistant off, not taking the account cap; duplicate names without a key → no entry text in
-the prompt; text and multiline never in the prompt (asserted on the stub request); entry text
-cut to 2,000; injection in entry text → at most a fully shown option; provenance extension: a
-number in the cited entry's text → allowed and shown "from <entry>: …"; a number injected
-into the entry text of a different (uncited) entry → option dropped; a number in no source
-(neither the phrase, the target's value, a fraction or percent word nor the cited entry text)
-→ option dropped.
+Scope: §1.5. Three slices, each with its own branch, failing-first tests, implementation review
+and merge, in this order; the demo stays usable after each.
+
+#### 3a Catalogue member and linking on view (no model)
+
+- **Contract.** `schemas/definition-v1.json` gains the optional `catalogue` member on a `text`
+  item property: `{"id": <slug>, "entry_type": <slug>?, "key": <property id>}`, closed object.
+  Admission domain checks, one diagnostic each, path `/fields/{i}/items/properties/{j}/catalogue`:
+  `id` is one of the definition's `catalogues` links (`catalogue-member-unlinked`); `key` names
+  another property of the same list (`catalogue-key-unknown`) that is `text`, `optional`, has
+  no `catalogue` member (`catalogue-key-invalid`) and is the `key` of no other member
+  (`catalogue-key-shared`). Canonical encoding keeps the member's schema order and omits it when
+  absent, so every existing hash is unchanged (the frozen vectors stay; a new frozen vector
+  covers a definition with the member). The runtime definition contract and the publication
+  profile copies (`tools/`) follow.
+- **Database checks** at the three catalogue-link sites (draft save, publication snapshot,
+  readiness): when `entry_type` is present it must be declared in the linked catalogue's latest
+  sealed version (`/…/catalogue linked-catalogue-entry-type-unknown`; readiness: wiring
+  stale). A later version that drops the type only yields no link on view.
+- **Key property.** Rendered as the link, never a control: the full form, the cell route, the
+  new-row form and quick-add never take it; a posted value is refused like an unknown key (400);
+  every save keeps the stored value, and a new row leaves it absent. Formulas see it as an
+  ordinary optional text property. Writing and clearing it belong to step 4.
+- **Normalised names.** `catalogues::names::normalise`: NFKC, full case folding, diacritics
+  removed (NFD, drop `Mn`), whitespace runs collapsed to one space, trimmed. Case folding: a
+  maintained crate if one fits (check `caseless` and alternatives: licence, maintenance,
+  MSRV; record the choice as a dependency decision); else `to_lowercase` with the gap
+  recorded in `limitations.md`. A migration (schema 33) adds
+  `catalogue_entry_names(version_id, entry_type, norm, entry_key)` with an index on
+  `(version_id, norm)`, filled in the seal transaction from Rust; versions sealed before the
+  migration are filled at store open (idempotent, one transaction per version; pre-release
+  data is disposable, so no other backfill). Retired entries are stored with a flag and are
+  never eligible.
+- **Linking on view** (rules 1–2; rules 3–4 are step 4). For each saved row of a list whose
+  name property has the member, with a non-blank name: (1) if the key property holds a key that
+  resolves in the latest sealed version to an eligible entry (type filter, not retired) whose
+  normalised name equals the cell's, link it; (2) otherwise link the single eligible entry with
+  that normalised name; none or several: no link (no warning yet, step 4). One query per list
+  under the existing catalogue read path's rules (readers: the custodian or an active Master;
+  the pin a supported runtime pin linking the catalogue), within `QUERY_BUDGET`; a failure or
+  timeout shows no links and is logged without names.
+- **Display.** The name cell gets a short link to the entry page (new tab), named "<name> in
+  <catalogue title>" through `aria-labelledby` where that keeps markup short. Measure the
+  worst-case page fixtures in `src/campaigns/list_tests.rs` with every row linked; the budget
+  is never enlarged; if it no longer fits, stop and bring the trade-off to the user.
+- **Demo.** A synthetic catalogue `assist-gear` (owner text only: Shield with a numeric rule,
+  Rope, Healing draught with a number, two entries named Sword of different types for step 4),
+  published by `tools/assist_demo.py` and the smoke helper; the assist definition's Equipment
+  name gets the member with a key property `gear_key`.
+- **Tests.** Admission: each refusal code, the omitted member keeps the old hash, the new
+  frozen vector. Store: each of the three sites with an unknown entry type. Names: NFKC,
+  folding (`Straße`/`STRASSE` when full folding is available), diacritics, whitespace,
+  Cf characters. Linking: key resolves and names match → that entry, also when duplicates
+  exist; key resolves but name differs → rule 2; dangling key → rule 2; duplicates without a
+  key → no link; retired and wrong-type entries never linked; a reader without catalogue
+  rights sees no link. Routes: a posted key property → 400, every save keeps it. Browser
+  (`tools/catalogue_browser.py` or the sheet smoke): the link at both viewports, no overflow.
+
+#### 3b Bundles: proposals of up to 4 changes, apply and Undo
+
+- **Proposal model.** `Proposal` becomes 1–4 `Change {address, before, after, expr | enum |
+  bool, refs}` with distinct targets (a duplicate target drops the option; a 5th change drops
+  it too). Targets: integer, enum or boolean addresses, scalars or saved-row cells by host ID,
+  no row adds or removes. An integer change is an expression checked as in 2c (provenance,
+  checked evaluation); an enum change names a declared option ID; a boolean change a value;
+  a change equal to the current value drops the option. Interpretation options stay one
+  integer change on their target; only reminders (3c) produce more.
+- **Freshness binding (D-P).** The content hash and the apply check cover, per option: every
+  change (address, before, after, expression), every reference with its value, and the
+  option's context read set: each list-row name sent with its row's host ID, its remembered
+  key, the catalogue ID, sealed version and entry key of any entry text sent, and every enum
+  value sent. Apply re-reads them all under the permit; any difference is 409 "Something this
+  proposal used has changed: ask again."
+- **Apply.** One revision; one `confirmed` note per change, all with one new bundle number;
+  bound to the origin note inside the `IMMEDIATE` transaction as today; a row that disappeared
+  or a target outside the pin is 409.
+- **Bundle Undo.** Undo on a member whose current note belongs to a bundle with more than one
+  note reverts every member, only if each member's current note is still that bundle's note
+  and still holds its `after`; then one revision with one `reverted` note per member sharing a
+  new bundle number (so Undo of that Undo works the same way). Otherwise nothing is written
+  and the 409 page lists the members that changed. A single-member bundle behaves as today.
+  The Undo offer on a bundle member says "Last change: … (with 2 other fields)".
+- **Tests.** A 4-change bundle in one revision with one bundle number; a 5th change and a
+  duplicate target each drop the option; one member changed → 409; each contextual binding
+  changed with every number unchanged (row name, remembered key, sealed version, enum) →
+  409; bundle Undo all-or-nothing, the 409 list, Undo of the bundle Undo; existing
+  interpretation tests unchanged.
+
+#### 3c Reminders
+
+- **Trigger (D-W).** A save that commits, on a top-level integer field, a note of op `literal`,
+  `sum`, `sign_literal`, `switched` or `confirmed` with known `before` > known `after` (not
+  `reverted`, so an Undo never triggers one). With the assistant on, the JSON save answer
+  carries `unit.reminder.key` (the note key); without JavaScript nothing happens.
+- **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; same order of
+  checks as the interpretation start; 202 `{job, poll}`), polled through the existing job
+  route. Admission: the note must be current; one reminder per account (a newer one supersedes
+  it); reminders take no interpretation slot of the account (the one-live-job rule and D are
+  untouched); at most 8 queued reminders in total, beyond that 429 and the module stays quiet.
+- **Worker priority.** The worker takes a reminder only when no interpretation is queued; an
+  admitted interpretation cancels a running reminder (it ends silently, breaker-neutral).
+  Reminders have their own queue wait (60 s) and the run deadline R; expiries end silently.
+  Generation changes, the breaker and the note hook apply as to interpretations.
+- **Context.** `{"decrease": {id, label, before, after, phrase}, "fields": [{id, label, type,
+  value?}], "rows": [{id: "r<n>", list, name, entry?}]}`: other integer and enum top-level
+  fields; for each list whose name property has the catalogue member, each row's name (quoted
+  data) and, when 3a links it, the entry text (the catalogue page's text rule, `<bdi>`-free
+  plain text, ≤ 2,000 characters, cut at a character boundary; none when the badge is
+  "Description unavailable"). Never text or multiline fields, notes, keys or other properties.
+  Bounds B and N(B): entry texts dropped first (last row first), then rows, then fields; the
+  decrease is never dropped; if it alone exceeds them, no job.
+- **Contract.** `schemas/reminder-v1.json` and its instructions file: a second fixed prefix,
+  pinned by SHA-256 like the interpretation one. Reply `{relevant, row, hint, option}`:
+  `relevant` boolean, `row` one of the request's row IDs or null, `hint` 1–120 characters,
+  `option` null or `{changes: [1–4 of {ref, expr} | {ref, enum} | {ref, bool}], explanation}`
+  with `ref` limited to the request's field IDs (row cells are not targets in v1, so `row`
+  only cites). `relevant: false` ends the job with nothing shown. Priming and calibration stay
+  on the interpretation prefix; the reminder prefix's cost after an interpretation (the slot's
+  cache is per prefix) is measured live in this slice.
+- **Provenance extension.** A reminder literal is allowed when it is a number of the
+  decrease's phrase, the decrease's before or after value or their difference, a change
+  target's current value, a 2, 3, 4 or 100 with a fraction or percent word in the phrase, or a
+  number that appears literally (the 2c lexer) in the entry text of the row the reply cites
+  (`row`), bound by catalogue version and entry key in the read set. A number from another
+  row's entry text drops the option. The option is shown with its source: "from <entry name>:
+  …" with the number's surrounding words (≤ 64 characters) in `<bdi>`.
+- **Display.** Below the decreased field, a `role="status"` box: "Reminder: <hint>" (and the
+  cited row's name), the option as for interpretations (current values, expressions, effects,
+  explanation, source) with Use, and Dismiss, which only hides it in the page. Never blocking;
+  nothing is stored; a reload shows nothing. Use posts the existing apply route.
+- **Eval.** The reminder relevance class (8 synthetic cases) in `tools/assist_eval.py` with
+  unit tests; a live screen on the CPU path (2 threads, allowed in weekday hours) and the GPU
+  path (evening or weekend); results with scope and denominators in `docs/results.md`.
+- **Tests.** A reminder only on a decrease of a top-level integer (not an increase, a row
+  cell, an unknown, an Undo); none with the assistant off; it takes no account slot (an
+  interpretation start right after it is admitted and cancels it); duplicate names without a
+  key → no entry text in the prompt; text and multiline never in the prompt (asserted on the
+  stub request); entry text cut to 2,000; injection in entry text → at most a fully shown
+  option; a number in the cited entry → allowed and shown "from <entry>: …"; a number only in
+  an uncited row's entry → dropped; a number in no source → dropped; `relevant: false` →
+  nothing shown; browser: the hint, Use, Dismiss, both viewports, no CSP violation.
+
+**Deviation from §1.4, for review and the user.** §1.4 says catalogue entry text also joins
+the interpretation context. Interpretations use prompt format D (ASSIST-56: context by ID, no
+values), chosen by measurement; adding names and entry text would change that format without
+a screen. This plan keeps interpretations on D and sends catalogue text only to reminders. If
+the user wants it in interpretations too, it is a later step with its own screen.
 
 ### 4 Suggestions and "Which Sword?"
 
