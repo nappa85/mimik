@@ -107,6 +107,41 @@ fn a_model_swapped_after_the_check_is_still_the_hashed_inode() {
 }
 
 #[test]
+fn hashing_reports_the_bytes_read_and_a_remembered_hash_reports_none() {
+    let (dir, fd) = models();
+    let content = vec![7_u8; (3 << 20) + 5];
+    std::fs::write(dir.path().join("big"), &content).unwrap();
+    let cache = HashCache::default();
+    let (file, stat) = open_file(fd.as_fd(), "big", Owners::Mine).unwrap();
+    let identity = Identity::of(&stat);
+    let seen = std::sync::Mutex::new(Vec::new());
+    let sha256 = cache
+        .hash("k", file.as_fd(), identity, &|| false, &|done, total| {
+            seen.lock().unwrap().push((done, total));
+        })
+        .unwrap();
+    let total = content.len() as u64;
+    assert_eq!(hex::encode(sha256), sha(&content));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            (1 << 20, total),
+            (2 << 20, total),
+            (3 << 20, total),
+            (total, total)
+        ]
+    );
+    // The same identity again: nothing is read, so nothing is reported.
+    seen.lock().unwrap().clear();
+    cache
+        .hash("k", file.as_fd(), identity, &|| false, &|done, total| {
+            seen.lock().unwrap().push((done, total));
+        })
+        .unwrap();
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[test]
 fn a_hash_is_reused_while_the_identity_is_unchanged() {
     let (dir, fd) = models();
     std::fs::write(dir.path().join("a"), b"first").unwrap();
@@ -116,18 +151,30 @@ fn a_hash_is_reused_while_the_identity_is_unchanged() {
     let identity = Identity::of(&stat);
     let (b, _) = open_file(fd.as_fd(), "b", Owners::Mine).unwrap();
     assert_eq!(
-        hex::encode(cache.hash("k", a.as_fd(), identity, &|| false).unwrap()),
+        hex::encode(
+            cache
+                .hash("k", a.as_fd(), identity, &|| false, &|_, _| {})
+                .unwrap()
+        ),
         sha(b"first")
     );
     // Same identity: not re-read (the other descriptor's content is never looked at).
     assert_eq!(
-        hex::encode(cache.hash("k", b.as_fd(), identity, &|| false).unwrap()),
+        hex::encode(
+            cache
+                .hash("k", b.as_fd(), identity, &|| false, &|_, _| {})
+                .unwrap()
+        ),
         sha(b"first")
     );
     let mut changed = identity;
     changed.size += 1;
     assert_eq!(
-        hex::encode(cache.hash("k", b.as_fd(), changed, &|| false).unwrap()),
+        hex::encode(
+            cache
+                .hash("k", b.as_fd(), changed, &|| false, &|_, _| {})
+                .unwrap()
+        ),
         sha(b"second")
     );
 }
@@ -286,7 +333,10 @@ fn a_cancelled_verification_stops_hashing() {
         chunks.set(chunks.get() + 1);
         chunks.get() > 1
     };
-    assert_eq!(hash(file.as_fd(), "big", &stop), Err(Refusal::Cancelled));
+    assert_eq!(
+        hash(file.as_fd(), "big", &stop, &|_, _| {}),
+        Err(Refusal::Cancelled)
+    );
     assert_eq!(chunks.get(), 2);
 }
 
@@ -395,7 +445,7 @@ fn a_model_file_over_8_gib_or_empty_is_refused_before_it_is_hashed() {
         let file = std::fs::File::create(dir.path().join(name)).unwrap();
         file.set_len(size).unwrap();
         assert_eq!(
-            model_digest(fd.as_fd(), name, &cache, &stop).unwrap_err(),
+            model_digest(fd.as_fd(), name, &cache, &stop, &|_, _| {}).unwrap_err(),
             expected,
             "{name}"
         );

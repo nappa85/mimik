@@ -413,6 +413,7 @@ Without it there is no client, no worker, no child and no job route (the three p
 | Model spec, flags and reply-length bounds | `src/assistant/model.rs`, `src/main.rs` |
 | Owner model setting (trial, Switch, reply length, stored choice) | `src/assistant/runtime/manager_model.rs`, `src/assistant/records.rs` ([model-runtime.md](model-runtime.md)) |
 | Model runtime | `src/assistant/runtime/` ([model-runtime.md](model-runtime.md)) |
+| Live progress (steps, status route, script) | `src/assistant/runtime/progress.rs`, `src/auth/assistant_live.rs`, `assets/assistant-live.js`, `templates/assistant_progress.html` ([model-runtime.md](model-runtime.md)) |
 | Development endpoint (tests) | `src/assistant/development.rs` |
 | Context of a job | `src/campaigns/interpret.rs`, read sets in `src/definitions/formula/mod.rs` (`Compiled::read_sets`) |
 | Routes and apply | `src/campaigns/interpret_web.rs` |

@@ -159,7 +159,7 @@ fn sample(timings: Timings, wall_ms: f64, filler_tokens: usize) -> Sample {
 }
 
 /// The two samples and the budgets they derive for replies of up to `max_tokens` (after
-/// [`prime`]).
+/// [`prime`]). `progress` is told which sample (1 or 2) begins.
 ///
 /// # Errors
 ///
@@ -170,11 +170,13 @@ pub(crate) async fn calibrate(
     path: Path,
     max_tokens: u32,
     prefix_tokens: f64,
+    progress: &(dyn Fn(u8) + Sync),
 ) -> Result<Calibration, Interrupted> {
     let cap = path.cap();
     let mut samples = Vec::with_capacity(2);
     let mut density = [0.0; 2];
     for (variant, density) in density.iter_mut().enumerate() {
+        progress(u8::try_from(variant + 1).unwrap_or(u8::MAX));
         let text = filler(cap, variant);
         let tokens = server.tokens(&text).await.map_err(Interrupted::Tokenize)?;
         let started = tokio::time::Instant::now();

@@ -257,7 +257,7 @@ impl Rig {
         let response = router_request(
             &self.app,
             &self.auth[0],
-            "/admin/assistant/downloads.json",
+            "/admin/assistant/status.json",
             None,
         )
         .await;
@@ -871,13 +871,8 @@ async fn every_download_action_is_owner_only_csrf_checked_strict_and_bounded() {
         );
     }
     // The state for polling is owner only too, and a GET is not an action.
-    let response = router_request(
-        &rig.app,
-        &rig.auth[1],
-        "/admin/assistant/downloads.json",
-        None,
-    )
-    .await;
+    let response =
+        router_request(&rig.app, &rig.auth[1], "/admin/assistant/status.json", None).await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     for (path, _) in &actions {
         let response = router_request(&rig.app, &rig.auth[0], path, None).await;

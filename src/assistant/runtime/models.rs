@@ -2,6 +2,7 @@
 //! generation runs, the trial that measures a candidate, and what the page shows of both.
 use super::Path;
 use super::calibration::Calibration;
+use super::progress::Phase;
 use crate::assistant::jobs::Budgets;
 use std::time::Duration;
 
@@ -181,7 +182,7 @@ pub(crate) enum TrialState {
     Running {
         number: u64,
         spec: String,
-        phase: &'static str,
+        phase: Phase,
     },
     Passed(Box<TrialReport>),
     Failed {

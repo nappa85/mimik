@@ -17,7 +17,7 @@ non-loopback URL.
 | Files: safe open, publish, fault points | `src/assistant/download/disk.rs` |
 | Task, reconciliation | `src/assistant/download/task.rs` |
 | Rows (trait) and the database rows | `src/assistant/download/rows.rs`, `src/assistant/download_rows.rs`, `migrations/023_assistant_downloads.sql` |
-| Wiring, routes, panel | `src/assistant/downloads.rs`, `src/auth/assistant_downloads.rs`, `src/auth/assistant_downloads_view.rs`, `templates/admin_assistant.html`, `assets/assistant-downloads.js` |
+| Wiring, routes, panel | `src/assistant/downloads.rs`, `src/auth/assistant_downloads.rs`, `src/auth/assistant_downloads_view.rs`, `src/auth/assistant_live.rs`, `templates/admin_assistant.html`, `assets/assistant-live.js` |
 | Test servers | `src/assistant/download/fake_hub.rs`, `fake_proxy.rs` |
 
 ## Spec and storage
@@ -133,8 +133,11 @@ download; a different file under the name is never replaced.
 
 Owner only, CSRF-checked, strict forms of at most 4 KiB: `POST /admin/assistant/model/review`,
 `/admin/assistant/download/{confirm,cancel,resume,discard,repair}`, `/admin/assistant/model/delete`;
-`GET /admin/assistant/downloads.json` (state for polling: no URL). Discard deletes the
-partial and the row, so a new download needs a fresh review. Download ids are never reused
+the downloads' state for polling (no URL) is part of `GET /admin/assistant/status.json`, the
+one status route and script of the whole page ([model-runtime.md](model-runtime.md), "Live
+progress"): `review`, `download` (id, phase, bytes received and total) and `rows`; the review
+and download phases feed the page's signature and the 2,000 ms poll interval. Discard deletes
+the partial and the row, so a new download needs a fresh review. Download ids are never reused
 (`AUTOINCREMENT`), so a stale page's Cancel or Discard cannot reach a later download. Cancel
 is acknowledged once the task has matched the running download (a stale id, an idle task or a
 finished download does not match); the task is the only writer of the status. A refused

@@ -30,6 +30,7 @@ use super::models::{
     DeviceDefault, Measurement, Model, ModelFile, ModelStatus, NineB, OlderPrompt, TrialKey,
     TrialReport, TrialState, default_model, gpu_default_name, trial_bound,
 };
+use super::progress::{Kind, Memory, Observer, Phase, Progress, Qualifier, Reporter};
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
 use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
@@ -143,6 +144,10 @@ pub(crate) trait Launcher: Send + Sync {
     async fn model_present(&self, _name: &str) -> bool {
         true
     }
+    /// Registers where the launcher reports a start's verification of the model file (and a
+    /// trial's hashing of it): the manager's own reporter. A launcher that reports nothing
+    /// ignores it.
+    fn observe(&self, _observer: Observer) {}
     /// Hashes the model file `name` in the models folder (the trial records the hash it
     /// then expects at every load). A launcher that starts nothing cannot.
     async fn hash_model(&self, _name: &str) -> Result<ModelFile, String> {
@@ -157,9 +162,20 @@ pub(crate) const MODEL_CHANGED: &str = "the model file changed";
 /// The runtime's state as the page shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum State {
-    Starting(&'static str),
+    /// Working towards `ready`: the step and what its time shows.
+    Starting(Progress),
     Ready,
     Unavailable(String),
+}
+
+impl State {
+    /// The progress of work under way, when the runtime is starting.
+    pub(crate) fn starting(&self) -> Option<&Progress> {
+        match self {
+            Self::Starting(progress) => Some(progress),
+            _ => None,
+        }
+    }
 }
 
 /// Everything the assistant page shows of the runtime.
@@ -195,6 +211,19 @@ pub(crate) struct Status {
 }
 
 impl Status {
+    /// A model server that is ready is being stopped for the owner's request: the page shows
+    /// the stop at once, as the first step of the list the session then walks.
+    fn stopping(&mut self) {
+        if self.state == State::Ready {
+            self.state = State::Starting(Progress::new(
+                Kind::Fresh { stopping: true },
+                Phase::Stopping,
+                None,
+                Vec::new(),
+            ));
+        }
+    }
+
     /// Why the owner can retry the GPU path or its default model file.
     pub(crate) fn gpu_retry_note(&self) -> Option<&str> {
         if !self.gpu_wanted {
@@ -233,7 +262,12 @@ impl Status {
             gpu_note: None,
             device: None,
             device_notes: Vec::new(),
-            state: State::Starting("checking"),
+            state: State::Starting(Progress::new(
+                Kind::Fresh { stopping: false },
+                Phase::Checking,
+                None,
+                Vec::new(),
+            )),
             path,
             level: None,
             skipped: Vec::new(),
@@ -464,6 +498,7 @@ impl Handle {
             return Restart::AlreadyRunning;
         }
         status.restarting = true;
+        status.stopping();
         drop(status);
         let _ = self.commands.send(Command::Restart { gpu: false });
         Restart::Accepted
@@ -483,6 +518,7 @@ impl Handle {
             return TryGpu::NotApplicable;
         }
         status.restarting = true;
+        status.stopping();
         drop(status);
         let _ = self.commands.send(Command::Restart { gpu: true });
         TryGpu::Accepted
@@ -508,8 +544,14 @@ impl Handle {
         status.trial = Some(TrialState::Running {
             number,
             spec: spec.clone(),
-            phase: "waiting for the model server to stop",
+            phase: Phase::WaitingStop,
         });
+        status.state = State::Starting(Progress::new(
+            Kind::Trial,
+            Phase::WaitingStop,
+            None,
+            Vec::new(),
+        ));
         drop(status);
         let _ = self
             .commands
@@ -555,6 +597,7 @@ impl Handle {
         status.model.note = None;
         status.model.pending = true;
         status.restarting = true;
+        status.stopping();
         drop(status);
         let _ = self.commands.send(Command::Model(ModelCommand::Switch {
             key: key.clone(),
@@ -578,6 +621,7 @@ impl Handle {
         status.model.note = None;
         status.model.pending = true;
         status.restarting = true;
+        status.stopping();
         drop(status);
         let _ = self
             .commands
@@ -603,7 +647,7 @@ impl Handle {
             // Nothing to store into: the model setting is not supported here.
             return SetLength::Unsupported;
         };
-        let sha256 = {
+        let (sha256, before) = {
             let mut status = self.lock();
             if !status.model.switchable || status.trial.as_ref().is_some_and(TrialState::running) {
                 return SetLength::Busy;
@@ -620,7 +664,9 @@ impl Handle {
             status.model.note = None;
             status.model.pending = true;
             status.restarting = true;
-            status.model.active.sha256.clone()
+            let before = status.state.clone();
+            status.stopping();
+            (status.model.active.sha256.clone(), before)
         };
         let stored = match records.length(&sha256).await {
             Ok(from) => records
@@ -643,6 +689,10 @@ impl Handle {
                 let mut status = self.lock();
                 status.model.pending = false;
                 status.restarting = false;
+                // Nothing was stopped: the server runs as before.
+                if matches!(&status.state, State::Starting(p) if p.phase == Phase::Stopping) {
+                    status.state = before;
+                }
                 status.model.note = Some(format!("{why}; the current setting stays"));
                 SetLength::NotStored
             }
@@ -795,6 +845,9 @@ pub(crate) fn spawn_with(
     models: ModelSetup,
 ) -> Handle {
     let status = Arc::new(Mutex::new(Status::new(config.path, &models)));
+    let reporter = Reporter(Arc::clone(&status));
+    let observer = reporter.clone();
+    launcher.observe(Arc::new(move |event| observer.event(event)));
     let records = models.records.clone();
     let (commands, incoming) = mpsc::unbounded_channel();
     let (signal_sender, signals) = mpsc::unbounded_channel();
@@ -820,6 +873,10 @@ pub(crate) fn spawn_with(
         cancel: Arc::clone(&cancel),
         trial: 0,
         length_change: None,
+        reporter,
+        memory: Memory::default(),
+        qualifier: None,
+        child_ran: false,
     };
     tokio::spawn(manager.run());
     Handle {
@@ -943,6 +1000,15 @@ struct Manager {
     /// Whether `/health` answered in the current attempt: from then on a failure (priming,
     /// calibration, the offload check) is not a library that failed to load.
     health_answered: Arc<AtomicBool>,
+    /// Writes the steps into the status.
+    reporter: Reporter,
+    /// How long each step took in the last successful run, by file, path and kind.
+    memory: Memory,
+    /// Why the next session's list is walked (a reply length that went back).
+    qualifier: Option<Qualifier>,
+    /// A model server was started by the work that is ending (and stopped, or being stopped,
+    /// by it): the next session's list has the stop step only then.
+    child_ran: bool,
 }
 
 impl Manager {
@@ -1037,6 +1103,7 @@ impl Manager {
 
     /// Unavailable with `why` until the owner's Restart or shutdown.
     async fn hold(&mut self, why: String) -> Next {
+        self.child_ran = false;
         self.length_change = None;
         self.unavailable(why);
         match self.wait(None).await {
@@ -1109,8 +1176,12 @@ impl Manager {
         }
     }
 
-    /// A new generation at `level`.
-    fn begin(&mut self, level: Level) -> u64 {
+    /// A new generation at `level`. `first`: the session's first attempt, which goes on with
+    /// the list it began (a fresh session's, a trial's); any later attempt walks the retry
+    /// list, labelled with the counted attempt it is.
+    fn begin(&mut self, level: Level, first: bool) -> u64 {
+        // The earlier attempt's child, if any, is gone.
+        self.child_ran = false;
         self.generation += 1;
         let generation = self.generation;
         log(&format!(
@@ -1119,12 +1190,32 @@ impl Manager {
         ));
         self.assistant
             .event(RuntimeEvent::GenerationStarted { generation });
+        let path = self.status().path;
+        // Only counted failures make an attempt a numbered one.
+        let attempt = (self.failures > 0).then(|| Qualifier::Attempt(self.failures + 1));
         self.update(|status| {
-            status.state = State::Starting("starting the model server");
             status.level = Some(level);
             status.generation = generation;
             status.notes.clear();
             status.landlock = None;
+            match &mut status.state {
+                // The trial's own steps are set as it goes.
+                State::Starting(progress) if progress.kind == Kind::Trial => {}
+                State::Starting(progress)
+                    if first && matches!(progress.kind, Kind::Fresh { .. }) =>
+                {
+                    progress.enter(Phase::StartingServer);
+                }
+                state => {
+                    let reference = self.memory.recall(&self.active.sha256, path, Kind::Retry);
+                    *state = State::Starting(Progress::new(
+                        Kind::Retry,
+                        Phase::StartingServer,
+                        attempt,
+                        reference,
+                    ));
+                }
+            }
         });
         generation
     }
@@ -1214,8 +1305,8 @@ impl Manager {
         self.gpu_failed = Some(why.clone());
         self.update(|status| {
             status.gpu_note = Some(why);
-            // The GPU child's state is over: the CPU server starts now.
-            status.state = State::Starting("checking");
+            // The GPU child's state is over: the CPU server starts now (the session sets
+            // the steps once the model is chosen).
             status.path = Path::Cpu;
             status.device = None;
             status.device_notes.clear();
@@ -1223,20 +1314,93 @@ impl Manager {
         });
     }
 
+    /// The steps of the session about to start, set before anything of it runs (the wait for
+    /// the earlier work to settle included). The list has the stop step when a model server
+    /// may have run (the owner stopped a ready or starting one, or a trial just ended) and
+    /// not otherwise; a session with a reason of its own (the CPU after a GPU failure, a
+    /// reverted length) follows a stop that already ended and has none.
+    fn session_steps(&mut self, path: Path) {
+        let qualifier = self.qualifier.take();
+        let ran = std::mem::take(&mut self.child_ran);
+        let stopping = qualifier.is_none()
+            && {
+                let status = self
+                    .status
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // A child ran (a start that failed before it spawned stopped nothing), or the
+                // stop of a ready one was already announced.
+                ran || matches!(
+                    &status.state,
+                    State::Starting(p) if p.kind == (Kind::Fresh { stopping: true }) && p.phase == Phase::Stopping
+                )
+            };
+        let kind = Kind::Fresh { stopping };
+        let reference = self.memory.recall(&self.active.sha256, path, kind);
+        self.update(|status| match &mut status.state {
+            // The stop `stopping()` showed goes on: same start, same list.
+            State::Starting(progress)
+                if stopping && progress.kind == kind && progress.phase == Phase::Stopping =>
+            {
+                progress.qualifier = None;
+                progress.set_reference(reference);
+            }
+            state => {
+                let phase = if stopping {
+                    Phase::Stopping
+                } else {
+                    Phase::Checking
+                };
+                *state = State::Starting(Progress::new(kind, phase, qualifier, reference));
+            }
+        });
+    }
+
+    /// The model the session runs is chosen: the last time's steps are those of its file.
+    fn refresh_reference(&self, path: Path) {
+        self.update(|status| {
+            if let State::Starting(progress) = &mut status.state {
+                let reference = self.memory.recall(&self.active.sha256, path, progress.kind);
+                progress.set_reference(reference);
+            }
+        });
+    }
+
+    /// A start or a model server is being stopped for the owner's command: the page says so
+    /// at once.
+    fn mark_stopping(&self) {
+        self.update(|status| {
+            if let State::Starting(progress) = &status.state
+                && matches!(progress.kind, Kind::Fresh { .. } | Kind::Retry)
+                && !matches!(progress.phase, Phase::Checking | Phase::Stopping)
+            {
+                status.state = State::Starting(Progress::new(
+                    Kind::Fresh { stopping: true },
+                    Phase::Stopping,
+                    None,
+                    Vec::new(),
+                ));
+            }
+        });
+    }
+
     /// One start from level 1 until the owner's Restart (or shutdown) ends it: the GPU path
     /// first when it is wanted and has not failed, the CPU path after a GPU failure.
     async fn session(&mut self, reset_breaker: bool) -> Next {
+        let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
+        let first_path = if gpu { Path::Gpu } else { Path::Cpu };
+        self.session_steps(first_path);
         // Nothing of an earlier session (a child's watcher, a cancelled probe) runs beside it.
         self.launcher.settle().await;
-        let gpu = self.config.path == Path::Gpu && self.gpu_failed.is_none();
+        self.reporter.phase(Phase::Checking);
         self.select_model(gpu).await;
+        self.refresh_reference(first_path);
         self.failures = 0;
         if reset_breaker {
             self.assistant.reset_breaker();
         }
         let note = self.gpu_failed.clone();
         self.update(|status| {
-            status.state = State::Starting("checking");
             status.skipped.clear();
             status.failures = 0;
             status.last_failure = None;
@@ -1247,7 +1411,7 @@ impl Manager {
         if let Err(next) = self.preflight().await {
             return next;
         }
-        let mut path = if gpu { Path::Gpu } else { Path::Cpu };
+        let mut path = first_path;
         loop {
             let levels = match self.levels(path).await {
                 Ok(levels) => levels,
@@ -1257,8 +1421,12 @@ impl Manager {
                 PathEnd::Next(next) => return next,
                 PathEnd::GpuFailed(why) => {
                     self.gpu_fallback(why);
+                    // The steps first: choosing the model may wait on the records.
+                    self.qualifier = Some(Qualifier::GpuFallback);
+                    self.session_steps(Path::Cpu);
                     // The device default is the CPU's now (Granite), not the 9B that failed.
                     self.select_model(false).await;
+                    self.refresh_reference(Path::Cpu);
                     path = Path::Cpu;
                 }
             }
@@ -1270,6 +1438,7 @@ impl Manager {
     async fn on_path(&mut self, path: Path, levels: &[Level]) -> PathEnd {
         let gpu = path == Path::Gpu;
         let mut index = 0;
+        let mut first = true;
         loop {
             if self.failures >= MAX_FAILURES {
                 let last = self.status().last_failure.unwrap_or_default();
@@ -1293,7 +1462,8 @@ impl Manager {
                 let why = self.no_level();
                 return PathEnd::Next(self.hold(why).await);
             };
-            let generation = self.begin(level);
+            let generation = self.begin(level, first);
+            first = false;
             let attempt = self.attempt(generation, level, path).await;
             let attempt = match self.revert_length(generation, attempt).await {
                 Ok(attempt) => attempt,
@@ -1341,16 +1511,10 @@ impl Manager {
                     self.ended(generation, EndReason::Exited);
                     let why = self.hinted(path, why);
                     self.failed(why);
-                    if self.failures < MAX_FAILURES {
-                        self.update(|status| {
-                            status.state = State::Starting("waiting to retry");
-                        });
-                        match self.wait(Some(RETRY_AFTER)).await {
-                            Wake::Timer => {}
-                            Wake::Restart { gpu } => return PathEnd::Next(Next::Fresh { gpu }),
-                            Wake::Model(command) => return PathEnd::Next(Next::Model(command)),
-                            Wake::Shutdown(reply) => return PathEnd::Next(Next::Stop(reply)),
-                        }
+                    if self.failures < MAX_FAILURES
+                        && let Some(next) = self.wait_to_retry().await
+                    {
+                        return PathEnd::Next(next);
                     }
                 }
                 Attempt::TooSlow(why) => return PathEnd::Next(self.hold(why).await),
@@ -1367,6 +1531,28 @@ impl Manager {
                     return PathEnd::Next(Next::from(command));
                 }
             }
+        }
+    }
+
+    /// Waits [`RETRY_AFTER`] for the next counted attempt, shown as its own step with the
+    /// exact time left; `Some` when the owner's command (or shutdown) ends the wait instead.
+    async fn wait_to_retry(&mut self) -> Option<Next> {
+        // The failed attempt's child is long gone when the owner acts.
+        self.child_ran = false;
+        let next = Qualifier::Attempt(self.failures + 1);
+        self.update(|status| {
+            status.state = State::Starting(Progress::new(
+                Kind::Waiting,
+                Phase::WaitingRetry,
+                Some(next),
+                Vec::new(),
+            ));
+        });
+        match self.wait(Some(RETRY_AFTER)).await {
+            Wake::Timer => None,
+            Wake::Restart { gpu } => Some(Next::Fresh { gpu }),
+            Wake::Model(command) => Some(Next::Model(command)),
+            Wake::Shutdown(reply) => Some(Next::Stop(reply)),
         }
     }
 
@@ -1406,6 +1592,7 @@ impl Manager {
         }
         let why = why.clone();
         self.ended(generation, EndReason::Exited);
+        self.qualifier = Some(Qualifier::EarlierLength);
         let Some(records) = self.records.clone() else {
             return Err(Next::Again);
         };
@@ -1507,6 +1694,7 @@ impl Manager {
             started = launcher.start(generation, level, path) => started,
             command = self.commands.recv() => match command {
                 Some(command) => {
+                    // Nothing was spawned yet: only the start is being stopped.
                     self.launcher.cancel();
                     self.launcher.settle().await;
                     return Attempt::Interrupted(command);
@@ -1518,12 +1706,13 @@ impl Manager {
             Ok(child) => child,
             Err(fail) => return Attempt::Failed(fail),
         };
+        self.child_ran = true;
         let measured = {
             let measure = measure(
                 &child,
                 path,
                 self.active.max_tokens,
-                &self.status,
+                &self.reporter,
                 &self.health_answered,
             );
             tokio::select! {
@@ -1531,6 +1720,7 @@ impl Manager {
                 fail = child.exited() => Some(Err(Attempt::Failed(fail))),
                 command = self.commands.recv() => match command {
                     Some(command) => {
+                        self.mark_stopping();
                         child.stop().await;
                         return Attempt::Interrupted(command);
                     }
@@ -1578,15 +1768,41 @@ impl Manager {
             )),
             measured(&calibration, Some(&budgets))
         ));
+        // How long each step took is kept for the same file, path and kind next time (a
+        // failed attempt's partial times never reach here).
+        let (path, finished) = {
+            let status = self.status();
+            let finished = match &status.state {
+                State::Starting(progress)
+                    if matches!(progress.kind, Kind::Fresh { .. } | Kind::Retry) =>
+                {
+                    Some((progress.kind, progress.finished()))
+                }
+                _ => None,
+            };
+            (status.path, finished)
+        };
+        if let Some((kind, steps)) = finished {
+            let sha256 = self.active.sha256.clone();
+            self.memory.keep(&sha256, path, kind, steps);
+        }
+        // An owner command already waiting ends this generation at once: the state stays
+        // as it is (the stop or the trial it shows) rather than flip to ready and back.
+        let command_waiting = !self.commands.is_empty();
         self.update(|status| {
-            status.state = State::Ready;
-            // A Restart ends here or at `unavailable`: a press meanwhile starts nothing.
-            status.restarting = false;
+            if !command_waiting {
+                status.state = State::Ready;
+                // A Restart ends here or at `unavailable`: a press meanwhile starts nothing.
+                status.restarting = false;
+            }
             status.calibration = Some(calibration);
             status.budgets = Some(budgets);
             status.notes = notes;
             status.landlock = landlock;
         });
+        if command_waiting {
+            self.mark_stopping();
+        }
         let ready_at = Instant::now();
         let mut reset_pending = true;
         let mut expiries = 0;
@@ -1668,12 +1884,22 @@ async fn healthy(child: &Arc<dyn Child>) -> Result<(), Attempt> {
 /// tokens and how long priming took.
 async fn warm(
     child: &Arc<dyn Child>,
-    phase: &(dyn Fn(&'static str) + Sync),
+    reporter: &Reporter,
     health_answered: &AtomicBool,
+    path: Path,
 ) -> Result<(f64, Duration), Attempt> {
     let server = child.server();
     let began = Instant::now();
-    phase("loading the model");
+    // `/health`, then what `loaded()` allows the child: its readers to settle and, on the GPU
+    // path, the offload line.
+    let loading = HEALTH_WITHIN
+        + super::launch::READERS_WITHIN
+        + if path == Path::Gpu {
+            super::launch::OFFLOAD_WITHIN
+        } else {
+            Duration::ZERO
+        };
+    reporter.phase_within(Phase::Loading, loading);
     healthy(child).await?;
     health_answered.store(true, Ordering::SeqCst);
     log(&format!(
@@ -1684,7 +1910,7 @@ async fn warm(
         .loaded()
         .await
         .map_err(|why| Attempt::Failed(Fail::Other(why)))?;
-    phase("priming");
+    reporter.phase(Phase::Priming);
     let priming = Instant::now();
     let prefix =
         match tokio::time::timeout(PRIMING_WITHIN, calibration::prime(server.as_ref())).await {
@@ -1729,13 +1955,14 @@ async fn calibrate_budgets(
     path: Path,
     max_tokens: u32,
     prefix: f64,
+    progress: &(dyn Fn(u8) + Sync),
 ) -> Result<(Calibration, Budgets), NotCalibrated> {
     // Each sample is held to its timeout; this bounds the whole (two samples, two
     // `/tokenize` calls).
     let within = Duration::from_secs(2 * budgets::SAMPLE_TIMEOUT_S + 60);
     let calibration = match tokio::time::timeout(
         within,
-        calibration::calibrate(server, path, max_tokens, prefix),
+        calibration::calibrate(server, path, max_tokens, prefix, progress),
     )
     .await
     {
@@ -1798,18 +2025,13 @@ async fn measure(
     child: &Arc<dyn Child>,
     path: Path,
     max_tokens: u32,
-    status: &Arc<Mutex<Status>>,
+    reporter: &Reporter,
     health_answered: &AtomicBool,
 ) -> Result<(Calibration, Budgets), Attempt> {
-    let phase = |phase: &'static str| {
-        status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .state = State::Starting(phase);
-    };
-    let (prefix, _) = warm(child, &phase, health_answered).await?;
-    phase("calibrating");
-    match calibrate_budgets(child.server().as_ref(), path, max_tokens, prefix).await {
+    let status = &reporter.0;
+    let (prefix, _) = warm(child, reporter, health_answered, path).await?;
+    let sample = |n: u8| reporter.phase(Phase::Sample(n));
+    match calibrate_budgets(child.server().as_ref(), path, max_tokens, prefix, &sample).await {
         Ok(measured) => Ok(measured),
         Err(NotCalibrated::TooSlow(why, calibration)) => {
             if let Some(calibration) = calibration {
@@ -1845,3 +2067,7 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "manager_default_tests.rs"]
 mod default_tests;
+
+#[cfg(test)]
+#[path = "manager_progress_tests.rs"]
+mod progress_tests;

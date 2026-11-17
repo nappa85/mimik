@@ -305,7 +305,7 @@ class Live:
         return Panel(self.get(PANEL))
 
     def state(self):
-        state = json.loads(self.get(PANEL + "/downloads.json"))
+        state = json.loads(self.get(PANEL + "/status.json"))
         require(
             state.get("available") is True and "error" not in state,
             "Downloads unavailable or records unreadable",

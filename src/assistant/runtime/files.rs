@@ -253,15 +253,19 @@ pub(crate) fn open_file(
 
 /// SHA-256 of a descriptor's content, read by offset from 0 (the descriptor's own offset is
 /// left alone).
+///
+/// `progress` is told the bytes read so far and the file's size after every MiB.
 pub(crate) fn hash(
     fd: BorrowedFd<'_>,
     name: &str,
     stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<[u8; 32], Refusal> {
     let file = File::from(
         fd.try_clone_to_owned()
             .map_err(|_| Refusal::Io(name.to_owned()))?,
     );
+    let total = file.metadata().map_or(0, |metadata| metadata.len());
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 1 << 20];
     let mut offset = 0_u64;
@@ -278,6 +282,7 @@ pub(crate) fn hash(
         }
         hasher.update(&buffer[..read]);
         offset += read as u64;
+        progress(offset, total);
     }
     Ok(hasher.finalize().into())
 }
@@ -296,6 +301,7 @@ impl HashCache {
         fd: BorrowedFd<'_>,
         identity: Identity,
         stop: &dyn Fn() -> bool,
+        progress: &dyn Fn(u64, u64),
     ) -> Result<[u8; 32], Refusal> {
         let mut known = self
             .known
@@ -306,7 +312,7 @@ impl HashCache {
         {
             return Ok(*sha);
         }
-        let sha = hash(fd, key, stop)?;
+        let sha = hash(fd, key, stop, progress)?;
         known.insert(key.to_owned(), (identity, sha));
         Ok(sha)
     }
@@ -319,10 +325,11 @@ fn verified(
     cache: &HashCache,
     key: &str,
     stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<Verified, Refusal> {
     let (fd, stat) = open_file(dir, name, owners)?;
     let identity = Identity::of(&stat);
-    let sha256 = cache.hash(key, fd.as_fd(), identity, stop)?;
+    let sha256 = cache.hash(key, fd.as_fd(), identity, stop, progress)?;
     Ok(Verified {
         name: name.to_owned(),
         fd,
@@ -339,6 +346,7 @@ pub(crate) fn model_digest(
     name: &str,
     cache: &HashCache,
     stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<([u8; 32], u64), Refusal> {
     let (fd, stat) = open_file(models, name, Owners::Mine)?;
     let identity = Identity::of(&stat);
@@ -346,7 +354,13 @@ pub(crate) fn model_digest(
     if identity.size == 0 || identity.size > crate::assistant::model::MAX_MODEL_BYTES {
         return Err(Refusal::Size(name.to_owned()));
     }
-    let sha256 = cache.hash(&format!("model/{name}"), fd.as_fd(), identity, stop)?;
+    let sha256 = cache.hash(
+        &format!("model/{name}"),
+        fd.as_fd(),
+        identity,
+        stop,
+        progress,
+    )?;
     Ok((sha256, identity.size))
 }
 
@@ -359,7 +373,7 @@ pub(crate) fn model(
     sha256: &str,
     cache: &HashCache,
 ) -> Result<Verified, Refusal> {
-    model_until(models, name, sha256, cache, &|| false)
+    model_until(models, name, sha256, cache, &|| false, &|_, _| {})
 }
 
 /// [`model`], stopping once `stop` says so.
@@ -369,6 +383,7 @@ pub(crate) fn model_until(
     sha256: &str,
     cache: &HashCache,
     stop: &dyn Fn() -> bool,
+    progress: &dyn Fn(u64, u64),
 ) -> Result<Verified, Refusal> {
     let file = verified(
         models,
@@ -377,6 +392,7 @@ pub(crate) fn model_until(
         cache,
         &format!("model/{name}"),
         stop,
+        progress,
     )?;
     if hex::encode(file.sha256) != sha256 {
         return Err(Refusal::Changed(name.to_owned()));
@@ -432,6 +448,7 @@ pub(crate) fn runtime_until(
             cache,
             &key,
             stop,
+            &|_, _| {},
         )?;
         if opened.identity.size != file.size || hex::encode(opened.sha256) != file.sha256 {
             return Err(Refusal::Changed(file.name.clone()));

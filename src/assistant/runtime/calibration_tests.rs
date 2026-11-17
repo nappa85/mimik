@@ -135,7 +135,9 @@ async fn calibration_sends_two_64_token_fillers_with_ignore_eos_and_derives_budg
         timings(170.0 + 293.0, 1290.0, 64.0),
         timings(170.0 + 280.0, 1290.0, 64.0),
     ];
-    let calibration = calibrate(&server, Path::Cpu, 192, 1460.0).await.unwrap();
+    let calibration = calibrate(&server, Path::Cpu, 192, 1460.0, &|_| {})
+        .await
+        .unwrap();
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     for (variant, (user, max_tokens, ignore_eos)) in requests.iter().enumerate() {
@@ -169,7 +171,7 @@ async fn the_estimate_is_g_times_the_owners_slowed_reply_length_not_the_samples_
             timings(170.0 + 293.0, 1290.0, 64.0),
             timings(170.0 + 280.0, 1290.0, 64.0),
         ];
-        let calibration = calibrate(&server, Path::Cpu, max_tokens, 1460.0)
+        let calibration = calibrate(&server, Path::Cpu, max_tokens, 1460.0, &|_| {})
             .await
             .unwrap();
         calibration.derived.unwrap()
@@ -192,7 +194,9 @@ async fn a_sample_over_480_s_stops_the_calibration_as_too_slow() {
     *server.samples.lock().unwrap() = vec![timings(463.0, 1290.0, 64.0)];
     let began = tokio::time::Instant::now();
     assert_eq!(
-        calibrate(&server, Path::Cpu, 1024, 1460.0).await.err(),
+        calibrate(&server, Path::Cpu, 1024, 1460.0, &|_| {})
+            .await
+            .err(),
         Some(Interrupted::SampleTimedOut { limit_s: 480 })
     );
     // The first sample alone is abandoned at its timeout; the second never starts.
@@ -209,7 +213,11 @@ async fn a_sample_over_480_s_stops_the_calibration_as_too_slow() {
     };
     *server.samples.lock().unwrap() =
         vec![timings(463.0, 1290.0, 64.0), timings(463.0, 1290.0, 64.0)];
-    assert!(calibrate(&server, Path::Cpu, 1024, 1460.0).await.is_ok());
+    assert!(
+        calibrate(&server, Path::Cpu, 1024, 1460.0, &|_| {})
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -218,12 +226,16 @@ async fn a_missing_timing_or_a_short_generation_derives_no_budgets() {
     let mut missing = timings(463.0, 1290.0, 64.0);
     missing.prompt_ms = None;
     *server.samples.lock().unwrap() = vec![timings(463.0, 1290.0, 64.0), missing];
-    let calibration = calibrate(&server, Path::Cpu, 192, 1460.0).await.unwrap();
+    let calibration = calibrate(&server, Path::Cpu, 192, 1460.0, &|_| {})
+        .await
+        .unwrap();
     assert!(matches!(calibration.derived, Err(NoBudgets::Invalid(_))));
     let server = Scripted::default();
     *server.samples.lock().unwrap() =
         vec![timings(463.0, 1290.0, 64.0), timings(463.0, 1290.0, 100.0)];
-    let calibration = calibrate(&server, Path::Cpu, 192, 1460.0).await.unwrap();
+    let calibration = calibrate(&server, Path::Cpu, 192, 1460.0, &|_| {})
+        .await
+        .unwrap();
     assert!(matches!(calibration.derived, Err(NoBudgets::Invalid(_))));
 }
 
@@ -246,4 +258,21 @@ fn no_filler_or_priming_envelope_carries_sheet_text() {
         }
     }
     assert!(priming_envelope().contains(r#""note":"took 1 damage""#));
+}
+
+#[tokio::test]
+async fn calibration_reports_each_sample_before_it_runs() {
+    let server = Scripted::default();
+    *server.token_counts.lock().unwrap() = vec![293, 280];
+    *server.samples.lock().unwrap() = vec![
+        timings(170.0 + 293.0, 1290.0, 64.0),
+        timings(170.0 + 280.0, 1290.0, 64.0),
+    ];
+    let seen = std::sync::Mutex::new(Vec::new());
+    calibrate(&server, Path::Cpu, 1024, 1460.0, &|n| {
+        seen.lock().unwrap().push(n);
+    })
+    .await
+    .unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
 }

@@ -52,6 +52,7 @@ pub(super) fn routes() -> Router<AuthState> {
             post(set_length).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
         )
         .merge(super::assistant_downloads::routes())
+        .merge(super::assistant_live::routes())
 }
 
 /// The model forms are a CSRF token and at most a 512-byte spec or a trial key of 100
@@ -114,7 +115,7 @@ impl Notice {
                 "Nothing to try: the GPU is in use, or the CPU was chosen with --assistant-device cpu."
             }
             Self::TryingModel => {
-                "Trying the model: the current model server stopped, so the assistant is starting until the trial ends. Reload this page to follow it."
+                "Trying the model: the current model server stopped, so the assistant is starting until the trial ends. This page updates itself; without JavaScript, reload it to follow the trial."
             }
             Self::TrialRunning => "A trial is already running; nothing else was started.",
             Self::ModelUnsupported => {
@@ -281,6 +282,8 @@ struct View {
     budgets: Option<BudgetsView>,
     calibration: Option<CalibrationView>,
     model: ModelView,
+    /// The running work's step, when the runtime is starting.
+    progress: Option<super::assistant_live::ProgressView>,
 }
 
 /// The Model section: the active and previous model, the latest trial and the field.
@@ -297,6 +300,8 @@ struct ModelView {
     /// The active model's measurement predates the current prompt (ASSIST-56).
     older_prompt: bool,
     trial: Option<TrialView>,
+    /// A trial is running: the progress block sits in its section.
+    trial_running: bool,
     /// The "Longest reply" setting of the active model.
     length: LengthView,
     /// The field's content: the refused input is kept.
@@ -476,7 +481,7 @@ fn trial_view(trial: TrialState) -> TrialView {
             number,
             spec,
             running: true,
-            detail: phase.to_owned(),
+            detail: phase.label(),
             outcome: "running",
             report: None,
         },
@@ -548,8 +553,10 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
     } else {
         (None, retry_note)
     };
+    let progress = super::assistant_live::progress(&status);
+    let trial_running = status.trial.as_ref().is_some_and(TrialState::running);
     let (state, reason) = match status.state {
-        Runtime::Starting(phase) => ("Starting", phase.to_owned()),
+        Runtime::Starting(progress) => ("Starting", progress.phase.label()),
         Runtime::Ready => ("Ready", String::new()),
         Runtime::Unavailable(why) => ("Unavailable", why),
     };
@@ -570,11 +577,13 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
         default_note: status.model.device_default.note().map(str::to_owned),
         older_prompt: status.model.older_prompt.is_older(),
         trial: status.trial.map(trial_view),
+        trial_running,
         input,
         error,
     };
     View {
         model,
+        progress,
         llama: format!(
             "llama.cpp {} (commit {})",
             pinned.tag,
@@ -645,6 +654,8 @@ struct Page {
     notice: &'static str,
     view: Option<View>,
     downloads: Option<super::assistant_downloads_view::DownloadsView>,
+    /// The signature and poll interval the script starts from.
+    live: Option<super::assistant_live::Live>,
 }
 
 /// The page, with the Model field holding `input` and `error` beside it when it was refused.
@@ -656,10 +667,17 @@ async fn render(
     error: Option<String>,
 ) -> AuthResult {
     let csrf = super::token(session).await?.ok_or(StatusCode::FORBIDDEN)?;
+    let status = state.options.assistant.as_ref().and_then(|handle| {
+        handle
+            .runtime
+            .as_ref()
+            .map(crate::assistant::runtime::manager::Handle::status)
+    });
+    let live_status = status.clone();
     let view = state.options.assistant.as_ref().and_then(|handle| {
-        handle.runtime.as_ref().map(|runtime| {
+        status.map(|status| {
             view(
-                runtime.status(),
+                status,
                 handle.assistant.breaker_state(),
                 input.to_owned(),
                 error,
@@ -677,12 +695,19 @@ async fn render(
         }
         _ => None,
     };
+    let live = live_status.map(|status| {
+        let (signature, busy) = downloads
+            .as_ref()
+            .map_or((String::new(), false), |d| (d.signature.clone(), d.polling));
+        super::assistant_live::Live::of(&status, &signature, busy)
+    });
     html(&Page {
         nav: super::nav::Nav::here(super::nav::Section::Assistant),
         csrf,
         notice,
         view,
         downloads,
+        live,
     })
 }
 

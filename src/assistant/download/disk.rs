@@ -261,7 +261,7 @@ impl Disk {
         stop: &dyn Fn() -> bool,
     ) -> Result<String, DiskError> {
         self.hit(Fault::ReadError)?;
-        let sha = files::hash(file.as_fd(), name, stop)?;
+        let sha = files::hash(file.as_fd(), name, stop, &|_, _| {})?;
         Ok(hex::encode(sha))
     }
 

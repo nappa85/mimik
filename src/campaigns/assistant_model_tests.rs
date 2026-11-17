@@ -1206,3 +1206,296 @@ async fn try_and_set_answer_with_a_notice_while_a_restart_runs() {
     assert!(page.contains("already being carried out"), "{page}");
     models.handle.shutdown().await;
 }
+
+/// `/admin/assistant/status.json`, parsed.
+async fn status_json(models: &Models) -> serde_json::Value {
+    let response = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/status.json",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    serde_json::from_str(&body(response).await).unwrap()
+}
+
+/// The signature a page carries for its script.
+fn page_signature(page: &str) -> String {
+    let marker = "data-signature=\"";
+    let at = page
+        .find(marker)
+        .unwrap_or_else(|| panic!("no signature in {page}"))
+        + marker.len();
+    let end = page[at..].find('"').unwrap();
+    page[at..at + end].to_owned()
+}
+
+#[tokio::test]
+async fn the_status_route_is_owner_only_never_cached_and_off_without_a_runtime() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(1)).await;
+    let response = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/status.json",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    // A player is forbidden; a request with no session is not served either.
+    let response = router_request(
+        &models.app,
+        &models.auth[1],
+        "/admin/assistant/status.json",
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let signed_out = {
+        use tower::ServiceExt;
+        models
+            .app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/assistant/status.json")
+                    .header("host", "127.0.0.1:3000")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    };
+    assert_eq!(signed_out.status(), StatusCode::UNAUTHORIZED);
+    // The retired poller's route and script are gone.
+    for gone in [
+        "/admin/assistant/downloads.json",
+        "/assets/assistant-downloads.js",
+    ] {
+        let response = router_request(&models.app, &models.auth[0], gone, None).await;
+        assert!(!response.status().is_success(), "{gone}");
+    }
+    // Without an assistant there is nothing to follow.
+    let (_dir, store, auth, _clock) = fixture_with_owner(1).await;
+    let app = crate::auth::app_with_options(store, crate::auth::AuthOptions::default())
+        .await
+        .unwrap();
+    let off = router_request(&app, &auth[0], "/admin/assistant/status.json", None).await;
+    assert_eq!(off.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body(off).await).unwrap(),
+        serde_json::json!({"available": false})
+    );
+}
+
+#[tokio::test]
+async fn the_poll_interval_is_short_while_work_runs_long_when_idle_and_the_progress_follows() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(300)).await;
+    let idle = status_json(&models).await;
+    assert_eq!(idle["available"], true);
+    assert_eq!(idle["poll_ms"], 15_000);
+    assert_eq!(idle["progress"], serde_json::Value::Null);
+    assert_eq!(
+        models
+            .owner("try", &[("csrf", &csrf()), ("model", "local:other.gguf")])
+            .await,
+        "/admin/assistant?notice=trying-model"
+    );
+    let busy = status_json(&models).await;
+    assert_eq!(busy["poll_ms"], 2_000);
+    let progress = &busy["progress"];
+    assert!(
+        progress["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("Trial of local:other.gguf: step ")),
+        "{busy}"
+    );
+    assert_eq!(progress["steps"], 13);
+    assert!(progress["step"].as_u64().is_some_and(|step| step >= 1));
+    // Nothing in the answer names a path, a URL or a secret.
+    assert!(!busy.to_string().contains('/'), "{busy}");
+    models
+        .until(|status| {
+            status.trial.as_ref().is_some_and(|t| !t.running())
+                && status.state == manager::State::Ready
+                && !status.model.pending
+        })
+        .await;
+    let after = status_json(&models).await;
+    assert_eq!(after["poll_ms"], 15_000);
+    assert_eq!(after["progress"], serde_json::Value::Null);
+    assert!(!after.to_string().contains('/'), "{after}");
+}
+
+#[tokio::test]
+async fn the_signature_matches_the_pages_and_a_step_alone_never_changes_it() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(300)).await;
+    let page = models.page().await;
+    assert_eq!(
+        page_signature(&page),
+        status_json(&models).await["signature"].as_str().unwrap()
+    );
+    assert_eq!(
+        models
+            .owner("try", &[("csrf", &csrf()), ("model", "local:other.gguf")])
+            .await,
+        "/admin/assistant?notice=trying-model"
+    );
+    // From the first phrase on, the steps move and the signature does not.
+    models
+        .until(|s| {
+            s.state
+                .starting()
+                .is_some_and(|p| p.phase == crate::assistant::runtime::progress::Phase::Phrase(1))
+        })
+        .await;
+    let mut texts = std::collections::BTreeSet::new();
+    let mut signatures = std::collections::BTreeSet::new();
+    let mut inside = None;
+    for _ in 0..100 {
+        let state = status_json(&models).await;
+        // Only the trial's own steps: its outcome is a change of state.
+        let Some(text) = state["progress"]["text"]
+            .as_str()
+            .filter(|text| text.starts_with("Trial of"))
+        else {
+            break;
+        };
+        texts.insert(text.to_owned());
+        signatures.insert(state["signature"].as_str().unwrap().to_owned());
+        if inside.is_none() {
+            let page = models.page().await;
+            let again = status_json(&models).await;
+            if again["progress"]["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("Trial of"))
+            {
+                inside = Some(page_signature(&page));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(texts.len() >= 3, "{texts:?}");
+    assert_eq!(signatures.len(), 1, "{signatures:?}");
+    // The page of a moment inside the trial carries that signature.
+    assert!(inside.is_some_and(|signature| signatures.contains(&signature)));
+}
+
+#[tokio::test]
+async fn the_page_shows_the_running_step_and_says_it_updates_itself() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(300)).await;
+    // Idle: no progress block, the slow interval.
+    let page = models.page().await;
+    assert!(!page.contains("id=\"progress-text\""), "{page}");
+    assert!(page.contains("data-poll-ms=\"15000\""), "{page}");
+    assert!(
+        page.contains("<script src=\"/assets/assistant-live.js\" defer></script>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("<button type=\"button\" id=\"live-stop\" hidden>Stop updating</button>"),
+        "{page}"
+    );
+    // A restart: the stop is its first step, in the State section.
+    *models.launcher.start_delay.lock().unwrap() = Some(Duration::from_millis(400));
+    let response = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/restart",
+        Some(form(&[("csrf", &csrf())])),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let page = models.page().await;
+    assert!(page.contains("<strong>Starting</strong>"), "{page}");
+    assert!(
+        page.contains("id=\"progress-text\" aria-live=\"polite\">Starting: step "),
+        "{page}"
+    );
+    assert!(
+        page.contains("<progress id=\"progress-bar\" aria-labelledby=\"progress-text\""),
+        "{page}"
+    );
+    assert!(page.contains("data-poll-ms=\"2000\""), "{page}");
+    assert!(
+        page.contains("This page updates itself; without JavaScript, reload it"),
+        "{page}"
+    );
+    models
+        .until(|s| s.state == manager::State::Ready && !s.restarting)
+        .await;
+    *models.launcher.start_delay.lock().unwrap() = None;
+    // A trial: its block replaces the old "Now:" line and the reload instruction.
+    assert_eq!(
+        models
+            .owner("try", &[("csrf", &csrf()), ("model", "local:other.gguf")])
+            .await,
+        "/admin/assistant?notice=trying-model"
+    );
+    let page = models.page().await;
+    assert!(page.contains("Trial of local:other.gguf: step "), "{page}");
+    assert!(!page.contains("Now: "), "{page}");
+    assert!(!page.contains("Reload this page to follow it"), "{page}");
+    assert_eq!(page.matches("id=\"progress-text\"").count(), 1, "{page}");
+    let notice = body(
+        router_request(
+            &models.app,
+            &models.auth[0],
+            "/admin/assistant?notice=trying-model",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(notice.contains("This page updates itself"), "{notice}");
+    assert!(!notice.contains("Reload this page"), "{notice}");
+    // The script sets text, value and max only.
+    let script = body(
+        router_request(
+            &models.app,
+            &models.auth[0],
+            "/assets/assistant-live.js",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(script.contains("textContent") && !script.contains("innerHTML"));
+}
+
+#[tokio::test]
+async fn a_reason_with_line_breaks_and_a_nul_gives_the_same_signature_in_the_page_and_the_answer() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(1)).await;
+    *models.launcher.preflight.lock().unwrap() = Some("one\r\ntwo\rthree\0four".into());
+    let response = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/restart",
+        Some(form(&[("csrf", &csrf())])),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    models
+        .until(|s| matches!(s.state, manager::State::Unavailable(_)))
+        .await;
+    let page = models.page().await;
+    let signature = page_signature(&page);
+    // Lowercase hex only: nothing an HTML parser would normalise in an attribute.
+    assert!(
+        signature.len() == 64
+            && signature
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "{signature}"
+    );
+    assert_eq!(
+        signature,
+        status_json(&models).await["signature"].as_str().unwrap()
+    );
+}

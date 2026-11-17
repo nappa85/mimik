@@ -221,7 +221,7 @@ async fn players_see_starting_while_the_trial_runs() {
         matches!(
             handle.status().trial,
             Some(TrialState::Running {
-                phase: "trial phrase 2 of 5",
+                phase: Phase::Phrase(2),
                 ..
             })
         )
@@ -465,7 +465,7 @@ async fn the_owners_cancel_stops_the_candidate_and_restores_the_previous_model()
         matches!(
             handle.status().trial,
             Some(TrialState::Running {
-                phase: "trial phrase 1 of 5",
+                phase: Phase::Phrase(1),
                 ..
             })
         )
@@ -567,7 +567,7 @@ async fn a_restart_or_shutdown_during_a_trial_ends_it() {
         matches!(
             handle.status().trial,
             Some(TrialState::Running {
-                phase: "trial phrase 1 of 5",
+                phase: Phase::Phrase(1),
                 ..
             })
         )
@@ -597,7 +597,7 @@ async fn a_restart_or_shutdown_during_a_trial_ends_it() {
         matches!(
             handle.status().trial,
             Some(TrialState::Running {
-                phase: "trial phrase 1 of 5",
+                phase: Phase::Phrase(1),
                 ..
             })
         )
@@ -877,7 +877,7 @@ async fn candidate_running(handle: &Handle) {
         matches!(
             handle.status().trial,
             Some(TrialState::Running {
-                phase: "trial phrase 1 of 5",
+                phase: Phase::Phrase(1),
                 ..
             })
         )
@@ -1399,7 +1399,7 @@ async fn the_reply_length_waits_for_a_running_trial_and_a_restart() {
         matches!(
             handle.status().trial,
             Some(TrialState::Running {
-                phase: "trial phrase 2 of 5",
+                phase: Phase::Phrase(2),
                 ..
             })
         )

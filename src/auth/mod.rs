@@ -3,6 +3,7 @@ mod administration;
 mod assistant;
 mod assistant_downloads;
 mod assistant_downloads_view;
+mod assistant_live;
 mod errors;
 mod home;
 mod materials;

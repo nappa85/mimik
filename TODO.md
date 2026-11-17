@@ -87,8 +87,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
-- **Live progress on the assistant page (2d-4, owner 2026-11-16):** plan in
-  `docs/assisted-sheet-plan.md` (reviewed); owner go-ahead, then implement.
+- **Live progress on the assistant page (2d-4):** implemented; only the live browser check
+  remains (`tools/assist_model_browser.py` extended, run on the dev host); plan in
+  `docs/assisted-sheet-plan.md`.
 
 - **Review screen points (owner):** collect the owner's points on the materials review screen
   (cards, table form, merge, split) and plan them.

@@ -1,0 +1,4 @@
+{% if let Some(progress) = view.progress %}<div id="live-progress"><p id="progress-text" aria-live="polite">{{ progress.text }}</p>
+<p id="progress-time">{{ progress.time }}</p>
+<progress id="progress-bar" aria-labelledby="progress-text" max="{{ progress.steps }}" value="{{ progress.done }}">step {{ progress.step }} of {{ progress.steps }}</progress>
+<p>This page updates itself; without JavaScript, reload it to see the current step.</p></div>{% endif %}
