@@ -588,99 +588,134 @@ op `reminded` and the bundle index; 3c's setting uses migration 035.
 
 #### 3c Reminders
 
+Three slices, in order: 3c-0 decides how the interpretation prefix survives a reminder, 3c-1
+builds reminders with names only, 3c-2 adds catalogue entry text and the provenance extension
+(its own review). Interpretations keep prompt format D without catalogue text (ASSIST-61).
+
+##### 3c-0 Prompt cache across prompts (prototype tier, live)
+
+With one slot and `--cache-ram 0` (`launch.rs`), a reminder's prompt replaces the slot's cache,
+and the next interpretation re-evaluates its whole prefix inside its own run deadline R (R's
+prompt term covers only `t + N(B)`): about 80 s on the CPU path at 5 threads (1,979 tokens in
+78.5 s, `docs/results.md`), about 150 s at 2 threads, about 10 s for Qwen3.5-9B on the GPU path,
+so a long interpretation expires and two expiries stop the child as hung. Measure on both paths
+(CPU at 2 threads in the day; the GPU at night or the weekend, fan read first), with
+`tools/assist_runtime_measure.py` extended: an interpretation's time to first token and total
+time right after a reminder prompt of realistic size, (c) with llama.cpp's host-RAM prompt
+cache (`--cache-ram <MiB>`, sized to two prefixes) against (a) re-priming the interpretation
+prefix after every reminder (`calibration::prime`, held in `busy_until`). Record RAM cost,
+times and the choice in `docs/results.md`; prefer (c) (llama.cpp's own mechanism) when it
+restores the prefix within the measured noise of a cached interpretation. A shared system
+message is excluded (two conflicting tasks, earlier review). The chosen mechanism and its
+measured cost feed 3c-1's budgets and page estimates.
+
+##### 3c-1 Reminders with item names
+
 - **Setting (ASSIST-60).** "Reminders" on `/admin/assistant`, on or off, stored like the reply
-  length (migration 035; one row, not per model file); unset means on for the GPU path and off
-  for the CPU path. Beside it, from the current generation's calibration: the path, threads and
-  model; the estimated reminder time (the reminder prefix's evaluation, scaled from the
-  measured priming rate by its token count, plus its reply bound at the measured per-token
-  speed); the extra wait of a scribble reading right after one (the interpretation prefix's
-  re-evaluation, from priming); on the CPU path, "item names only: catalogue text does not fit".
-  `RuntimeEvent::Ready` gains the path; while reminders are off, or the assistant is not ready,
-  the save answer carries no reminder key and the route answers 404. A generation change (also
-  a GPU → CPU fallback) ends queued and running reminders silently.
-- **Reminder budget.** Its own reply bound (`max_tokens` 384: a 120-character hint and four
-  changes) and its own run deadline from the same measurements (prefix evaluation plus reply
-  bound, the per-path slowdown, within the 600 s ceiling); expiries never feed the hung
-  detector. On the CPU path B leaves no room for entry text, so the context there has names
-  only and the provenance extension never applies.
-- **Own prefix.** A reminder sends its own pinned system message (fixed prefix, reminder
-  instructions, the reminder schema's text; SHA-256 pinned like the interpretation one), the
-  data in the user message as `<data>…</data>`, and `response_format` with the reminder schema.
-  It is not primed. With one slot, the next interpretation re-evaluates its prefix (about
-  1.3 s on the GPU path, about 117 s on the CPU path, §1.4a); interpretation admission adds
-  that re-evaluation to its wait estimate after a reminder ran, and the page states it. The
-  live slice measures both on each path against the estimates shown.
+  length (migration 035, one row, `records::DROP_SCHEMA` extended); unset means on for the GPU
+  path and off for the CPU path. The effective value is held with the runtime state (read by
+  every save answer and the route without a database read; a change on the page updates it)
+  and enters the live-progress signature (stored choice and effective value,
+  `assistant_live.rs`). Beside the setting, for the current generation: path, threads, model;
+  the estimated reminder time; the worst extra wait of a scribble reading right after one (the
+  rest of a cancelled reminder's prompt plus the prefix restore of 3c-0); on the CPU path
+  "item names only: catalogue text does not fit". Inputs, all measured at start: priming's
+  `prompt_n` and `prompt_ms` (kept in `Calibration`; today `prime` discards them), the reminder
+  system message's token count (`/tokenize` at start, outside the breaker, a live-progress
+  step; chat-template tokens not counted, stated), the per-token speed and the per-path
+  slowdown, and 3c-0's restore cost. If the reminder run deadline would exceed the 600 s
+  ceiling, reminders are unavailable for that generation, with the reason on the page.
+  `RuntimeEvent::Ready` gains the path. Off, unavailable or not ready: no reminder key in the
+  save answer, and the route answers 404 after the parse and CSRF checks, before rights.
+- **Budgets.** Reminders never share `Budgets` with interpretations: their own reply bound
+  (derived from the reminder schema's largest valid reply with realistic 64-character IDs, as
+  ASSIST-59 did for interpretations; expressions limited to two operator levels in v1), their
+  own run deadline (reminder prompt at the measured prompt rate plus the reply bound at the
+  per-token speed and slowdown), their own busy term `p × (reminder prompt + N(B))` used by
+  `presume_busy` after a cancelled or expired reminder and by interpretation admission
+  (`admissible`) while one runs. After every reminder that started (finished, cancelled or
+  expired) the 3c-0 mechanism restores the interpretation prefix: with (a) the worker re-primes
+  before the next job and the time is held in `busy_until`, so R stays valid and admission
+  counts it against Q. A regression test: an interpretation after a reminder whose stub takes
+  prefix-plus-normal time does not expire.
+- **Prompt and interface.** A pinned reminder system message (reminder instructions, the
+  heading and the reminder schema's compact text; SHA-256 pinned in Rust and
+  `tools/test_assist_eval.py`), not primed. `Interpreter::complete` takes the request kind:
+  system message and `response_format` per kind (trait, `rig` adapter, stub, `fake_server`).
+  `schemas/reminder-v1.json`; its `ref` and `row` enums are built per request (as `schema_for`).
 - **Trigger (D-W).** A save that commits, on a top-level integer field, a note of op `literal`,
   `sum`, `sign_literal`, `switched` or `confirmed`, with known `before` > known `after` (never
-  `reverted` or `reminded`, so Undo and applied reminders do not chain). The JSON answer
-  carries `reminder.key` on the unit whose note qualifies (per-unit routes only; the no-JS
-  full form never triggers one); in a `units` answer, on the qualifying unit.
-- **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; the interpretation
-  start's order of checks; 202 `{job, poll}`), polled through the existing job route. The route
-  re-derives every trigger condition from the stored note (current, top-level integer field,
-  an allowed op, known `before` > `after`); otherwise 409. Without the assistant or with reminders
-  off it answers 404.
-- **Scheduling.** Reminders are outside the one-live-job rule, repeat detection, D, Q and the
-  64 live interpretation records: their own records (at most 8 live, one per account, a newer
-  one superseding the account's older one; 429 beyond, and the module stays quiet), queue wait
-  60 s, run deadline R. The worker takes a reminder only when no interpretation is queued; an
-  admitted interpretation cancels a running reminder, and its admission adds the
-  `busy_after_expiry` slack to its wait estimate. A reminder never takes the breaker's
-  half-open probe (refused while half-open), reminder expiries and cancellations never feed the
-  hung detector, and reminder transport failures count for the breaker like interpretations'.
-  Generation changes and the note hook (the decrease note superseded) end reminders silently.
-  Reminder options live 10 minutes in their own records, at most 32 records in all (a start
-  evicts the oldest finished one, never a live one).
+  `reverted` or `reminded`). The JSON answer carries `reminder.key` on the qualifying unit
+  (per-unit routes only; in a `units` answer, on the qualifying unit).
+- **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; 202 `{job, poll}`),
+  polled through the existing job route. It re-derives the trigger from the stored note
+  (current; top-level integer field; allowed op; known `before` > `after`; the field still
+  holding `after`), else 409. A note whose reminder option was applied starts no new one (409);
+  a re-post of a note whose reminder ended without an applied option may start again (bounded
+  by the per-account rule below).
+- **Scheduling.** Outside the one-live-job rule, repeat detection, D, Q and the interpretation
+  records: own records (at most 8 live, one per account, a newer one superseding the account's
+  older one; 429 beyond, the module stays quiet; at most 32 records, a start evicts the oldest
+  finished one), queue wait 60 s. Poll, `proposal` and `consume` look in both tables. The worker
+  takes a reminder only when no interpretation is queued; an admitted interpretation cancels a
+  running reminder. A reminder never takes the half-open probe (refused while half-open);
+  reminder expiries and cancellations never feed the hung detector; HTTP and transport failures
+  count for the breaker, an invalid reply is `Nothing` and is not counted, a completed exchange
+  signals `Completed`. Generation changes (also a GPU → CPU fallback) and the note hook end
+  reminders silently. Options live 10 minutes.
 - **Context.** `{"decrease": {id, label, before, after, phrase}, "fields": [{id, label, type,
-  value}], "rows": [{id: "r<n>", list, name, entry?}]}`: the other integer and enum top-level
-  fields with values; the decreased field is a change target under its own ID; for the list
-  with the catalogue member, each row's name (quoted data) and, when 3a links it, the entry
-  text (the catalogue page's text rule, plain text, ≤ 2,000 characters cut at a character
-  boundary; none when the badge is "Description unavailable"). Never booleans, text or
-  multiline fields, notes, keys or other properties. Bounds B and N(B): entry texts dropped
-  first (last row first), then rows, then fields; the decrease is never dropped; if it alone
-  exceeds them, no job.
-- **Contract.** `schemas/reminder-v1.json` and its instructions text (SHA-256 pinned). Reply
-  `{relevant, row, hint, option}`: `relevant` boolean; `row` a request row ID or null; `hint`
-  1–120 characters; `option` null or `{changes: [1–4 of {ref, expr} | {ref, enum}],
-  explanation}` with `ref` limited to the decreased field and the sent fields (no booleans and
-  no row cells as targets in v1; `row` only cites). `relevant: false` ends the job with
-  nothing shown.
-- **Read set.** Every value sent (decrease, fields, enum values), every row's name with its
-  host ID, its remembered key, and the catalogue ID, sealed version and entry key of every
-  entry text sent; all in the content hash, re-read by apply (409 on any difference).
-- **Provenance extension** (§1.5, extended here): a reminder literal is allowed when it is a
-  number of the decrease's phrase, its `before`, `after` or their difference, a change target's
-  current value, 2, 3, 4 or 100 with a fraction or percent word in the phrase, or a number in
-  the entry text of the cited row as sent in this request (a cited row whose text was dropped
-  or absent admits none). A number only in another row's text drops the option. The option
-  shows its source: "from <entry name>: …" with the number's surrounding words (≤ 64
-  characters) in `<bdi>`.
+  value}], "rows": [{id: "r<n>", list, name}]}`: the other integer and enum top-level fields;
+  the decreased field is a target under its own ID; the list with the catalogue member, each
+  row's name as quoted data. Never booleans, text, multiline, notes, keys or other properties.
+  Bounds B and N(B): rows dropped first (last first), then fields; the decrease never; if it
+  alone exceeds them, no job.
+- **Reply.** `{relevant, row, hint, option}`: `relevant` boolean; `row` a request row ID or
+  null; `hint` 1–120 characters; `option` null or `{changes: [1–4 of {ref, expr} | {ref,
+  enum}], explanation}`, `ref` limited to the decreased field and the sent fields; expressions
+  may reference sent integer fields (bound through `candidate.refs`). Literals follow the 2c
+  rule with the decrease's phrase as the phrase, plus the decrease's `before`, `after` and their
+  difference (§1.5). `relevant: false` ends the job with nothing shown.
+- **Read set and hash.** `Proposal` gains `reads` (every value sent: the decrease, fields, enum
+  values; every row's name with its host ID) in the content hash, tag `mimik-proposal-v3`;
+  apply re-reads them by address and host ID (409 on any difference). Tests: a row renamed, a
+  row removed, a sent field changed with the changes' numbers unchanged → 409.
 - **Display.** Below the decreased field, a `role="status"` box: "Reminder: <hint>" (and the
-  cited row's name), the option as for interpretations (current values, expressions, effects,
-  explanation, source) with Use, and Dismiss, which only hides it in the page. Never blocking;
-  nothing is stored; a reload shows nothing. Use posts the apply route and redraws every unit.
+  cited row's name), the option as for interpretations with Use, and Dismiss (page only). Never
+  blocking; nothing stored. Use posts the apply route; when the decreased field is not among
+  the changes, the asking unit is not redrawn (`settleApplied`).
+- **Tidy.** The `expect(dead_code)` on `Kind::Reminder` and `Edit::Enum` go; `Edit::Bool` keeps
+  it with the reason "no v1 producer: reminders send no booleans".
 - **Eval.** The reminder relevance class in `tools/assist_eval.py` with unit tests (8 synthetic
-  cases: a smoke check only, too few for a quality conclusion, stated in `docs/results.md`);
-  a live run on the CPU path (2 threads) and the GPU path (evening or weekend) comparing the
-  measured reminder time and the extra wait with the estimates the page shows.
-- **Tests.** Trigger only on the allowed decreases (not an increase, a row cell, an unknown, an
-  Undo, an applied reminder); forged keys to the route (increase, enum, row cell, `reverted`)
-  → 409; reminders off (also the CPU default) and the assistant off → 404; the setting
-  (default per path, stored choice, the estimates shown from given budgets, the CPU names-only
-  note); an applied reminder (`reminded`)
-  never triggers one; scheduling: no account slot taken,
-  an interpretation admitted during a reminder cancels it and fits its estimate, no probe, no
-  hung-detector signal; duplicate names without a key → no entry text; text, multiline and
-  booleans never in the prompt (asserted on the stub request); the request's system message
-  equals the interpretation's; entry text cut to 2,000; contextual freshness (row name, key,
-  sealed version, enum, integer field changed with the changes' numbers unchanged → 409);
-  injection in entry text → at most a fully shown option; a number in the cited entry →
-  allowed and shown "from <entry>: …"; a number only in an uncited row's text, or in a cited
-  row's dropped text → dropped; a number in no source → dropped; `relevant: false` → nothing
-  shown; browser: the hint, Use, Dismiss, both viewports, no CSP violation.
+  cases: a smoke check only, stated in `docs/results.md`); a live run on both paths comparing
+  reminder time and extra wait with the page's estimates.
+- **Tests.** Trigger only on the allowed decreases; forged keys → 409; off/unavailable/not
+  ready → 404 (after CSRF); the setting (default per path, stored choice, signature change,
+  estimates from given measurements, CPU note, deadline over the ceiling → unavailable);
+  scheduling (no account slot taken, cancel on interpretation admission and the busy term,
+  no probe, no hung signal, breaker outcomes); the reminder system message equals the pinned
+  reminder prefix (SHA-256); text, multiline and booleans never in the prompt (stub request);
+  the reply bound and a truncated reply → nothing; read-set freshness; `relevant: false` →
+  nothing; browser: hint, Use (asking unit not among the changes), Dismiss, both viewports, no
+  CSP violation.
 
-Interpretations keep prompt format D without catalogue text (ASSIST-61); only reminders send it.
+##### 3c-2 Catalogue entry text and provenance (GPU path)
+
+- **Context.** Rows gain `entry` when 3a links them: the catalogue page's text rule, plain
+  text, ≤ 2,000 characters cut at a character boundary, none for "Description unavailable";
+  dropped first under B (last row first). On the CPU path B leaves no room, so none is sent.
+- **Provenance extension** (§1.5): a literal may also be a number in the cited row's entry text
+  as sent in this request (the 2c phrase-number lexer; a sign or a die size such as `d6` is not
+  part of the number); a cited row whose text was dropped or absent admits none; a number only
+  in another row's text drops the option. The option shows "from <entry name>: …" with the
+  number's surrounding words (≤ 64 characters) in `<bdi>`; `Proposal` gains that `source`.
+- **Read set.** Each entry text sent adds its catalogue ID, sealed version and entry key to
+  `reads`; apply re-reads them through the catalogue store (latest sealed version and the
+  row's link); a newer sealed version, a changed link or key → 409.
+- **Tests.** Duplicate names without a key → no entry text; entry text cut to 2,000;
+  injection in entry text → at most a fully shown option; a number in the cited entry →
+  allowed and shown with its source; a number only in an uncited row's text, or in a cited
+  row's dropped text → dropped; a number in no source → dropped; a new catalogue version or a
+  changed key → 409.
 
 ### 4 Suggestions and "Which Sword?"
 
