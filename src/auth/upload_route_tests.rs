@@ -648,7 +648,7 @@ async fn upload_route_comparison_budget_explains_manual_remedy_in_html() {
     );
     let text = body_text(response).await;
     assert!(text.contains("Repeated-text comparison limit reached; draw an exclusion by hand."));
-    assert!(text.contains("<nav>") && text.contains("href=\"/admin/materials\""));
+    assert!(text.contains("<nav class=\"menu\"") && text.contains("href=\"/admin/materials\""));
     assert_eq!(
         app.oneshot(upload_action(session, &path, "discard", ""))
             .await
