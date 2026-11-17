@@ -2,7 +2,7 @@
 //! "Apply"): the note key in the JSON answer, starting, polling and applying a job, with a
 //! stub interpreter in place of the model server.
 use super::formula_tests::{Setup, body, setup};
-use super::notes_tests::{assist, created, form, notes, row, saved};
+use super::notes_tests::{assist, choices, created, form, notes, row, saved};
 use crate::assistant::AssistantHandle;
 use crate::assistant::interpreter::stub::StubInterpreter;
 use crate::assistant::jobs::Budgets;
@@ -42,8 +42,18 @@ async fn assisted(answers: &[&str]) -> Assisted {
 /// [`assisted`] with the dynamic part bounded at `bytes` (above 1,024 every integer field is
 /// sent, not only those read with the target).
 async fn assisted_at(answers: &[&str], bytes: usize) -> Assisted {
-    let mut setup = setup(&assist()).await;
-    created(&setup, &[]).await;
+    assisted_over(&assist(), &[], answers, bytes).await
+}
+
+/// [`assisted_at`] over `definition`, the sheet created with the form values `extra`.
+async fn assisted_over(
+    definition: &Value,
+    extra: &[(&str, &str)],
+    answers: &[&str],
+    bytes: usize,
+) -> Assisted {
+    let mut setup = setup(definition).await;
+    created(&setup, extra).await;
     let stub = Arc::new(StubInterpreter::answering(
         answers.iter().map(|answer| Ok((*answer).to_owned())),
     ));
@@ -247,8 +257,14 @@ async fn a_job_offers_the_reading_and_use_applies_it_with_a_confirmed_note() {
     let (status, answer) = apply(setup, &action, &[]).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["status"], "saved");
-    assert_eq!(answer["unit"]["value"], "69");
-    assert_eq!(answer["unit"]["actions"]["undo"], "84", "{answer}");
+    assert!(answer.get("unit").is_none(), "{answer}");
+    assert_eq!(
+        answer["units"].as_array().map(Vec::len),
+        Some(1),
+        "{answer}"
+    );
+    assert_eq!(answer["units"][0]["value"], "69");
+    assert_eq!(answer["units"][0]["actions"]["undo"], "84", "{answer}");
     assert_eq!(saved(setup, 1).await.1["hp"], 69);
     let confirmed: Vec<_> = notes(setup, 1)
         .await
@@ -279,7 +295,7 @@ async fn a_job_offers_the_reading_and_use_applies_it_with_a_confirmed_note() {
     );
     assert_eq!(saved(setup, 1).await.1["hp"], 69);
     // Undo of the applied proposal works like any Undo.
-    let undo = answer["unit"]["actions"]["note"].as_str().unwrap();
+    let undo = answer["units"][0]["actions"]["note"].as_str().unwrap();
     let revision = saved(setup, 1).await.0.to_string();
     let (status, _, _) = send(
         setup,
@@ -910,4 +926,635 @@ async fn use_rechecks_each_of_two_references_and_a_removed_row() {
     // back with the old value: a fresh job is needed, and the old action stays refused.
     row_action(setup, 0, "remove").await;
     assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+}
+
+// ---- Step 3b: bundles (multi-change proposals, apply and Undo) ----
+
+use crate::assistant::jobs::{Change, Edit, Kind, Origin};
+use crate::assistant::output::{Candidate, Node};
+use crate::campaigns::NoteValue;
+use std::collections::BTreeMap;
+
+fn int(address: &str, before: i64, value: i64) -> Change {
+    Change {
+        address: address.into(),
+        before: NoteValue::Int(before),
+        edit: Edit::Expr {
+            candidate: Candidate {
+                expr: Node::Lit { lit: value },
+                explanation: String::new(),
+                value,
+                refs: BTreeMap::new(),
+            },
+            shown: value.to_string(),
+        },
+    }
+}
+
+const LONG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// The sheet with a stance (guard) and Inspired (false), then HP saved 84 → 70: the decrease
+/// note a reminder is bound to. Returns the assisted sheet and the reminder origin.
+async fn decreased() -> (Assisted, Origin) {
+    let assisted = assisted_over(
+        &choices(),
+        &[("value-stance", "guard"), ("value-inspired", "false")],
+        &[],
+        1024,
+    )
+    .await;
+    let answer = save_field(&assisted.setup, "hp", "70").await;
+    let revision = answer["revision"].as_str().unwrap().parse().unwrap();
+    let origin = Origin {
+        sheet: 1,
+        target: "field:hp".into(),
+        revision,
+        kind: Kind::Reminder,
+    };
+    (assisted, origin)
+}
+
+/// Four changes of four kinds: HP 70 → 60, stance guard → the long option, Inspired false →
+/// true, and the Rope row's Quantity 1 → 5.
+fn four() -> Vec<Change> {
+    vec![
+        int("field:hp", 70, 60),
+        Change {
+            address: "field:stance".into(),
+            before: NoteValue::Enum("guard".into()),
+            edit: Edit::Enum(LONG.into()),
+        },
+        Change {
+            address: "field:inspired".into(),
+            before: NoteValue::Bool(false),
+            edit: Edit::Bool(true),
+        },
+        int("cell:equipment/r1-1/quantity", 1, 5),
+    ]
+}
+
+fn offered(assisted: &Assisted, origin: &Origin, changes: Vec<Change>) -> String {
+    let account = assisted.setup.auth[1].account_id();
+    let job =
+        assisted
+            .handle
+            .assistant
+            .offer(account, origin.clone(), vec![(changes, "why".into())]);
+    format!("/private-sheets/1/proposals/{}/0", job.text())
+}
+
+async fn bundle_of(setup: &Setup, revision: i64) -> Vec<(String, String, Option<i64>)> {
+    setup
+        .store
+        .run(move |db| {
+            let mut query = db.prepare("SELECT address,op,bundle FROM private_sheet_notes WHERE sheet_id=1 AND revision=?1 ORDER BY address")?;
+            let rows = query
+                .query_map([revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap()
+}
+
+async fn undo(setup: &Setup, note: &str) -> (StatusCode, Value) {
+    let revision = saved(setup, 1).await.0.to_string();
+    let (status, answer, _) = send(
+        setup,
+        "POST",
+        "/private-sheets/1/undo",
+        Some(&pairs(&[
+            ("csrf", &csrf()),
+            ("base", &revision),
+            ("note", note),
+        ])),
+        false,
+    )
+    .await;
+    (status, answer)
+}
+
+/// Plan 3b, "Apply": four changes of a test-built proposal (an integer, an enum, a boolean
+/// and a saved-row cell) are written in one revision, one `reminded` note each with the
+/// decrease note's phrase, all sharing one new bundle number, and the answer carries every
+/// changed unit in change order (`units`, no `unit`).
+#[tokio::test]
+async fn a_four_change_proposal_applies_in_one_revision_with_one_bundle() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let before = saved(setup, 1).await.0;
+    let action = offered(&assisted, &origin, four());
+    let (status, answer) = apply(setup, &action, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["status"], "saved");
+    assert!(answer.get("unit").is_none(), "{answer}");
+    let units = answer["units"].as_array().unwrap();
+    let addresses: Vec<_> = units
+        .iter()
+        .map(|unit| unit["address"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        addresses,
+        [
+            "field:hp",
+            "field:stance",
+            "field:inspired",
+            "cell:equipment/r1-1/quantity"
+        ]
+    );
+    assert_eq!(units[0]["value"], "60");
+    assert_eq!(units[0]["actions"]["undo"], "70");
+    assert_eq!(units[0]["actions"]["with"], "3", "{answer}");
+    assert_eq!(units[3]["value"], "5");
+    // One revision, the values written.
+    let (revision, data) = saved(setup, 1).await;
+    assert_eq!(revision, before + 1);
+    assert_eq!(data["hp"], 60);
+    assert_eq!(data["stance"], LONG);
+    assert_eq!(data["inspired"], true);
+    assert_eq!(data["equipment"][0]["quantity"], 5);
+    // One reminded note per change, the decrease note's phrase, one new bundle.
+    let written = bundle_of(setup, revision).await;
+    assert_eq!(written.len(), 4);
+    assert!(
+        written
+            .iter()
+            .all(|(_, op, bundle)| op == "reminded" && *bundle == Some(1))
+    );
+    let phrases: Vec<_> = notes(setup, 1)
+        .await
+        .into_iter()
+        .filter(|note| note.2 == "reminded")
+        .map(|note| note.3)
+        .collect();
+    assert_eq!(phrases, ["70"; 4]);
+    // The page offers the group's Undo, and the history names the op.
+    let (_, html) = setup.get("/private-sheets/1").await;
+    let was = super::assist_tests::text(&html, "#was-0");
+    assert_eq!(
+        was.as_deref(),
+        Some("Last change: was 70 (with 3 other fields)")
+    );
+    // A second apply of the same option is refused.
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+}
+
+/// What the apply refuses (409 with the fixed message, nothing written): one member's value
+/// changed, an undeclared enum option, a target outside the pin, a row that disappeared.
+#[tokio::test]
+async fn an_apply_with_one_stale_member_writes_nothing() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let undeclared = {
+        let mut changes = four();
+        changes[1].edit = Edit::Enum("nope".into());
+        changes
+    };
+    let outside = {
+        let mut changes = four();
+        changes[2].address = "field:ghost".into();
+        changes
+    };
+    for (what, changes) in [
+        ("an undeclared option", undeclared),
+        ("outside the pin", outside),
+    ] {
+        let action = offered(&assisted, &origin, changes);
+        let (status, refused) = apply(setup, &action, &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{what}: {refused}");
+        assert_eq!(
+            refused["message"],
+            "Something this proposal used has changed: ask again."
+        );
+    }
+    let revision = saved(setup, 1).await.0;
+    // One member's value changes after the offer (a save of the stance).
+    let action = offered(&assisted, &origin, four());
+    let base = revision.to_string();
+    let (status, _, _) = send(
+        setup,
+        "POST",
+        "/private-sheets/1/fields/stance",
+        Some(&pairs(&[
+            ("csrf", &csrf()),
+            ("base", &base),
+            ("value", LONG),
+        ])),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let revision = saved(setup, 1).await.0;
+    let (status, refused) = apply(setup, &action, &[]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(saved(setup, 1).await.0, revision, "no revision");
+    assert_eq!(saved(setup, 1).await.1["hp"], 70, "no member written");
+    // A row that disappeared.
+    let action = offered(
+        &assisted,
+        &origin,
+        vec![int("cell:equipment/r1-1/quantity", 1, 5)],
+    );
+    row_action(setup, 0, "remove").await;
+    let (status, _) = apply(setup, &action, &[]).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+/// The reminder kind's origin (plan 3b, "Job kind and origin"): the decrease note still
+/// current on its field and the field still holding its `after`; an interpretation's is the
+/// current `unresolved` note, which a decrease note is not.
+#[tokio::test]
+async fn the_reminder_origin_is_the_current_decrease_note_holding_its_value() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let account = setup.auth[1].account_id();
+    let read = || async {
+        let (view, permit) = setup
+            .store
+            .private_read(
+                setup.auth[1].clone(),
+                1,
+                None,
+                crate::definitions::admit().unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(permit);
+        view
+    };
+    let job =
+        assisted
+            .handle
+            .assistant
+            .offer(account, origin.clone(), vec![(four(), "why".into())]);
+    let (bound, proposal) = assisted
+        .handle
+        .assistant
+        .proposal(account, 1, job, 0)
+        .unwrap();
+    // Current note, field holding its after: applicable, one pending note per change.
+    let mut view = read().await;
+    let units = crate::campaigns::web::interpret_web::plan(&mut view, &bound, &proposal).unwrap();
+    assert_eq!(units.len(), 4);
+    assert_eq!(view.notes.pending.len(), 4);
+    assert!(view.notes.bundle);
+    // The field no longer holds the decrease note's after (the note is still current).
+    let mut view = read().await;
+    view.snapshot.data["hp"] = json!(71);
+    assert!(crate::campaigns::web::interpret_web::plan(&mut view, &bound, &proposal).is_none());
+    // An origin revision that is not the current note's.
+    let mut view = read().await;
+    let older = Origin {
+        revision: origin.revision - 1,
+        ..bound.clone()
+    };
+    assert!(crate::campaigns::web::interpret_web::plan(&mut view, &older, &proposal).is_none());
+    // The same note read as an interpretation: it is not an `unresolved` note.
+    let mut view = read().await;
+    let interpreted = Origin {
+        kind: Kind::Interpretation,
+        ..bound.clone()
+    };
+    assert!(
+        crate::campaigns::web::interpret_web::plan(&mut view, &interpreted, &proposal).is_none()
+    );
+    // The decrease note superseded by a later save: no longer current.
+    save_field(setup, "hp", "65").await;
+    let mut view = read().await;
+    assert!(crate::campaigns::web::interpret_web::plan(&mut view, &bound, &proposal).is_none());
+}
+
+/// Plan 3b, "Bundle Undo": Undo on any member reverts every member in one revision, one
+/// `reverted` note per member sharing a new bundle number, and the Undo of that Undo does the
+/// same back.
+#[tokio::test]
+async fn undo_of_a_bundle_reverts_every_member_and_can_itself_be_undone() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let action = offered(&assisted, &origin, four());
+    let (_, answer) = apply(setup, &action, &[]).await;
+    let applied = saved(setup, 1).await;
+    // Undo on the enum member reverts all four.
+    let note = answer["units"][1]["actions"]["note"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, refused) = undo(setup, &note).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{refused}");
+    let (revision, data) = saved(setup, 1).await;
+    assert_eq!(revision, applied.0 + 1, "one revision");
+    assert_eq!(data["hp"], 70);
+    assert_eq!(data["stance"], "guard");
+    assert_eq!(data["inspired"], false);
+    assert_eq!(data["equipment"][0]["quantity"], 1);
+    let written = bundle_of(setup, revision).await;
+    assert_eq!(written.len(), 4);
+    assert!(
+        written
+            .iter()
+            .all(|(_, op, bundle)| op == "reverted" && *bundle == Some(2)),
+        "{written:?}"
+    );
+    // The page offers the Undo of the Undo for the group.
+    let (_, html) = setup.get("/private-sheets/1").await;
+    assert_eq!(
+        super::assist_tests::text(&html, "#was-0").as_deref(),
+        Some("Last change: was 60 (with 3 other fields)")
+    );
+    // Undo of the Undo, from the hp member (key at the new revision).
+    let (status, refused) = undo(setup, &format!("{revision}:field:hp")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{refused}");
+    let (after, data) = saved(setup, 1).await;
+    assert_eq!(after, revision + 1);
+    assert_eq!(data["hp"], 60);
+    assert_eq!(data["stance"], LONG);
+    assert_eq!(data["inspired"], true);
+    assert_eq!(data["equipment"][0]["quantity"], 5);
+    let written = bundle_of(setup, after).await;
+    assert!(
+        written
+            .iter()
+            .all(|(_, op, bundle)| op == "reverted" && *bundle == Some(3)),
+        "{written:?}"
+    );
+}
+
+/// A bundle Undo is all or nothing: a member whose value changed since, or whose row was
+/// removed, refuses the whole Undo with 409 and the labels of the members that changed; nothing
+/// is written.
+#[tokio::test]
+async fn a_bundle_undo_with_a_changed_member_writes_nothing_and_lists_it() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let action = offered(&assisted, &origin, four());
+    let (_, answer) = apply(setup, &action, &[]).await;
+    let stance = answer["units"][1]["actions"]["note"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The HP member changes: a later note supersedes it.
+    save_field(setup, "hp", "50").await;
+    let revision = saved(setup, 1).await.0;
+    let (status, refused) = undo(setup, &stance).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let page = refused.as_str().unwrap();
+    assert!(
+        page.contains("Nothing undone: Current HP changed since"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("Stance changed"),
+        "only the changed member is listed: {page}"
+    );
+    assert_eq!(saved(setup, 1).await.0, revision, "nothing written");
+    assert_eq!(saved(setup, 1).await.1["stance"], LONG);
+    // A removed row's member is listed by its property and list.
+    row_action(setup, 0, "remove").await;
+    let revision = saved(setup, 1).await.0;
+    let (status, refused) = undo(setup, &stance).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let page = refused.as_str().unwrap();
+    assert!(
+        page.contains("Quantity of a removed row of Equipment"),
+        "{page}"
+    );
+    assert!(page.contains("Current HP"), "{page}");
+    assert_eq!(saved(setup, 1).await.0, revision, "nothing written");
+}
+
+/// An interpretation is exactly one integer expression on its own target; and an edit must
+/// suit its target's control, also over an unknown value before (Luck is unknown).
+#[tokio::test]
+async fn an_interpretation_is_one_expression_on_its_target_and_edits_suit_their_control() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    // The decrease note read as an interpretation is refused whatever the changes.
+    let account = setup.auth[1].account_id();
+    let job = assisted.handle.assistant.offer(
+        account,
+        Origin {
+            kind: Kind::Interpretation,
+            ..origin.clone()
+        },
+        vec![(
+            vec![int("field:hp", 70, 60), int("field:armour", -1, 2)],
+            "why".into(),
+        )],
+    );
+    let action = format!("/private-sheets/1/proposals/{}/0", job.text());
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+    // A boolean over the unknown Luck, and a number over a boolean, are refused.
+    let wrong_kind = Change {
+        address: "field:luck".into(),
+        before: NoteValue::Unknown,
+        edit: Edit::Bool(true),
+    };
+    let action = offered(&assisted, &origin, vec![wrong_kind]);
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+    let number_over_flag = Change {
+        before: NoteValue::Unknown,
+        ..int("field:inspired", 0, 1)
+    };
+    let action = offered(&assisted, &origin, vec![number_over_flag]);
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
+    assert_eq!(saved(setup, 1).await.1["luck"], Value::Null);
+}
+
+/// An apply is rechecked inside the writer's transaction: a newer note on the decrease note's
+/// field that lands there (the revision actor's, L1) refuses it with 409 and nothing is written.
+#[tokio::test]
+async fn an_apply_is_rechecked_inside_the_transaction() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let action = offered(&assisted, &origin, four());
+    // An unrelated save first, so the live revision holds no note on HP yet.
+    save_field(setup, "armour", "5").await;
+    let revision = saved(setup, 1).await.0;
+    *super::super::sheets::BEFORE_SAVE_RECHECK.lock().unwrap() = Some(Box::new(move |db| {
+        db.execute("INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(1,?1,'field:hp','literal','70','{\"int\":\"84\"}','{\"int\":\"70\"}')", [revision])?;
+        Ok(())
+    }));
+    let (status, refused) = apply(setup, &action, &[]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(saved(setup, 1).await.0, revision, "nothing written");
+    assert_eq!(saved(setup, 1).await.1["stance"], "guard");
+}
+
+/// A bundle Undo that loses the race inside the writer is refused with 409, nothing written.
+#[tokio::test]
+async fn a_bundle_undo_is_rechecked_inside_the_transaction() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let (_, answer) = apply(setup, &offered(&assisted, &origin, four()), &[]).await;
+    let note = answer["units"][1]["actions"]["note"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // An unrelated save first, so the live revision holds no note on HP yet.
+    save_field(setup, "armour", "5").await;
+    let revision = saved(setup, 1).await.0;
+    *super::super::sheets::BEFORE_SAVE_RECHECK.lock().unwrap() = Some(Box::new(move |db| {
+        db.execute("INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after) VALUES(1,?1,'field:hp','literal','1','{\"int\":\"60\"}','{\"int\":\"60\"}')", [revision])?;
+        Ok(())
+    }));
+    let (status, refused) = undo(setup, &note).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert!(
+        refused.as_str().unwrap().contains("Nothing undone"),
+        "{refused}"
+    );
+    assert_eq!(saved(setup, 1).await.0, revision, "nothing written");
+    assert_eq!(saved(setup, 1).await.1["stance"], LONG);
+}
+
+/// A member whose row was removed and then restored comes back under a new host ID: the
+/// bundle Undo lists it as changed and writes nothing. The offer counts only members that are
+/// still current.
+#[tokio::test]
+async fn a_member_restored_under_a_new_host_id_refuses_the_bundle_undo() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let (_, answer) = apply(setup, &offered(&assisted, &origin, four()), &[]).await;
+    let stance = answer["units"][1]["actions"]["note"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    row_action(setup, 0, "remove").await;
+    let removed = saved(setup, 1).await.0;
+    let (status, refused) = undo(setup, &format!("{removed}:row:equipment/r1-1")).await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{refused}");
+    let rows = saved(setup, 1).await.1["equipment"].clone();
+    assert_ne!(rows[0]["id"], "r1-1", "restored under a new host ID");
+    let revision = saved(setup, 1).await.0;
+    let (status, refused) = undo(setup, &stance).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        refused
+            .as_str()
+            .unwrap()
+            .contains("Quantity of a removed row of Equipment"),
+        "{refused}"
+    );
+    assert_eq!(saved(setup, 1).await.0, revision, "nothing written");
+    // The page offers no Undo on a member of a bundle one of whose members is gone.
+    let (_, html) = setup.get("/private-sheets/1").await;
+    assert!(super::assist_tests::text(&html, "#was-0").is_none());
+}
+
+/// An interpretation is bound to a real `unresolved` note and is exactly one integer expression
+/// on that note's own target: two changes, or one change on another field, are refused with
+/// 409 and nothing is written; the one change on the target applies.
+#[tokio::test]
+async fn an_interpretation_proposal_must_be_one_change_on_its_unresolved_target() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let assisted = assisted(&[]).await;
+    let setup = &assisted.setup;
+    let key = scribble(setup, "took lots of damage").await;
+    let revision = key.split(':').next().unwrap().parse().unwrap();
+    let origin = Origin {
+        sheet: 1,
+        target: "field:hp".into(),
+        revision,
+        kind: Kind::Interpretation,
+    };
+    let written = saved(setup, 1).await.0;
+    for (what, changes) in [
+        (
+            "two changes",
+            vec![int("field:hp", 84, 70), int("field:armour", -1, 2)],
+        ),
+        ("another field", vec![int("field:armour", -1, 2)]),
+    ] {
+        let action = offered(&assisted, &origin, changes);
+        let (status, refused) = apply(setup, &action, &[]).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{what}: {refused}");
+        assert_eq!(saved(setup, 1).await.0, written, "{what}: nothing written");
+    }
+    let action = offered(&assisted, &origin, vec![int("field:hp", 84, 70)]);
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::OK);
+    assert_eq!(saved(setup, 1).await.1["hp"], 70);
+}
+
+/// Extra rows in a bundle (a direct database write) make the page's bundle query give up on
+/// every bundle: an Undo on a bundled note is then refused, never done as a single-cell Undo.
+#[tokio::test]
+async fn an_undo_whose_bundle_cannot_be_read_is_refused() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let (_, answer) = apply(setup, &offered(&assisted, &origin, four()), &[]).await;
+    let stance = answer["units"][1]["actions"]["note"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let revision = saved(setup, 1).await.0;
+    setup
+        .store
+        .run_campaign(setup.auth[1].clone(), move |db| {
+            for address in ["field:armour", "field:max_hp", "field:luck"] {
+                db.execute(
+                    "INSERT INTO private_sheet_notes(sheet_id,revision,address,op,raw,before,after,bundle) VALUES(1,?1,?2,'reminded','x','{\"int\":\"1\"}','{\"int\":\"2\"}',1)",
+                    rusqlite::params![revision, address],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (status, refused) = undo(setup, &stance).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(saved(setup, 1).await.0, revision, "nothing written");
+    assert_eq!(saved(setup, 1).await.1["stance"], LONG);
+}
+
+/// A bundled note whose other member is no longer current offers no Undo (as a single
+/// Undo is withheld when its cell changed); while every member is current each offers it.
+#[tokio::test]
+async fn a_bundle_with_a_changed_member_offers_no_undo() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    apply(setup, &offered(&assisted, &origin, four()), &[]).await;
+    let (_, html) = setup.get("/private-sheets/1").await;
+    for key in ["0", "6", "7"] {
+        assert!(
+            super::assist_tests::text(&html, &format!("#was-{key}"))
+                .is_some_and(|text| text.ends_with("(with 3 other fields)")),
+            "{key}: {html}"
+        );
+    }
+    save_field(setup, "hp", "50").await;
+    let (_, html) = setup.get("/private-sheets/1").await;
+    for key in ["6", "7", "4-0-1"] {
+        assert!(
+            super::assist_tests::text(&html, &format!("#was-{key}")).is_none(),
+            "{key} still offers Undo"
+        );
+    }
+    // HP's own new note is a single change, undoable on its own.
+    assert_eq!(
+        super::assist_tests::text(&html, "#was-0").as_deref(),
+        Some("Last change: was 60")
+    );
 }

@@ -40,6 +40,7 @@ fn origin(sheet: i64, target: &str, revision: i64) -> Origin {
         sheet,
         target: target.into(),
         revision,
+        kind: Kind::Interpretation,
     }
 }
 
@@ -103,9 +104,14 @@ async fn a_job_runs_and_offers_its_option() {
     let Poll::Done(Answer::Options(options)) = until_done(&assistant, 1, 1, id).await else {
         panic!()
     };
-    assert_eq!(options[0].candidate.value, 99);
-    assert_eq!(options[0].before, Some(84));
-    assert_eq!(options[0].shown, "Current HP (84) + 15");
+    let [change] = options[0].changes.as_slice() else {
+        panic!("an interpretation option is one change")
+    };
+    assert_eq!(change.address, "field:hp");
+    assert_eq!(change.after(), NoteValue::Int(99));
+    assert_eq!(change.before, NoteValue::Int(84));
+    assert_eq!(change.shown(), "Current HP (84) + 15");
+    assert_eq!(options[0].explanation, "heal 15");
     assert!(assistant.proposal(1, 1, id, 0).is_some());
     assert!(assistant.proposal(1, 1, id, 1).is_none());
     // Another account's or sheet's job is not found.
@@ -668,27 +674,217 @@ async fn the_content_hash_detects_a_stored_proposal_that_no_longer_matches() {
         ..bound.clone()
     };
     assert!(!verify(job, 0, &moved, &proposal));
-    let mut other = proposal.clone();
-    other.candidate.value = 70;
-    assert!(!verify(job, 0, &bound, &other));
-    let mut other = proposal.clone();
-    other.before = Some(85);
-    assert!(!verify(job, 0, &bound, &other));
-    let mut other = proposal.clone();
-    other.candidate.explanation = "heal 16".into();
-    assert!(!verify(job, 0, &bound, &other));
-    let mut other = proposal;
-    other.candidate.refs.insert(
-        "f1".into(),
-        super::super::output::Supplied {
-            address: "field:max_hp".into(),
-            integer: true,
-            value: Some(84),
-        },
-    );
-    assert!(!verify(job, 0, &bound, &other));
+    let tampered = |edit: &dyn Fn(&mut Proposal)| {
+        let mut other = proposal.clone();
+        edit(&mut other);
+        !verify(job, 0, &bound, &other)
+    };
+    let expr = |other: &mut Proposal| match &mut other.changes[0].edit {
+        Edit::Expr { candidate, .. } => candidate.clone(),
+        _ => panic!("an expression"),
+    };
+    assert!(tampered(&|other| {
+        let mut candidate = expr(other);
+        candidate.value = 70;
+        other.changes[0].edit = Edit::Expr {
+            candidate,
+            shown: "x".into(),
+        };
+    }));
+    assert!(tampered(
+        &|other| other.changes[0].before = NoteValue::Int(85)
+    ));
+    assert!(tampered(
+        &|other| other.changes[0].address = "field:max_hp".into()
+    ));
+    assert!(tampered(&|other| other.explanation = "heal 16".into()));
+    assert!(tampered(&|other| {
+        let mut candidate = expr(other);
+        candidate.refs.insert(
+            "f1".into(),
+            super::super::output::Supplied {
+                address: "field:max_hp".into(),
+                integer: true,
+                value: Some(84),
+            },
+        );
+        other.changes[0].edit = Edit::Expr {
+            candidate,
+            shown: "x".into(),
+        };
+    }));
+    // Another kind of job over the same origin.
+    let reminder = Origin {
+        kind: Kind::Reminder,
+        ..bound.clone()
+    };
+    assert!(!verify(job, 0, &reminder, &proposal));
+    // A change added or removed.
+    assert!(tampered(&|other| {
+        let extra = other.changes[0].clone();
+        other.changes.push(Change {
+            address: "field:armour".into(),
+            ..extra
+        });
+    }));
+    assert!(tampered(&|other| other.changes.clear()));
 }
 
+fn lit(value: i64) -> Candidate {
+    Candidate {
+        expr: super::super::output::Node::Lit { lit: value },
+        explanation: String::new(),
+        value,
+        refs: BTreeMap::new(),
+    }
+}
+
+fn int_change(address: &str, before: NoteValue, value: i64) -> Change {
+    Change {
+        address: address.into(),
+        before,
+        edit: Edit::Expr {
+            candidate: lit(value),
+            shown: value.to_string(),
+        },
+    }
+}
+
+fn reminder(target: &str) -> Origin {
+    Origin {
+        kind: Kind::Reminder,
+        ..origin(1, target, 5)
+    }
+}
+
+/// The hash tells apart an enum change and a boolean change that differ only in their value
+/// after, and a reference's alias; a value that cannot be encoded drops the option.
+#[tokio::test]
+async fn the_hash_covers_every_after_and_an_unencodable_value_drops_the_option() {
+    let assistant = Assistant::new();
+    let origin = reminder("field:hp");
+    let id = JobId([7; 16]);
+    let enum_change = |after: &str| Change {
+        address: "field:stance".into(),
+        before: NoteValue::Enum("guard".into()),
+        edit: Edit::Enum(after.into()),
+    };
+    let one = bind(id, 0, &origin, vec![enum_change("a")], "why".into()).unwrap();
+    let other = bind(id, 0, &origin, vec![enum_change("b")], "why".into()).unwrap();
+    assert_ne!(one.hash, other.hash, "enum after");
+    let flag = |after: bool| Change {
+        address: "field:inspired".into(),
+        before: NoteValue::Bool(!after),
+        edit: Edit::Bool(after),
+    };
+    let unknown_flag = |after: bool| Change {
+        address: "field:inspired".into(),
+        before: NoteValue::Unknown,
+        edit: Edit::Bool(after),
+    };
+    let yes = bind(id, 0, &origin, vec![unknown_flag(true)], "why".into()).unwrap();
+    let no = bind(id, 0, &origin, vec![unknown_flag(false)], "why".into()).unwrap();
+    assert_ne!(yes.hash, no.hash, "bool after alone");
+    let on = bind(id, 0, &origin, vec![flag(true)], "why".into()).unwrap();
+    let mut off = on.clone();
+    off.changes[0].edit = Edit::Bool(false);
+    assert!(!verify(id, 0, &origin, &off), "bool after");
+    // A reference's alias, with the same address and value.
+    let with_ref = |alias: &str| {
+        let mut change = int_change("field:hp", NoteValue::Int(84), 70);
+        let Edit::Expr { candidate, .. } = &mut change.edit else {
+            unreachable!()
+        };
+        candidate.refs.insert(
+            alias.into(),
+            super::super::output::Supplied {
+                address: "field:max_hp".into(),
+                integer: true,
+                value: Some(84),
+            },
+        );
+        bind(id, 0, &origin, vec![change], "why".into())
+            .unwrap()
+            .hash
+    };
+    assert_ne!(with_ref("f1"), with_ref("f2"), "alias");
+    // An enum ID too long to encode as a note value has no hash: no option.
+    let long = "x".repeat(100);
+    assert!(bind(id, 0, &origin, vec![enum_change(&long)], "why".into()).is_none());
+    let _ = &assistant;
+}
+
+/// How many options of `options` a test-built job keeps.
+fn kept(assistant: &Assistant, options: Vec<(Vec<Change>, String)>) -> usize {
+    let job = assistant.offer(1, reminder("field:hp"), options);
+    (0..4)
+        .take_while(|n| assistant.proposal(1, 1, job, *n).is_some())
+        .count()
+}
+
+/// Plan 3b, "Proposal model": one to four changes of distinct integer, enum or boolean
+/// targets; a duplicate target or a fifth change drops the option, and so does a change equal
+/// to the current value, one that does not fit its value before, or a row add or remove.
+#[tokio::test]
+async fn a_proposal_has_one_to_four_changes_of_distinct_targets() {
+    let assistant = Assistant::new();
+    let four = vec![
+        int_change("field:hp", NoteValue::Int(84), 70),
+        int_change("field:armour", NoteValue::Int(-1), 2),
+        Change {
+            address: "field:stance".into(),
+            before: NoteValue::Enum("guard".into()),
+            edit: Edit::Enum("brace".into()),
+        },
+        Change {
+            address: "cell:equipment/r1-1/broken".into(),
+            before: NoteValue::Absent,
+            edit: Edit::Bool(true),
+        },
+    ];
+    let more = |changes: &[Change]| (changes.to_vec(), "why".to_owned());
+    assert_eq!(kept(&assistant, vec![more(&four)]), 1, "four changes");
+    assert_eq!(kept(&assistant, vec![more(&four[..1])]), 1, "one change");
+    // A fifth change.
+    let mut five = four.clone();
+    five.push(int_change("field:luck", NoteValue::Unknown, 3));
+    assert_eq!(kept(&assistant, vec![more(&five)]), 0, "five changes");
+    // A duplicate target.
+    let mut twice = four[..2].to_vec();
+    twice.push(int_change("field:hp", NoteValue::Int(84), 60));
+    assert_eq!(
+        kept(&assistant, vec![more(&twice)]),
+        0,
+        "a duplicate target"
+    );
+    // No change, or a change equal to the current value.
+    assert_eq!(kept(&assistant, vec![more(&[])]), 0);
+    let same = vec![int_change("field:hp", NoteValue::Int(84), 84)];
+    assert_eq!(kept(&assistant, vec![more(&same)]), 0, "equal to the value");
+    // An edit that does not fit the value before, and a row address.
+    let misfit = vec![Change {
+        address: "field:hp".into(),
+        before: NoteValue::Int(84),
+        edit: Edit::Bool(true),
+    }];
+    assert_eq!(
+        kept(&assistant, vec![more(&misfit)]),
+        0,
+        "a boolean over a number"
+    );
+    let row = vec![int_change("row:equipment/r1-1", NoteValue::Unknown, 1)];
+    assert_eq!(
+        kept(&assistant, vec![more(&row)]),
+        0,
+        "a row is not a target"
+    );
+    // A dropped option leaves the others, indexed among those kept.
+    assert_eq!(kept(&assistant, vec![more(&five), more(&four)]), 1);
+    let job = assistant.offer(1, reminder("field:hp"), vec![more(&five), more(&four)]);
+    let (bound, option) = assistant.proposal(1, 1, job, 0).unwrap();
+    assert!(verify(job, 0, &bound, &option));
+    assert_eq!(option.changes.len(), 4);
+}
 #[tokio::test]
 async fn an_unavailable_runtime_is_reported_before_anything_else() {
     let stub = Arc::new(StubInterpreter::default());

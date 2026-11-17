@@ -8,8 +8,10 @@
 use super::breaker::{self, Admission, Breaker};
 use super::interpreter::{Completion, Failure, Interpreter};
 use super::output::{self, Candidate, Reading};
+use super::proposal::bind;
+pub(crate) use super::proposal::{Change, Edit, Kind, Proposal, verify};
 use super::request::{self, Bounds, Draft, NotRendered};
-use sha2::{Digest, Sha256};
+use crate::campaigns::NoteValue;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -119,27 +121,21 @@ impl JobId {
     pub(crate) fn text(self) -> String {
         hex::encode(self.0)
     }
+
+    pub(super) fn bytes(self) -> [u8; 16] {
+        self.0
+    }
 }
 
-/// What a job is bound to (plan §1.4, "Origin binding"): the sheet, the target's typed
-/// address (a row cell by host ID) and the origin note's revision.
+/// What a job is bound to (plan §1.4, "Origin binding"): the sheet, the typed address of
+/// the origin note (a row cell by host ID), that note's revision, and the job's kind, which
+/// decides what the apply checks of the origin note (plan §1.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Origin {
     pub sheet: i64,
     pub target: String,
     pub revision: i64,
-}
-
-/// A validated option with its bound read/write set (plan §1.4, "Proposal freshness").
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Proposal {
-    pub candidate: Candidate,
-    /// The target's value at the job's base revision (`None`: unknown).
-    pub before: Option<i64>,
-    /// The expression as shown, with `−`, `×`, `÷`.
-    pub shown: String,
-    /// SHA-256 of the bound content.
-    pub hash: [u8; 32],
+    pub kind: Kind,
 }
 
 /// How a job ended, as a poll reports it.
@@ -613,6 +609,46 @@ impl Assistant {
             .map(|option| (job.origin.clone(), option.clone()))
     }
 
+    /// Test producer: a finished job of `account` on `origin` offering one option per entry of
+    /// `options` (its changes and explanation), standing in for the reminder producer of step
+    /// 3c. Options that fail [`bind`] are left out, as a reply's would be.
+    #[cfg(test)]
+    pub(crate) fn offer(
+        &self,
+        account: i64,
+        origin: Origin,
+        options: Vec<(Vec<Change>, String)>,
+    ) -> JobId {
+        let now = Instant::now();
+        let id = JobId::random();
+        let mut kept: Vec<Proposal> = Vec::new();
+        for (changes, explanation) in options {
+            if let Some(option) = bind(id, kept.len(), &origin, changes, explanation) {
+                kept.push(option);
+            }
+        }
+        let answer = if kept.is_empty() {
+            Answer::Nothing
+        } else {
+            Answer::Options(kept)
+        };
+        let mut table = self.table();
+        let ticket = table.next_ticket;
+        table.next_ticket += 1;
+        table.jobs.push(Job {
+            id,
+            ticket,
+            account,
+            origin,
+            enqueued: now,
+            started: Some(now),
+            state: State::Done { answer, at: now },
+            draft: None,
+            applied: false,
+        });
+        id
+    }
+
     /// Marks job `id` applied, after the apply's commit: options are alternatives.
     pub(crate) fn consume(&self, id: JobId) {
         if let Some(job) = self.table().jobs.iter_mut().find(|job| job.id == id) {
@@ -1020,21 +1056,28 @@ async fn attempt(run: &Run) -> Result<Answer, Attempt> {
     Ok(match output::read(&completed.text, &rendered.checks) {
         Err(_) => Answer::Nothing,
         Ok(Reading::Ambiguous(readings)) => Answer::Readings(readings),
-        Ok(Reading::Options { shown, .. }) if shown.is_empty() => Answer::Nothing,
-        Ok(Reading::Options { shown, .. }) => Answer::Options(
-            shown
-                .into_iter()
-                .enumerate()
-                .map(|(n, candidate)| proposal(run, n, candidate))
-                .collect(),
-        ),
+        Ok(Reading::Options { shown, .. }) => {
+            // An option's index is its position among those kept, which the apply names.
+            let mut options: Vec<Proposal> = Vec::new();
+            for candidate in shown {
+                if let Some(option) = proposal(run, options.len(), candidate) {
+                    options.push(option);
+                }
+            }
+            if options.is_empty() {
+                Answer::Nothing
+            } else {
+                Answer::Options(options)
+            }
+        }
     })
 }
 
-/// Binds an option: its content hash covers the job, the option's index, the origin, the
-/// write (target, value before, value after) and every reference (address and value).
-fn proposal(run: &Run, n: usize, candidate: Candidate) -> Proposal {
-    let hash = content_hash(run.id, n, &run.origin, run.draft.target.value, &candidate);
+/// Binds an interpretation option: one integer change on the origin's target, its content
+/// hash covering the job, the option's index, the origin, the write (target, value before,
+/// value after) and every reference (address and value). `None` drops an option equal to the
+/// current value.
+fn proposal(run: &Run, n: usize, candidate: Candidate) -> Option<Proposal> {
     let before = run.draft.target.value;
     let labels: BTreeMap<&str, &str> = run
         .draft
@@ -1064,67 +1107,13 @@ fn proposal(run: &Run, n: usize, candidate: Candidate) -> Proposal {
         }
     };
     let shown = output::render(&candidate.expr, &name);
-    Proposal {
-        candidate,
-        before,
-        shown,
-        hash,
-    }
-}
-
-/// Whether `proposal`, option `n` of job `id` bound to `origin`, still has the content
-/// hash it was stored with (the apply's check).
-///
-/// It guards the apply against a stored proposal that no longer matches what was shown:
-/// another index, job or origin, a changed value, value before, expression, explanation or
-/// reference. It does not guard against changes on the sheet (the apply's live rechecks of
-/// the origin note, the target and every reference do), against a client (the apply route
-/// takes only `csrf`, never proposal content), or against the model's judgement of
-/// relevance.
-pub(crate) fn verify(id: JobId, n: usize, origin: &Origin, proposal: &Proposal) -> bool {
-    content_hash(id, n, origin, proposal.before, &proposal.candidate) == proposal.hash
-}
-
-fn content_hash(
-    id: JobId,
-    n: usize,
-    origin: &Origin,
-    before: Option<i64>,
-    candidate: &Candidate,
-) -> [u8; 32] {
-    let mut hash = Sha256::new();
-    hash.update(b"mimik-proposal-v1\0");
-    let mut field = |bytes: &[u8]| {
-        hash.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
-        hash.update(bytes);
+    let explanation = candidate.explanation.clone();
+    let change = Change {
+        address: run.origin.target.clone(),
+        before: before.map_or(NoteValue::Unknown, NoteValue::Int),
+        edit: Edit::Expr { candidate, shown },
     };
-    field(&id.0);
-    field(&u64::try_from(n).unwrap_or(u64::MAX).to_be_bytes());
-    field(&origin.sheet.to_be_bytes());
-    field(origin.target.as_bytes());
-    field(&origin.revision.to_be_bytes());
-    field(
-        before
-            .map_or_else(|| "unknown".to_owned(), |v| v.to_string())
-            .as_bytes(),
-    );
-    field(candidate.value.to_string().as_bytes());
-    for supplied in candidate.refs.values() {
-        field(supplied.address.as_bytes());
-        field(
-            supplied
-                .value
-                .map_or_else(|| "unknown".to_owned(), |v| v.to_string())
-                .as_bytes(),
-        );
-    }
-    field(
-        serde_json::to_string(&candidate.expr)
-            .unwrap_or_default()
-            .as_bytes(),
-    );
-    field(candidate.explanation.as_bytes());
-    hash.finalize().into()
+    bind(run.id, n, &run.origin, vec![change], explanation)
 }
 
 #[cfg(test)]

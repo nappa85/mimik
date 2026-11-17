@@ -934,6 +934,7 @@ async fn a_generation_change_ends_running_and_queued_jobs_as_restarted() {
                 sheet,
                 target: "field:hp".into(),
                 revision: 5,
+                kind: crate::assistant::jobs::Kind::Interpretation,
             },
             draft(),
         )

@@ -15,6 +15,7 @@ pub(crate) mod jobs;
 pub(crate) mod lexer;
 pub mod model;
 pub(crate) mod output;
+pub(crate) mod proposal;
 pub(crate) mod records;
 pub(crate) mod request;
 pub(crate) mod runtime;

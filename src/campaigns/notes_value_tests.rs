@@ -106,6 +106,7 @@ fn ops_round_trip() {
         Op::Erased,
         Op::Confirmed,
         Op::Reverted,
+        Op::Reminded,
     ] {
         assert_eq!(Op::parse(op.as_str()), Some(op));
     }
@@ -119,4 +120,56 @@ fn addresses_are_typed() {
         super::cell_address("equipment", "r1-1", "quantity"),
         "cell:equipment/r1-1/quantity"
     );
+}
+
+/// Migration 034: the bundle lookups use the `(sheet_id, bundle)` index, so a bundle's members
+/// and the next bundle number need no scan of the sheet's notes.
+#[tokio::test]
+async fn bundle_lookups_use_the_bundle_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::Store::open(&dir.path().join("plan.sqlite3")).unwrap();
+    let plans = store
+        .run(|db| {
+            let plan =
+                |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Result<String, crate::AppError> {
+                    let mut query = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                    let rows = query
+                        .query_map(params, |row| row.get::<_, String>(3))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(rows.join("\n"))
+                };
+            Ok((
+                plan(super::BUNDLE_MEMBERS, &[&1_i64, &"[1,2]", &9_i64])?,
+                plan(super::NEXT_BUNDLE, &[&1_i64])?,
+            ))
+        })
+        .await
+        .unwrap();
+    for (name, plan) in [("members", &plans.0), ("next", &plans.1)] {
+        assert!(
+            plan.contains("private_sheet_notes_bundle"),
+            "{name}: {plan}"
+        );
+        assert!(!plan.contains("SCAN private_sheet_notes"), "{name}: {plan}");
+    }
+}
+
+/// Migration 034 admits the op `reminded` (and no other new one) in the note table.
+#[tokio::test]
+async fn the_note_table_admits_the_reminded_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::Store::open(&dir.path().join("ops.sqlite3")).unwrap();
+    let checked = store
+        .run(|db| {
+            let sql: String = db.query_row(
+                "SELECT sql FROM sqlite_master WHERE name='private_sheet_notes' AND type='table'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(sql)
+        })
+        .await
+        .unwrap();
+    assert!(checked.contains("'reminded'"), "{checked}");
+    assert!(!checked.contains("'bogus'"));
 }

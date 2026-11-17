@@ -18,7 +18,13 @@ use super::{
 };
 use crate::{
     auth,
-    campaigns::{assist, sheets::SheetView, snapshots::PrivateSnapshot, values},
+    campaigns::{
+        assist,
+        notes::{MAX_BUNDLE, Stored},
+        sheets::SheetView,
+        snapshots::PrivateSnapshot,
+        values,
+    },
 };
 use axum::{
     Extension,
@@ -112,8 +118,8 @@ async fn act(
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let refused = match planned {
-        Ok(message) => message,
+    let (refused, members) = match planned {
+        Ok(planned) => planned,
         Err(Refusal::BadRequest) => return Err(StatusCode::BAD_REQUEST),
         Err(Refusal::Stale(message)) => {
             return rendered(
@@ -145,11 +151,14 @@ async fn act(
     {
         Ok((id, _permit)) => Ok(Redirect::to(&format!("/private-sheets/{id}")).into_response()),
         Err((failure @ (AppError::Conflict | AppError::Invalid(_)), permit)) => {
+            let (view, permit) = rejected_editor(&state, auth, id, None, permit).await?;
             let message = match failure {
                 AppError::Invalid(reason) => format!("Nothing changed: {reason}"),
-                _ => refused,
+                // A bundle Undo that lost a race names the members the re-read sheet shows
+                // changed, as the refusal before the write would have.
+                _ => changed_members(&view, &members)
+                    .map_or(refused, |labels| changed_message(&labels)),
             };
-            let (view, permit) = rejected_editor(&state, auth, id, None, permit).await?;
             rendered(
                 view,
                 permit,
@@ -173,7 +182,7 @@ fn plan(
     form: &BTreeMap<String, String>,
     action: Action,
     earlier: Option<&PrivateSnapshot>,
-) -> Result<String, Refusal> {
+) -> Result<(String, Vec<Stored>), Refusal> {
     // Native and unsupported pins have no notes.
     let pin = view.immutable.as_ref().ok_or(Refusal::BadRequest)?;
     let definition = pin.definition();
@@ -238,7 +247,7 @@ fn plan(
         }
         view.notes.pending = vec![assist::undo_note(&stored)];
         view.notes.bound = vec![stored];
-        return Ok(stale);
+        return Ok((stale, Vec::new()));
     }
     let stored = view
         .notes
@@ -246,6 +255,12 @@ fn plan(
         .get(&address)
         .filter(|stored| stored.revision == revision)
         .ok_or_else(|| Refusal::Stale(stale.clone()))?;
+    // The Undo of a member of a bundle of several notes reverts every member (step 3b).
+    if action == Action::Undo
+        && let Some(members) = bundle_members(view, stored, &stale)?
+    {
+        return undo_bundle(view, &members, revision, stale);
+    }
     let (note, value) = match action {
         Action::Switch => {
             let value = assist::switch_value(stored, current.as_ref())
@@ -268,7 +283,90 @@ fn plan(
         .map_err(|_| Refusal::Stale(stale.clone()))?;
     view.notes.bound = vec![stored.clone()];
     view.notes.pending = vec![note];
-    Ok(stale)
+    Ok((stale, Vec::new()))
+}
+
+/// The members of a bundle of several notes `stored` belongs to; `None` for a note of no
+/// bundle or of a single-note one. A bundled note whose members are not known (the page's
+/// bundle query gave up) is refused as stale, never undone as a single cell.
+fn bundle_members(
+    view: &SheetView,
+    stored: &Stored,
+    stale: &str,
+) -> Result<Option<Vec<Stored>>, Refusal> {
+    let Some(bundle) = stored.bundle else {
+        return Ok(None);
+    };
+    let members = view
+        .notes
+        .bundles
+        .get(&bundle)
+        .ok_or_else(|| Refusal::Stale(stale.to_owned()))?;
+    Ok((members.len() > 1).then(|| members.clone()))
+}
+
+/// The Undo of a bundle (plan §1.5, step 3b), all or nothing: every member's current note must
+/// still be that bundle's note, with the cell holding its `after`. Otherwise nothing is
+/// written and the refusal lists the members that changed (a removed row, or one restored
+/// under a new host ID, is one of them). Else every member goes back to its value before, one
+/// `reverted` note each, sharing a new bundle number.
+fn undo_bundle(
+    view: &mut SheetView,
+    members: &[Stored],
+    revision: i64,
+    stale: String,
+) -> Result<(String, Vec<Stored>), Refusal> {
+    if view.immutable.is_none() {
+        return Err(Refusal::BadRequest);
+    }
+    if members.len() > MAX_BUNDLE || members.iter().any(|member| member.revision != revision) {
+        return Err(Refusal::Stale(stale));
+    }
+    if let Some(labels) = changed_members(view, members) {
+        return Err(Refusal::Stale(changed_message(&labels)));
+    }
+    let pin = view.immutable.as_ref().ok_or(Refusal::BadRequest)?;
+    let definition = pin.definition();
+    let mut data = view.snapshot.data.clone();
+    let mut notes = Vec::new();
+    for member in members {
+        let located = assist::locate(definition, &view.snapshot.data, &member.note.address)
+            .ok_or_else(|| Refusal::Stale(stale.clone()))?;
+        let note = assist::undo_note(member);
+        assist::set(&located, &mut data, &note.after).map_err(|_| Refusal::Stale(stale.clone()))?;
+        notes.push(note);
+    }
+    view.snapshot.data = data;
+    view.notes.pending = notes;
+    view.notes.bound = members.to_vec();
+    view.notes.bundle = true;
+    Ok((stale, members.to_vec()))
+}
+
+/// The labels of the members of a bundle that no longer allow its Undo on `view`: the member's
+/// current note is no longer that note, its cell no longer holds its `after`, or its row is
+/// gone (removed, or restored under a new host ID). `None` when every member holds.
+pub(super) fn changed_members(view: &SheetView, members: &[Stored]) -> Option<Vec<String>> {
+    let definition = view.immutable.as_ref()?.definition();
+    let mut changed = Vec::new();
+    for member in members {
+        let address = &member.note.address;
+        let current = assist::locate(definition, &view.snapshot.data, address)
+            .and_then(|located| assist::value_at(&located, &view.snapshot.data));
+        if view.notes.current.get(address) != Some(member)
+            || !assist::undoable(member, current.as_ref())
+        {
+            changed.push(assist::label(definition, &view.snapshot.data, address));
+        }
+    }
+    (!changed.is_empty()).then_some(changed)
+}
+
+fn changed_message(labels: &[String]) -> String {
+    format!(
+        "Nothing undone: {} changed since, or this change was already undone.",
+        labels.join(", ")
+    )
 }
 
 /// The message of a switch or Undo that finds its cell changed since.

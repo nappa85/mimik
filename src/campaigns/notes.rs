@@ -21,7 +21,9 @@ pub(crate) const MAX_VALUE_BYTES: usize = 80;
 
 /// How a note's value was read. Slice 1.2 writes `Literal`, `Sum` and `Unresolved`; slice
 /// 1.3 adds `SignLiteral` (D-Q), `Switched` and `Reverted` (Undo); slice 1.4 `Erased`; a row
-/// removal (slice 1.5b) is a `Literal` row note. `Confirmed` is reserved for step 2c.
+/// removal (slice 1.5b) is a `Literal` row note. `Confirmed` is an applied interpretation
+/// (step 2c) and `Reminded` an applied reminder (step 3c), told apart from it; both are
+/// displayed and undone alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Op {
     Literal,
@@ -32,6 +34,7 @@ pub(crate) enum Op {
     Erased,
     Confirmed,
     Reverted,
+    Reminded,
 }
 
 impl Op {
@@ -45,6 +48,7 @@ impl Op {
             Self::Erased => "erased",
             Self::Confirmed => "confirmed",
             Self::Reverted => "reverted",
+            Self::Reminded => "reminded",
         }
     }
 
@@ -58,6 +62,7 @@ impl Op {
             Self::Erased,
             Self::Confirmed,
             Self::Reverted,
+            Self::Reminded,
         ]
         .into_iter()
         .find(|op| op.as_str() == text)
@@ -158,12 +163,18 @@ pub(crate) struct Note {
     pub target: Option<i64>,
 }
 
-/// A note as read back, with the revision it belongs to.
+/// A note as read back, with the revision it belongs to and its bundle number: the notes
+/// one apply or one bundle Undo wrote share one (step 3b); `None` for every other note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Stored {
     pub revision: i64,
     pub note: Note,
+    pub bundle: Option<i64>,
 }
+
+/// The most notes a bundle holds: a proposal has 1 to 4 changes (plan §1.5), and the Undo of
+/// a bundle writes one note per member.
+pub(crate) const MAX_BUNDLE: usize = crate::assistant::proposal::MAX_CHANGES;
 
 /// The notes a page needs: the current note of each live address (sheet page), the notes of
 /// one revision (history page), and the notes a save will write.
@@ -177,8 +188,13 @@ pub(crate) struct Notes {
     pub bound: Vec<Stored>,
     /// The latest row note of each list on a current page, by list ID (slice 1.5b).
     pub rows: BTreeMap<String, Stored>,
-    /// The pending notes share one new bundle number (an applied proposal, step 2c-1).
+    /// The pending notes share one new bundle number (an applied proposal, step 2c-1; the Undo
+    /// of a bundle, step 3b).
     pub bundle: bool,
+    /// The members of each bundle some current note of the page belongs to, by bundle number
+    /// (one bounded query per page, [`bundles`]); a page offers "(with N other fields)" and a
+    /// bundle Undo reads its members from it.
+    pub bundles: BTreeMap<i64, Vec<Stored>>,
 }
 
 /// The typed address of a scalar field (plan §3a, Sol rev-2 M1).
@@ -210,7 +226,7 @@ pub(crate) fn latest_rows(
     lists: &[&str],
 ) -> Result<BTreeMap<String, Stored>, AppError> {
     let mut latest = BTreeMap::new();
-    let mut query = db.prepare_cached("SELECT revision,address,op,raw,before,after,target FROM private_sheet_notes WHERE sheet_id=?1 AND address>=?2 AND address<?3 ORDER BY revision DESC LIMIT 1")?;
+    let mut query = db.prepare_cached("SELECT revision,address,op,raw,before,after,target,bundle FROM private_sheet_notes WHERE sheet_id=?1 AND address>=?2 AND address<?3 ORDER BY revision DESC LIMIT 1")?;
     for list in lists {
         // Every `row:<list>/…` address sorts in [`row:<list>/`, `row:<list>0`): '0' follows '/'.
         let (from, to) = (format!("row:{list}/"), format!("row:{list}0"));
@@ -276,11 +292,7 @@ pub(crate) fn insert(
         return Err(too_many());
     }
     let bundle: Option<i64> = if bundle {
-        Some(db.query_row(
-            "SELECT coalesce(max(bundle),0)+1 FROM private_sheet_notes WHERE sheet_id=?1",
-            [sheet_id],
-            |row| row.get(0),
-        )?)
+        Some(db.query_row(NEXT_BUNDLE, [sheet_id], |row| row.get(0))?)
     } else {
         None
     };
@@ -316,6 +328,7 @@ fn stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Stored>> {
     let before: Option<String> = row.get(4)?;
     let after: String = row.get(5)?;
     let target: Option<i64> = row.get(6)?;
+    let bundle: Option<i64> = row.get(7)?;
     // A malformed row (only possible by writing the database directly, L1) is skipped.
     let note = (|| {
         Some(Note {
@@ -330,7 +343,11 @@ fn stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<Stored>> {
             target,
         })
     })();
-    Ok(note.map(|note| Stored { revision, note }))
+    Ok(note.map(|note| Stored {
+        revision,
+        note,
+        bundle,
+    }))
 }
 
 /// The current (latest) note of each of `addresses`.
@@ -348,7 +365,7 @@ pub(crate) fn current(
     // address. A plain JOIN let the planner scan every note of the sheet and probe the
     // address list for each, O(notes × addresses) (slice 1.3 regression test
     // `worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound`).
-    let mut query = db.prepare("SELECT n.revision,n.address,n.op,n.raw,n.before,n.after,n.target FROM json_each(?2) a CROSS JOIN private_sheet_notes n ON n.sheet_id=?1 AND n.address=a.value AND n.revision=(SELECT max(m.revision) FROM private_sheet_notes m WHERE m.sheet_id=?1 AND m.address=a.value)")?;
+    let mut query = db.prepare("SELECT n.revision,n.address,n.op,n.raw,n.before,n.after,n.target,n.bundle FROM json_each(?2) a CROSS JOIN private_sheet_notes n ON n.sheet_id=?1 AND n.address=a.value AND n.revision=(SELECT max(m.revision) FROM private_sheet_notes m WHERE m.sheet_id=?1 AND m.address=a.value)")?;
     for row in query.query_map(params![sheet_id, list], stored)? {
         if let Some(stored) = row? {
             current.insert(stored.note.address.clone(), stored);
@@ -357,13 +374,55 @@ pub(crate) fn current(
     Ok(current)
 }
 
+/// The notes of the bundles named by `?2` (a JSON array), CROSS JOIN fixing the loop order: one
+/// probe of the `(sheet_id, bundle)` index per bundle number, as [`current`] probes by address.
+const BUNDLE_MEMBERS: &str = "SELECT n.revision,n.address,n.op,n.raw,n.before,n.after,n.target,n.bundle FROM json_each(?2) b CROSS JOIN private_sheet_notes n ON n.sheet_id=?1 AND n.bundle=b.value ORDER BY n.bundle,n.address LIMIT ?3";
+/// The number of the next bundle of sheet `?1`: the last entry of the same index.
+const NEXT_BUNDLE: &str =
+    "SELECT coalesce(max(bundle),0)+1 FROM private_sheet_notes WHERE sheet_id=?1";
+
+/// The members of every bundle some note of `current` belongs to, by bundle number, in
+/// address order: one query through the `(sheet_id, bundle)` index, a bundle having at most
+/// [`MAX_BUNDLE`] notes. Nothing is read when no current note has a bundle.
+pub(crate) fn bundles(
+    db: &Connection,
+    sheet_id: i64,
+    current: &BTreeMap<String, Stored>,
+) -> Result<BTreeMap<i64, Vec<Stored>>, AppError> {
+    let numbers: std::collections::BTreeSet<i64> = current
+        .values()
+        .filter_map(|stored| stored.bundle)
+        .collect();
+    let mut members: BTreeMap<i64, Vec<Stored>> = BTreeMap::new();
+    if numbers.is_empty() {
+        return Ok(members);
+    }
+    let list = serde_json::to_string(&numbers)?;
+    // One row more than the bundles can hold: more than that means malformed rows (only a
+    // direct database write makes them), and no bundle is read at all.
+    let limit = numbers.len() * MAX_BUNDLE + 1;
+    let mut query = db.prepare_cached(BUNDLE_MEMBERS)?;
+    let limit_param = i64::try_from(limit).unwrap_or(i64::MAX);
+    for row in query.query_map(params![sheet_id, list, limit_param], stored)? {
+        if let Some(stored) = row?
+            && let Some(bundle) = stored.bundle
+        {
+            members.entry(bundle).or_default().push(stored);
+        }
+    }
+    if members.values().map(Vec::len).sum::<usize>() >= limit {
+        members.clear();
+    }
+    Ok(members)
+}
+
 /// The notes of one revision, in address order.
 pub(crate) fn of_revision(
     db: &Connection,
     sheet_id: i64,
     revision: i64,
 ) -> Result<Vec<Stored>, AppError> {
-    let mut query = db.prepare("SELECT revision,address,op,raw,before,after,target FROM private_sheet_notes WHERE sheet_id=?1 AND revision=?2 ORDER BY address LIMIT 257")?;
+    let mut query = db.prepare("SELECT revision,address,op,raw,before,after,target,bundle FROM private_sheet_notes WHERE sheet_id=?1 AND revision=?2 ORDER BY address LIMIT 257")?;
     let rows = query
         .query_map(params![sheet_id, revision], stored)?
         .collect::<Result<Vec<_>, _>>()?;

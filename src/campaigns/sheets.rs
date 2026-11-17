@@ -500,6 +500,8 @@ impl Store {
                 }else{
                     let addresses=super::notes::addresses(pin.definition(),&view.snapshot.data);
                     view.notes.current=super::notes::current(&tx,view.snapshot.sheet_id,&addresses)?;
+                    // The members of the bundles those notes belong to (step 3b): one bounded query.
+                    view.notes.bundles=super::notes::bundles(&tx,view.snapshot.sheet_id,&view.notes.current)?;
                     // The latest row note of each list: a removal offers Undo (slice 1.5b).
                     let lists:Vec<&str>=pin.definition().fields.iter().filter(|field|field.control==crate::definitions::Control::List&&field.formula.is_none()).map(|field|field.id.as_str()).collect();
                     view.notes.rows=super::notes::latest_rows(&tx,view.snapshot.sheet_id,&lists)?;

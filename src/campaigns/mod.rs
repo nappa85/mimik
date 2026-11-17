@@ -23,6 +23,8 @@ use crate::{AppError, auth::RequestAuth};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub(crate) use crate::pagination::Listing;
+/// The typed note value, which a bound proposal's changes carry (assistant step 3b).
+pub(crate) use notes::NoteValue;
 
 /// Rewinds schema 20 (change notes, migration 020) for upgrade tests of older schemas.
 #[cfg(test)]

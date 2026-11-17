@@ -412,6 +412,7 @@ fn start_job(assistant: &Arc<Assistant>, revision: i64) -> crate::assistant::job
         sheet: 1,
         target: "field:hp".into(),
         revision,
+        kind: crate::assistant::jobs::Kind::Interpretation,
     };
     let registration = assistant.register(1, revision);
     assistant

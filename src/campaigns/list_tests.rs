@@ -3045,6 +3045,55 @@ async fn worst_label_page_with_every_switch_and_undo_is_within_the_unit_bound() 
     within_unit_bound(&html, units, "32 sign-led columns, switch and Undo");
 }
 
+/// Step 3b: the worst case above with every note a member of a 4-note bundle, so every Undo
+/// offer reads "Last change: was … (with 3 other fields)"; the bundle sizes come from the one
+/// bounded query of the page read, and the page stays within the unit bound.
+#[tokio::test]
+async fn worst_label_page_with_every_bundled_undo_is_within_the_unit_bound() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (raw, before, value) = densest_sign_led();
+    let (setup, plain, units) = wide_list_setup(
+        256,
+        Some(value),
+        ("sign_literal", &raw, Some(before)),
+        (true, false),
+    )
+    .await;
+    // Notes of consecutive rows share bundles of four (the table is insert-only: the trigger
+    // is set aside for this fixture's update).
+    setup
+        .store
+        .run(|db| {
+            db.execute_batch("DROP TRIGGER private_sheet_notes_update; UPDATE private_sheet_notes SET bundle=(rowid-1)/4+1;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let response =
+        super::router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
+    let html = String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(html.matches("form=\"assist-undo\"").count(), 32 * 256);
+    assert_eq!(
+        html.matches("(with 3 other fields)").count(),
+        32 * 256,
+        "every Undo offer names its bundle"
+    );
+    within_unit_bound(&html, units, "every bundled Undo");
+    println!(
+        "bundled worst page: {} bytes, unbundled {} bytes, bound {}",
+        html.len(),
+        plain.len(),
+        FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES
+    );
+}
+
 /// The same for slice 1.2's plain sum note (`11+11…`, 64 numbers) with Undo on every cell.
 #[tokio::test]
 async fn worst_label_page_with_every_long_sum_is_within_the_unit_bound() {

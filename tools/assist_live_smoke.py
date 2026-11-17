@@ -151,7 +151,10 @@ def main(argv=None):
             ]
             csrf, _ = unit_csrf(cookie, sheet)
             status, _, body = post_json(answer["options"][0]["action"], cookie, {"csrf": csrf})
-            out["first"]["apply"] = {"status": status, "value": json.loads(body)["unit"]["value"]}
+            out["first"]["apply"] = {
+                "status": status,
+                "value": json.loads(body)["units"][0]["value"],
+            }
         # 2. A second request of the session (the prefix comes from the prompt cache).
         csrf, key = scribble(cookie, sheet, "healed 4")
         answer, seconds = wait(cookie, start_job(cookie, sheet, csrf, key))
