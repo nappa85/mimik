@@ -12,6 +12,7 @@ use super::libs;
 use super::manager::{Child, DeviceView, Fail, Launcher, MODEL_CHANGED};
 use super::manifest::{Build, MANIFEST};
 use super::models::{Model, ModelFile};
+use super::progress::{Observer, StartEvent};
 use super::rundir::{self, Entry, Generation, Pidfile, Swept};
 use super::runner::{self, Exec, Handover, RunnerCommand, Spec};
 use super::sandbox::{self, GpuBinds, Started};
@@ -43,7 +44,7 @@ const LIST_WITHIN: Duration = Duration::from_secs(30);
 /// The most of a listing's output that is read.
 const LIST_BYTES: u64 = 64 * 1024;
 /// How long the GPU child has, after `/health`, to have reported its offload line.
-const OFFLOAD_WITHIN: Duration = Duration::from_secs(5);
+pub(crate) const OFFLOAD_WITHIN: Duration = Duration::from_secs(5);
 
 /// The descriptor numbers the child sees.
 mod fds {
@@ -230,6 +231,8 @@ pub(crate) struct Real {
     /// What the advisory library check last believed was missing for each path (CPU, GPU): a
     /// hint added to a failed start, never a reason to refuse or change one.
     library_hints: Mutex<[Option<String>; 2]>,
+    /// Where the manager wants the verification of the model file reported.
+    observer: Mutex<Option<Observer>>,
 }
 
 /// A count of running cleanups, waited on without polling: a spawn blocks until it is 0.
@@ -409,6 +412,7 @@ impl Real {
             work: Work::new(),
             probes: AtomicU64::new(1),
             library_hints: Mutex::new([None, None]),
+            observer: Mutex::new(None),
             cleanups: Arc::new(Cleanups::default()),
             unconfined: false,
         }
@@ -526,6 +530,18 @@ impl Real {
             hint;
     }
 
+    /// Tells the manager's reporter about the verification of the model file.
+    fn notify(&self, event: StartEvent) {
+        let observer = self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer(event);
+        }
+    }
+
     /// The model and the build's files, verified.
     fn verify(&self, path: Path, level: Level, ticket: &Ticket) -> Result<Checked, String> {
         // The hint belongs to one attempt: whatever an earlier verification believed is gone
@@ -579,12 +595,18 @@ impl Real {
                 )
             })?;
         let chosen = self.chosen();
+        self.notify(StartEvent::Verifying);
+        let touched = AtomicBool::new(false);
         let model = files::model_until(
             models.as_fd(),
             &chosen.name,
             &chosen.sha256,
             &self.cache,
             &stop,
+            &|done, total| {
+                touched.store(true, Ordering::SeqCst);
+                self.notify(StartEvent::Hashed { done, total });
+            },
         )
         .map_err(|refusal| match refusal {
             // The file is not the one that was tried: not a start failure to retry.
@@ -593,6 +615,9 @@ impl Real {
             ),
             other => format!("the model: {other}"),
         })?;
+        self.notify(StartEvent::Verified {
+            unchanged: !touched.load(Ordering::SeqCst),
+        });
         let build_dir = real.join(&build.directory);
         // Advisory only: a library the host seems to lack is remembered as a hint for a start
         // that then fails. It never refuses a start, and nothing about the sandbox depends on it.
@@ -2064,7 +2089,7 @@ async fn settled_marker(readers: &Readers, marker: &MarkerState, within: Duratio
 }
 
 /// How long `exited` waits for the readers after the exit.
-const READERS_WITHIN: Duration = Duration::from_secs(5);
+pub(crate) const READERS_WITHIN: Duration = Duration::from_secs(5);
 /// How long a level-3 child has to start listening before it is taken as running.
 const BIND_LISTENING: Duration = Duration::from_secs(10);
 
@@ -2713,6 +2738,14 @@ impl Launcher for Launch {
         self.0.held().device_notes.clone()
     }
 
+    fn observe(&self, observer: Observer) {
+        *self
+            .0
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+    }
+
     fn select(&self, model: &Model) {
         *self
             .0
@@ -2746,9 +2779,14 @@ impl Launcher for Launch {
         tokio::task::spawn_blocking(move || {
             let models = files::open_dir(&real.settings.models_dir, Owners::Mine, true)
                 .map_err(|refusal| format!("the models folder: {refusal}"))?;
-            let (hash, size) =
-                files::model_digest(models.as_fd(), &name, &real.cache, &|| ticket.cancelled())
-                    .map_err(|refusal| format!("the model: {refusal}"))?;
+            let (hash, size) = files::model_digest(
+                models.as_fd(),
+                &name,
+                &real.cache,
+                &|| ticket.cancelled(),
+                &|done, total| real.notify(StartEvent::Hashed { done, total }),
+            )
+            .map_err(|refusal| format!("the model: {refusal}"))?;
             Ok(ModelFile {
                 sha256: hex::encode(hash),
                 size,

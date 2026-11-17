@@ -1,5 +1,5 @@
 //! The Downloads panel and routes of `/admin/assistant` (`docs/model-downloads.md`):
-//! Review, Confirm, Cancel, Resume, Discard, delete, and the state for polling. Owner only;
+//! Review, Confirm, Cancel, Resume, Discard, delete, and the state the live status carries. Owner only;
 //! every action is CSRF-checked, a strict form of at most 4 KiB, and takes the model-work gate
 //! where it changes files.
 use super::{AuthState, csrf_admission, owner_auth};
@@ -9,11 +9,11 @@ use crate::assistant::download::task::{Discarded, Permit, Phase, Refusal, Status
 use crate::assistant::downloads::Downloads;
 use crate::assistant::model::{HfSpec, pinned};
 use axum::{
-    Json, Router,
+    Router,
     extract::{DefaultBodyLimit, Form, State},
-    http::{StatusCode, header},
+    http::StatusCode,
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::post,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -47,16 +47,6 @@ pub(super) fn routes() -> Router<AuthState> {
             post(discard).layer(limit()),
         )
         .route("/admin/assistant/model/delete", post(delete).layer(limit()))
-        .route("/admin/assistant/downloads.json", get(state_json))
-        .route(
-            "/assets/assistant-downloads.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    include_str!("../../assets/assistant-downloads.js"),
-                )
-            }),
-        )
 }
 
 /// The notice for a command the download task refused.
@@ -360,26 +350,38 @@ pub(super) fn signature(review: &ReviewState, status: &Status) -> String {
     format!("{}|{}", review_word(review), phase_word(&status.phase))
 }
 
-async fn state_json(
-    State(state): State<AuthState>,
-    session: Session,
-) -> Result<Response, StatusCode> {
-    owner_auth(&state, &session).await?;
-    let Some(downloads) = downloads(&state) else {
-        return Ok(Json(json!({"available": false})).into_response());
-    };
+/// The downloads' share of the page's live state: what changes the page (`signature`), whether
+/// a review or a transfer runs (`busy`), and the fields the script reads.
+pub(super) struct DownloadsLive {
+    pub signature: String,
+    pub busy: bool,
+    pub fields: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The downloads' live state, or `None` without downloads. No URL, licence or token.
+pub(super) async fn live(state: &AuthState) -> Option<DownloadsLive> {
+    let downloads = downloads(state)?;
     let review = downloads.reviewer.state();
     let status = downloads.downloader.status();
     let (received, total) = match &status.phase {
         Phase::Running { received, total } => (*received, *total),
         _ => (0, 0),
     };
+    let busy = matches!(review, ReviewState::Running { .. })
+        || matches!(status.phase, Phase::Running { .. } | Phase::Verifying);
+    let signature = signature(&review, &status);
+    let mut fields = serde_json::Map::new();
     let Ok(listed) = downloads.rows.list().await else {
-        return Ok(Json(json!({
-            "available": true,
-            "error": "the download records cannot be read",
-        }))
-        .into_response());
+        fields.insert(
+            "error".to_owned(),
+            json!("the download records cannot be read"),
+        );
+        // As the panel does with unreadable records: no signature, nothing running to show.
+        return Some(DownloadsLive {
+            signature: String::new(),
+            busy: false,
+            fields,
+        });
     };
     let rows: Vec<serde_json::Value> = listed
         .iter()
@@ -393,12 +395,15 @@ async fn state_json(
             })
         })
         .collect();
-    Ok(Json(json!({
-        "available": true,
-        "signature": signature(&review, &status),
-        "review": review_word(&review),
-        "download": {"id": status.id, "spec": status.spec, "phase": phase_word(&status.phase), "received": received, "total": total},
-        "rows": rows,
-    }))
-    .into_response())
+    fields.insert("review".to_owned(), json!(review_word(&review)));
+    fields.insert(
+        "download".to_owned(),
+        json!({"id": status.id, "spec": status.spec, "phase": phase_word(&status.phase), "received": received, "total": total}),
+    );
+    fields.insert("rows".to_owned(), json!(rows));
+    Some(DownloadsLive {
+        signature,
+        busy,
+        fields,
+    })
 }

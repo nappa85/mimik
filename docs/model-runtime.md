@@ -704,11 +704,76 @@ whether it comes from the stored setting or the start flags), the previous model
 back", the "Longest reply" field (the bounds, the running path, "a reply can take up to R s",
 the measured time per token and the longest a player can wait, the queue wait plus R, and that setting it does not run the five phrases), the Model field with "Try" (the
 refusal and the kept input beside it), and the latest trial:
-its phase and Cancel while it runs; when it passed, the device, times, speeds, the largest
+its progress block and Cancel while it runs; when it passed, the device, times, speeds, the largest
 phrase reply, B, N(B), R, D and Q and each phrase; the reason when it failed or was cancelled. With the
 development endpoint the model cannot be changed and the page says so. The Downloads
 section (review, progress, pinned defaults, downloaded models) is described in
 [model-downloads.md](model-downloads.md).
+
+### Live progress
+
+The page updates itself (`assets/assistant-live.js`, `src/auth/assistant_live.rs`). One
+route, `GET /admin/assistant/status.json` (owner only, `no-store` from the global header
+layer, no CSRF because it changes nothing; polling does not extend the session's absolute
+expiry), answers `{"available": false}` without an assistant runtime, otherwise `signature`,
+`poll_ms`, `progress` (or null) and the downloads' fields (`review`, `download`, `rows`; see
+[model-downloads.md](model-downloads.md)). The script decides nothing: it sets `textContent`,
+`value` and `max` from what the server sends and never writes markup.
+
+- **Busy and polling.** Busy is the model server starting, restarting, a model change
+  pending, a trial running, or a review or download running. Busy: `poll_ms` 2,000 and
+  `progress` set while the runtime is starting (a download alone has only its own bar);
+  idle: 15,000, so a crash restart, a change from another tab or the breaker still show up
+  and polling never stops. The script pauses while the tab is hidden, polls at once when it
+  shows again, chains `setTimeout` (no pile-up behind a slow answer), stops on 401 or 403
+  with "Signed out: reload to sign in", and has a "Stop updating" button (WCAG 2.2.2).
+- **Steps.** `Phase` (`runtime/progress.rs`) is the one name of every step, used by the
+  runtime state and by a running trial, so the label, the step number and the page agree.
+  The manager chooses the list where the work begins:
+
+  | Entry | Steps |
+  |---|---|
+  | Fresh session (Mimik's start, Restart, Try the GPU again, Switch, Switch back, a length change, the previous model after a trial, the CPU after a GPU failure, a reverted length) | stopping the model server (only when one ran), checking the host, starting the model server, verifying the model file, loading the model, priming, calibration sample 1, sample 2 |
+  | Retry after a failed attempt or a crash restart (no preflight, no probe) | starting, verifying, loading, priming, samples 1 and 2; "attempt n of up to 4" only when counted failures exist (a level skipped after an uncounted sandbox failure, or a crash after the ready window, is unnumbered) |
+  | Waiting to retry | its own step with the exact time left (`RETRY_AFTER`) |
+  | Trial | waiting for the model server to stop, hashing the file, checking the host, starting, loading, priming, samples 1 and 2, phrases 1 to 5 |
+
+  The GPU fallback is labelled "on the CPU after a GPU failure", a reverted length "with
+  the earlier length". The bar's basis is the step count of the list, fixed for the run;
+  its value is the steps finished, so it is full only when the work is. A session sets its
+  list before it waits for earlier work to settle: with the stop step when a model server
+  may have run (a ready or starting one stopped for the owner, or a trial that just ended),
+  without it otherwise, so no earlier step stays up during the stop. A trial always starts
+  its own progress, keeping the start time of the one its admission set.
+  The launcher reports the model file's verification (`StartEvent`, `Launcher::observe`);
+  `files::hash` reports bytes every MiB. A remembered hash reports "verified (unchanged)".
+  The probes of the host hash a first-seen file before the start, so bytes show there
+  too, as text in the checking step.
+- **Time.** "At most X left in this step" comes from the limit the code enforces: `/health`
+  60 s plus what `loaded()` allows (5 s for the readers, and 5 s more for the offload line on the GPU path), priming
+  300 s, each calibration sample 540 s (its timeout, and its `/tokenize` call sits outside
+  that), each trial phrase `phrase_bound` once calibrated, the whole trial
+  `trial_bound()`; waiting to retry is exact; hashing adds "about Y left at this rate" from
+  the bytes read since the step's first report, over the file size. "About Y left (last time)" appears for a step measured in
+  the last successful run of the same file, path and entry kind in this process (memory
+  only; a failed attempt's partial times are never kept). Past it the page says "taking
+  longer than last time (N s)", never a negative time. Phrases end on EOS, so they get only
+  the bound.
+- **Signature and reloads.** One function over one status snapshot (`signature`) names what
+  changes the page: the state kind (not the step), the unavailable reason, the active and
+  previous model with lengths, the note, the trial's number and outcome, restarting and
+  pending, whether budgets exist, the downloads' state, and the generation only while idle.
+  It is sent as the lowercase hex SHA-256 of that text (a reason holding a line break or a
+  NUL would not survive an HTML attribute unchanged). The page's `data-signature` and the
+  JSON carry the same string. On a change the script
+  navigates with `location.replace("/admin/assistant")` (no form re-submission, no stale
+  notice), at most once per 5 s (`sessionStorage`, in try/catch); while a form field has
+  focus or a changed value it shows "The state changed: reload" instead.
+- **Page.** The progress block (the step text in an `aria-live="polite"` element changed
+  only when the step changes, elapsed and time left in a separate non-live line, and a
+  `<progress>` named by the step text) is in the State section, or in the running trial's
+  section in place of a status line. Without JavaScript the page is rendered at the current
+  step and says to reload it.
 
 ## Development endpoint
 

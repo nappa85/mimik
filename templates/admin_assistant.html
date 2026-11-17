@@ -7,6 +7,8 @@
 <p><strong>{{ view.state }}</strong>{% if !view.reason.is_empty() %}: {{ view.reason }}{% endif %}</p>
 <p>Model server: {{ view.llama }} · Path: {{ view.path }} · Generation {{ view.generation }} · Failures counted: {{ view.failures }} of 4{% if !view.last_failure.is_empty() %} · Last: {{ view.last_failure }}{% endif %}</p>
 <p>Circuit breaker: {{ view.breaker }}</p>
+{% if !view.model.trial_running %}{% include "assistant_progress.html" %}{% endif %}
+{% if let Some(live) = live %}<div id="assistant-live" data-signature="{{ live.signature }}" data-poll-ms="{{ live.poll_ms }}"><p id="live-note" role="status"></p><button type="button" id="live-stop" hidden>Stop updating</button></div>{% endif %}
 <form method="post" action="/admin/assistant/restart"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Restart</button></form>
 <p>Restart stops the model server, starts it again from the highest confinement level, measures it again and resets the breaker and the failure count; after a GPU failure it stays on the CPU. Number entry, notes and Undo work meanwhile.</p></section>
 <section class="panel"><h2>Model</h2>
@@ -26,7 +28,8 @@
 <p>A model is a file already in the models folder: <code>local:&lt;name&gt;.gguf</code> (place it there by hand), or <code>hf:&lt;org&gt;/&lt;repo&gt;/&lt;path&gt;.gguf@&lt;revision&gt;</code> to review and download it (see Downloads below). Trying it stops the model server while the trial runs, so the assistant shows as starting meanwhile: the file is hashed, loaded, primed, measured and tried on five synthetic phrases. Nothing changes until you press Switch, and Switch back returns to the previous model.</p>
 {% if let Some(level) = view.level %}<p>A model file is untrusted input to the model server, contained only by its confinement: level {{ level.number }} ({{ level.name }}).</p>{% endif %}
 {% if let Some(trial) = view.model.trial %}<h3>Trial {{ trial.number }} of {{ trial.spec }}: {{ trial.outcome }}</h3>
-{% if trial.running %}<p>Now: {{ trial.detail }}. Bounded to 90 minutes, with 2 × the run deadline of a default-length reply per phrase; reload this page to follow it.</p>
+{% if trial.running %}{% include "assistant_progress.html" %}
+<p>Bounded to 90 minutes, with 2 × the run deadline of a default-length reply per phrase.</p>
 <form method="post" action="/admin/assistant/model/cancel"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="trial" value="{{ trial.number }}"><button>Cancel</button></form>
 {% else if !trial.detail.is_empty() %}<p class="form-error" role="alert">{{ trial.detail }}. The previous model is running again.</p>
 <form method="post" action="/admin/assistant/model/keep"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Dismiss</button></form>{% endif %}
@@ -45,7 +48,7 @@
 {% endif %}
 {% else %}<p>The model cannot be changed here: a development endpoint is in use.</p>{% endif %}</section>
 {% if let Some(d) = downloads %}
-<section class="panel" id="downloads" data-signature="{{ d.signature }}"{% if d.polling %} data-poll="1"{% endif %}><h2>Downloads</h2>
+<section class="panel" id="downloads"><h2>Downloads</h2>
 {% if let Some(why) = d.unavailable %}<p>Downloads are unavailable: {{ why }}.</p>
 {% else %}
 <p>An <code>hf:&lt;org&gt;/&lt;repo&gt;/&lt;path&gt;.gguf@&lt;40-digit revision&gt;</code> model in the Model field is reviewed first: Mimik reads the repository's metadata and licence from huggingface.co, shows them, and downloads nothing until you confirm. The file is checked against its SHA-256 and kept in the models folder; the model in use keeps serving meanwhile, and a trial or a switch waits while a download runs.</p>
@@ -89,8 +92,8 @@
 </tbody></table>{% endif %}
 {% endif %}
 </section>
-<script src="/assets/assistant-downloads.js" defer></script>
 {% endif %}
+<script src="/assets/assistant-live.js" defer></script>
 <section class="panel"><h2>Device</h2>
 {% if view.cpu_chosen %}<p>The CPU only: Mimik was started with <code>--assistant-device cpu</code>, so no GPU is listed or used.</p>{% endif %}
 {% if let Some(device) = view.device %}<p>GPU: <strong>{{ device.description }}</strong> ({{ device.name }} in its sandbox, PCI {{ device.pci }}, render node {{ device.node }}, {{ device.total_mib }} MiB).</p><p class="gpu-exposure"><strong>Sandboxed, with graphics-driver access:</strong> the model server runs in the level-1 sandbox: no network, no other processes and no access to the user's files. Besides the runtime and the model it reads read-only system libraries, system driver data (Vulkan ICD manifests, libdrm and drirc data), the card's sysfs attributes and the CPU topology, and it can issue any ioctl on its one render node, so its exposure to the kernel's graphics driver is wider than on the CPU path. Start Mimik with <code>--assistant-device cpu</code> to run it on the CPU instead.</p>{% endif %}

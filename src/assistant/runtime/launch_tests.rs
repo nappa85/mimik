@@ -2258,6 +2258,37 @@ async fn a_retry_that_fails_before_the_inspection_carries_no_earlier_hint() {
 }
 
 #[tokio::test]
+async fn verification_reports_its_start_the_bytes_hashed_and_whether_the_hash_was_remembered() {
+    use crate::assistant::runtime::progress::StartEvent;
+    let setup = setup(MODEL, "fake");
+    let launch = launch(&setup);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    launch.observe(Arc::new(move |event| sink.lock().unwrap().push(event)));
+    let ticket = launch.0.work().enter();
+    launch.0.verify(Path::Cpu, Level::Sandbox, &ticket).unwrap();
+    let total = MODEL.len() as u64;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            StartEvent::Verifying,
+            StartEvent::Hashed { done: total, total },
+            StartEvent::Verified { unchanged: false },
+        ]
+    );
+    // The hash is remembered by the file's identity: nothing is read, and it is said.
+    seen.lock().unwrap().clear();
+    launch.0.verify(Path::Cpu, Level::Sandbox, &ticket).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            StartEvent::Verifying,
+            StartEvent::Verified { unchanged: true }
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_selected_model_is_hashed_and_verified_against_its_own_recorded_hash() {
     let setup = setup(MODEL, "fake");
     let launch = launch(&setup);

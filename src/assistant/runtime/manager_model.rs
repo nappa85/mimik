@@ -5,9 +5,9 @@
 //! previous (or, after a switch, the new) model starts next.
 use super::{
     Arc, AtomicBool, Attempt, Child, Command, DeviceDefault, EndReason, Fail, Future, Instant,
-    Launcher, LengthChange, Level, Manager, Measurement, Model, ModelCommand, Mutex, Next,
-    NotCalibrated, Ordering, Path, Record, State, Status, TrialKey, TrialReport, TrialRequest,
-    TrialState, calibrate_budgets, log, measured, trial, trial_bound, warm,
+    Kind, Launcher, LengthChange, Level, Manager, Measurement, Model, ModelCommand, Mutex, Next,
+    NotCalibrated, Ordering, Path, Phase, Progress, Record, Reporter, State, TrialKey, TrialReport,
+    TrialRequest, TrialState, calibrate_budgets, log, measured, trial, trial_bound, warm,
 };
 use crate::assistant::model::{default_alias, reply_length};
 use crate::assistant::runtime::models::phrase_bound;
@@ -20,15 +20,6 @@ enum Stopped {
     Cancelled,
 }
 
-/// One phase name per phrase, for the page.
-const PHRASE_PHASES: [&str; 5] = [
-    "trial phrase 1 of 5",
-    "trial phrase 2 of 5",
-    "trial phrase 3 of 5",
-    "trial phrase 4 of 5",
-    "trial phrase 5 of 5",
-];
-
 fn too_long(spec: &str) -> String {
     let minutes = trial_bound().as_secs() / 60;
     format!("the trial of {spec} took longer than its {minutes} minutes")
@@ -38,7 +29,6 @@ fn too_long(spec: &str) -> String {
 struct Plan {
     number: u64,
     by: i64,
-    spec: String,
     generation: u64,
     level: Level,
     path: Path,
@@ -148,14 +138,27 @@ impl Manager {
         // Nothing of the earlier session runs beside the candidate.
         self.launcher.settle().await;
         self.trial = number;
+        // Nothing runs until the candidate starts (the session before it is over).
+        self.child_ran = false;
         let path = self.status().path;
         // The whole trial, hashing included, is bounded.
         let deadline = Instant::now() + trial_bound();
         log(&format!("trial {number} of {spec} on the {path:?} path"));
         self.update(|status| {
-            status.state = State::Starting("trying a model");
+            // Always the trial's own steps from here on: whatever an interrupted earlier
+            // attempt left in the state must not enter its times. The trial keeps the start
+            // `try_model` gave it.
+            let mut progress = Progress::new(Kind::Trial, Phase::WaitingStop, None, Vec::new());
+            if let State::Starting(earlier) = &status.state
+                && earlier.kind == Kind::Trial
+            {
+                progress.keep_start_of(earlier);
+            }
+            progress.set_overall(deadline);
+            status.state = State::Starting(progress);
             status.budgets = None;
         });
+        self.reporter.phase(Phase::Hashing);
         let candidate = match self.hash_candidate(number, &spec, name, deadline).await {
             Ok(candidate) => candidate,
             Err(next) => return next,
@@ -173,11 +176,6 @@ impl Manager {
         name: String,
         deadline: Instant,
     ) -> Result<Model, Option<Next>> {
-        self.set_trial(TrialState::Running {
-            number,
-            spec: spec.to_owned(),
-            phase: "hashing the model file",
-        });
         let launcher = Arc::clone(&self.launcher);
         let hashed = self
             .guarded(tokio::time::timeout_at(
@@ -245,11 +243,17 @@ impl Manager {
         };
         let launcher = Arc::clone(&self.launcher);
         launcher.select(&candidate);
-        let generation = self.begin(level);
+        // The last passed trial of this file on this path says how long each step took.
+        let reference = self.memory.recall(&candidate.sha256, path, Kind::Trial);
+        self.update(|status| {
+            if let State::Starting(progress) = &mut status.state {
+                progress.set_reference(reference);
+            }
+        });
+        let generation = self.begin(level, true);
         let plan = Plan {
             number,
             by,
-            spec: spec.clone(),
             generation,
             level,
             path,
@@ -258,7 +262,7 @@ impl Manager {
         let slot: Arc<Mutex<Option<Arc<dyn Child>>>> = Arc::default();
         let work = trial_work(
             Arc::clone(&launcher),
-            Arc::clone(&self.status),
+            self.reporter.clone(),
             plan,
             Arc::clone(&slot),
         );
@@ -273,6 +277,8 @@ impl Manager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(child) = child {
+            // The session after the trial follows a model server that ran.
+            self.child_ran = true;
             child.stop().await;
         }
         if interrupted {
@@ -283,6 +289,16 @@ impl Manager {
         self.ended(generation, EndReason::Exited);
         match outcome {
             Ok(Ok(Ok(report))) => {
+                let finished = match &self.status().state {
+                    State::Starting(progress) if progress.kind == Kind::Trial => {
+                        Some(progress.finished())
+                    }
+                    _ => None,
+                };
+                if let Some(steps) = finished {
+                    self.memory
+                        .keep(&report.model.sha256, report.path, Kind::Trial, steps);
+                }
                 log(&format!(
                     "trial {number} of {spec} passed: {}",
                     summary(&report)
@@ -418,22 +434,11 @@ impl Manager {
 /// The trial's work, within the manager's guard: start the candidate, then measure it.
 async fn trial_work(
     launcher: Arc<dyn Launcher>,
-    status: Arc<Mutex<Status>>,
+    reporter: Reporter,
     plan: Plan,
     slot: Arc<Mutex<Option<Arc<dyn Child>>>>,
 ) -> Result<TrialReport, String> {
-    let phase = |phase: &'static str| {
-        let mut status = status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        status.state = State::Starting(phase);
-        status.trial = Some(TrialState::Running {
-            number: plan.number,
-            spec: plan.spec.clone(),
-            phase,
-        });
-    };
-    phase("checking the host");
+    reporter.phase(Phase::Checking);
     launcher.preflight(Path::Cpu).await?;
     let probed = launcher.probe(plan.path).await;
     match probed.into_iter().find(|(level, _)| *level == plan.level) {
@@ -441,7 +446,7 @@ async fn trial_work(
         Some((_, Err(why))) => return Err(format!("the sandbox cannot be used: {why}")),
         None => return Err("the sandbox cannot be used".into()),
     }
-    phase("starting the model server");
+    reporter.phase(Phase::StartingServer);
     let child = launcher
         .start(plan.generation, plan.level, plan.path)
         .await
@@ -452,7 +457,7 @@ async fn trial_work(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&child));
     tokio::select! {
-        measured = measure_trial(&child, &plan, &phase) => measured,
+        measured = measure_trial(&child, &plan, &reporter) => measured,
         fail = child.exited() => Err(match fail {
             Fail::Sandbox(why) | Fail::Other(why) => why,
         }),
@@ -463,31 +468,36 @@ async fn trial_work(
 async fn measure_trial(
     child: &Arc<dyn Child>,
     plan: &Plan,
-    phase: &(dyn Fn(&'static str) + Sync),
+    reporter: &Reporter,
 ) -> Result<TrialReport, String> {
     let began = Instant::now();
     let answered = AtomicBool::new(false);
-    let (prefix, priming) = warm(child, phase, &answered)
-        .await
-        .map_err(|failed| match failed {
-            Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) | Attempt::TooSlow(why) => why,
-            Attempt::Ready(..) | Attempt::LengthLimit { .. } | Attempt::Interrupted(_) => {
-                "interrupted".into()
-            }
-        })?;
+    let (prefix, priming) =
+        warm(child, reporter, &answered, plan.path)
+            .await
+            .map_err(|failed| match failed {
+                Attempt::Failed(Fail::Sandbox(why) | Fail::Other(why)) | Attempt::TooSlow(why) => {
+                    why
+                }
+                Attempt::Ready(..) | Attempt::LengthLimit { .. } | Attempt::Interrupted(_) => {
+                    "interrupted".into()
+                }
+            })?;
     let server = child.server();
     // The two 64-token samples give the candidate's speed, and with it the phrase bound.
-    phase("calibrating");
     let max_tokens = reply_length::DEFAULT;
-    let (calibration, budgets) = calibrate_budgets(server.as_ref(), plan.path, max_tokens, prefix)
-        .await
-        .map_err(|failed| match failed {
-            NotCalibrated::TooSlow(why, _)
-            | NotCalibrated::Length { why, .. }
-            | NotCalibrated::Failed(why) => why,
-        })?;
-    let phrases = trial::run(server.as_ref(), phrase_bound(budgets.run), &|n| {
-        phase(PHRASE_PHASES[n - 1]);
+    let sample = |n: u8| reporter.phase(Phase::Sample(n));
+    let (calibration, budgets) =
+        calibrate_budgets(server.as_ref(), plan.path, max_tokens, prefix, &sample)
+            .await
+            .map_err(|failed| match failed {
+                NotCalibrated::TooSlow(why, _)
+                | NotCalibrated::Length { why, .. }
+                | NotCalibrated::Failed(why) => why,
+            })?;
+    let bound = phrase_bound(budgets.run);
+    let phrases = trial::run(server.as_ref(), bound, &|n| {
+        reporter.phase_within(Phase::Phrase(u8::try_from(n).unwrap_or(u8::MAX)), bound);
     })
     .await
     .map_err(|failure| failure.describe())?;

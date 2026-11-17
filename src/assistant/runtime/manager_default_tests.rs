@@ -556,3 +556,32 @@ async fn a_stored_length_that_cannot_be_read_leaves_the_device_default_with_the_
     assert_eq!(status.model.active.max_tokens, 1024);
     assert_eq!(assistant.budgets().unwrap().max_tokens, 1024);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_start_that_failed_before_it_spawned_has_no_stop_step_in_the_next_session() {
+    // The 9B file has another hash: the start fails at its verification, no child ever ran,
+    // and the Granite session that follows has no model server to stop.
+    let launcher = FakeLauncher::scripted([
+        Start::Other("the model file changed: it no longer has the SHA-256 recorded for it"),
+        Start::Ok(Behaviour::default()),
+    ]);
+    let release = Arc::new(tokio::sync::Notify::new());
+    *launcher.unsettled.lock().unwrap() = Some(Arc::clone(&release));
+    // The first session's settle passes; the second one, after the failure, waits.
+    release.notify_one();
+    let (_assistant, handle) = spawn_default(&launcher, GPU_CONFIG, true, None);
+    super::tests::until(Duration::from_secs(60), || {
+        !launcher.starts.lock().unwrap().is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let status = handle.status();
+    let progress = status.state.starting().unwrap();
+    assert_eq!(
+        (progress.kind, progress.phase),
+        (Kind::Fresh { stopping: false }, Phase::Checking)
+    );
+    release.notify_one();
+    *launcher.unsettled.lock().unwrap() = None;
+    handle.shutdown().await;
+}

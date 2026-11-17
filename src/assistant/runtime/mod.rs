@@ -19,6 +19,7 @@ pub(crate) mod manager;
 pub(crate) mod manifest;
 pub(crate) mod models;
 pub(crate) mod probe;
+pub(crate) mod progress;
 pub(crate) mod rundir;
 pub(crate) mod runner;
 pub(crate) mod sandbox;

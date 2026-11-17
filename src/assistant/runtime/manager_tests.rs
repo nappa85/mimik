@@ -1,5 +1,6 @@
 //! The transitions table, one test per row, with a fake launcher, fake children and Tokio's
 //! paused clock.
+use super::super::progress::StartEvent;
 use super::super::server::{Structured, Timings};
 use super::*;
 use crate::assistant::interpreter::stub::StubInterpreter;
@@ -31,6 +32,8 @@ pub(crate) struct Behaviour {
     pub(crate) phrase_delay: Duration,
     /// The fixed prefix's tokens as priming reports them.
     pub(crate) prefix_tokens: f64,
+    /// How long priming takes.
+    pub(crate) prime_delay: Duration,
 }
 
 /// What a fake server gets wrong.
@@ -63,6 +66,7 @@ impl Default for Behaviour {
             phrase_tokens: [60.0, 70.0, 80.0, 65.0, 75.0],
             phrase_delay: Duration::from_millis(100),
             prefix_tokens: 1460.0,
+            prime_delay: Duration::ZERO,
         }
     }
 }
@@ -100,6 +104,9 @@ impl Server for FakeServer {
         if max_tokens == 1 {
             if let Some(gate) = &self.behaviour.gate {
                 gate.acquire().await.unwrap().forget();
+            }
+            if !self.behaviour.prime_delay.is_zero() {
+                tokio::time::sleep(self.behaviour.prime_delay).await;
             }
             if self.behaviour.prime_fails {
                 return Err(Failure::Status(500));
@@ -208,7 +215,7 @@ impl FakeChild {
     }
 
     /// The child exits by itself.
-    fn crash(&self) {
+    pub(crate) fn crash(&self) {
         self.gone();
     }
 }
@@ -264,6 +271,13 @@ pub(crate) struct FakeLauncher {
     pub(crate) hash_probe: Mutex<Option<Arc<HashProbe>>>,
     /// Model files missing from the models folder (all others are present).
     pub(crate) absent: Mutex<Vec<String>>,
+    /// Where the manager wants the verification reported.
+    pub(crate) observer: Mutex<Option<Observer>>,
+    /// How long a start takes before it verifies the model file, and how long it verifies.
+    pub(crate) start_delay: Mutex<Option<Duration>>,
+    pub(crate) verify_delay: Mutex<Option<Duration>>,
+    /// The verification finds the hash remembered: nothing is read.
+    pub(crate) verify_cached: Mutex<bool>,
 }
 
 /// The launcher's in-flight work, as the real one keeps it.
@@ -350,6 +364,10 @@ impl Launcher for FakeLauncher {
         self.device.lock().unwrap().clone()
     }
 
+    fn observe(&self, observer: Observer) {
+        *self.observer.lock().unwrap() = Some(observer);
+    }
+
     fn select(&self, model: &Model) {
         self.selected.lock().unwrap().push(model.clone());
     }
@@ -419,6 +437,36 @@ impl Launcher for FakeLauncher {
             .unwrap()
             .pop_front()
             .unwrap_or(Start::Ok(Behaviour::default()));
+        // As the real launcher reports its verification of the model file.
+        let delay = *self.start_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        let observer = self.observer.lock().unwrap().clone();
+        let report = |event| {
+            if let Some(observer) = &observer {
+                observer(event);
+            }
+        };
+        report(StartEvent::Verifying);
+        let delay = *self.verify_delay.lock().unwrap();
+        let cached = *self.verify_cached.lock().unwrap();
+        if let Some(delay) = delay {
+            if !cached {
+                report(StartEvent::Hashed {
+                    done: 1 << 20,
+                    total: 4 << 20,
+                });
+            }
+            tokio::time::sleep(delay).await;
+        }
+        report(StartEvent::Verified {
+            unchanged: delay.is_none() || cached,
+        });
+        // The rest of the start (the spawn) takes as long, so the note can be seen.
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let behaviour = match script {
             Start::Ok(behaviour) => behaviour,
             Start::Sandbox(why) => return Err(Fail::Sandbox(why.into())),
@@ -556,9 +604,10 @@ async fn before_priming_and_calibration_complete_a_job_start_answers_starting() 
     })]);
     let (assistant, handle) = manager(&launcher);
     let status = handle.clone();
-    until(Duration::from_secs(60), move || {
-        status.status().state == State::Starting("priming")
-    })
+    until(
+        Duration::from_secs(60),
+        move || matches!(status.status().state, State::Starting(p) if p.phase == Phase::Priming),
+    )
     .await;
     assert_eq!(assistant.state(), RuntimeState::Starting);
     gate.add_permits(1);
@@ -804,9 +853,10 @@ async fn a_restart_press_is_deduplicated_until_ready() {
     ready(&assistant).await;
     assert_eq!(handle.restart(), Restart::Accepted);
     let probe = handle.clone();
-    until(Duration::from_secs(60), move || {
-        probe.status().state == State::Starting("priming")
-    })
+    until(
+        Duration::from_secs(60),
+        move || matches!(probe.status().state, State::Starting(p) if p.phase == Phase::Priming),
+    )
     .await;
     // The second generation is priming: the Restart is still running.
     assert_eq!(handle.restart(), Restart::AlreadyRunning);
