@@ -5,6 +5,27 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Live progress on the assistant page in Chromium (2d-4, 2026-11-17)
+
+Live inference on the dev host: Mimik's release build of master (`--assistant`, CPU path,
+2 threads, the pinned b12110 runtime, Granite 4.2 3B), Chromium in the browser container,
+synthetic accounts (`tools/assist_progress_browser.py`). The check never reloads the page
+itself.
+
+- **First start:** the step changed in place through 5 of the 7 steps in one document
+  (checking the host, loading, priming, calibration samples 1 and 2; starting and verifying
+  passed between two polls), the time line changed, and the page reached Ready by its own
+  navigation.
+- **Restart:** the redirect landed on "step 1 of 8, stopping the model server". Besides the
+  reload at Ready, the page reloads once during a restart, when the old budgets are cleared
+  (their presence is part of the signature, and the page shows them).
+- **Typed field:** a changed Model field held through that state change; the page showed
+  "The state changed: reload" and did not navigate. "Stop updating" stopped polling.
+- **Without JavaScript** (390 x 844) the page showed the step and asked for a reload, with no
+  Stop updating button; at 1280 x 720 and 390 x 844 no horizontal overflow, no console error
+  and no CSP violation.
+- **Not covered:** a trial's 13 steps, the GPU path, a download's bar.
+
 ## Long replies and start-up with the reply length setting (ASSIST-59, ASSIST-L47, 2026-11-16)
 
 Live inference on the dev host, b12110, the shipped prefix, fan manual, desktop session

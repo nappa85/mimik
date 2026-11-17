@@ -578,14 +578,6 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
   panel at two viewports; (5) the release binary refusing a certificate outside the system
   store on a clean machine (the unit tests cover the verifier with an isolated store).
 
-### 2d-4 Live progress on the assistant page
-
-Implemented (reference [model-runtime.md](model-runtime.md), "Live progress"). Only the live
-browser check remains, none in CI. Extend `tools/assist_model_browser.py` to watch
-a start advance and the page arrive at `ready` without a manual reload, a typed field survive a
-state change, and the page work without JavaScript, at two viewports; run it on the dev host
-and record the conclusion in `results.md`.
-
 ### 3 Bundles and reminders
 
 Scope: §1.5 (catalogue member with `key`, linking rules 1–2, a demo catalogue, bundles,

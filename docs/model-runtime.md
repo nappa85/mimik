@@ -774,6 +774,8 @@ expiry), answers `{"available": false}` without an assistant runtime, otherwise 
   `<progress>` named by the step text) is in the State section, or in the running trial's
   section in place of a status line. Without JavaScript the page is rendered at the current
   step and says to reload it.
+- **Live check** (not in CI): `tools/assist_progress_browser.py` runs a release build with a
+  real model server natively and Chromium in the browser container ([results.md](results.md)).
 
 ## Development endpoint
 
