@@ -63,11 +63,10 @@ steps add:
   2d trial are outside the breaker; only Restart and the app's start reset it.
 - **2d-2 (built):** the binary contains TLS for downloads (`reqwest`, DEP-27), so the model
   client's plain-HTTP property rests on its URL guard, not on the dependency tree.
-- **3:** catalogue entry text joins the context and is dropped first; reminder jobs have their
-  own context (§1.5) and a low-priority slot on the same worker, after interpretations, one per
-  account; the catalogue provenance extension (§1.5); bundles in the proposal freshness binding
-  (each list-row name sent, its remembered key, the catalogue version and entry key of any entry
-  text, every enum value; distinct targets, a duplicate drops the option) and in apply.
+- **3:** reminder jobs have their own context and records (§1.5, step 3c) and a low-priority
+  slot on the same worker, after interpretations, one per account, on the GPU path; the
+  catalogue provenance extension (§1.5); bundles in the proposal freshness binding and in apply
+  (step 3b). Interpretations keep prompt format D without catalogue text (step 3, deviation).
 - **Not built:** token log-probabilities, if the runtime returns them, are not recorded on the
   job record (evaluation only; nothing is gated on them).
 
@@ -459,7 +458,8 @@ natively for these tests (ASSIST-40).
   confirmation.
 - **Catalogue provenance extension (decided 2026-10-19, coordinator default):** in a reminder
   option, a number may also come from the text of the catalogue entry the reminder cites, and
-  only if it appears literally in that entry's text. The cited entry is bound by catalogue
+  only if it appears literally in that entry's text as sent in the request; a reminder literal may
+  also be the decrease's before or after value or their difference (step 3c). The cited entry is bound by catalogue
   version and entry key (part of the D-P read set). The option is displayed with its source
   ("from Shield: …"). Every other number must pass the step-2c rule (in the phrase, equal to
   the target's value, or a 2, 3, 4 or 100 admitted by a fraction or percent word); outside reminders the step-2c rule stays strict.
@@ -587,146 +587,189 @@ and merge, in this order; the demo stays usable after each.
 
 - **Contract.** `schemas/definition-v1.json` gains the optional `catalogue` member on a `text`
   item property: `{"id": <slug>, "entry_type": <slug>?, "key": <property id>}`, closed object.
-  Admission domain checks, one diagnostic each, path `/fields/{i}/items/properties/{j}/catalogue`:
-  `id` is one of the definition's `catalogues` links (`catalogue-member-unlinked`); `key` names
-  another property of the same list (`catalogue-key-unknown`) that is `text`, `optional`, has
-  no `catalogue` member (`catalogue-key-invalid`) and is the `key` of no other member
-  (`catalogue-key-shared`). Canonical encoding keeps the member's schema order and omits it when
-  absent, so every existing hash is unchanged (the frozen vectors stay; a new frozen vector
-  covers a definition with the member). The runtime definition contract and the publication
-  profile copies (`tools/`) follow.
-- **Database checks** at the three catalogue-link sites (draft save, publication snapshot,
-  readiness): when `entry_type` is present it must be declared in the linked catalogue's latest
-  sealed version (`/…/catalogue linked-catalogue-entry-type-unknown`; readiness: wiring
-  stale). A later version that drops the type only yields no link on view.
-- **Key property.** Rendered as the link, never a control: the full form, the cell route, the
-  new-row form and quick-add never take it; a posted value is refused like an unknown key (400);
-  every save keeps the stored value, and a new row leaves it absent. Formulas see it as an
-  ordinary optional text property. Writing and clearing it belong to step 4.
-- **Normalised names.** `catalogues::names::normalise`: NFKC, full case folding, diacritics
-  removed (NFD, drop `Mn`), whitespace runs collapsed to one space, trimmed. Case folding: a
-  maintained crate if one fits (check `caseless` and alternatives: licence, maintenance,
-  MSRV; record the choice as a dependency decision); else `to_lowercase` with the gap
-  recorded in `limitations.md`. A migration (schema 33) adds
-  `catalogue_entry_names(version_id, entry_type, norm, entry_key)` with an index on
-  `(version_id, norm)`, filled in the seal transaction from Rust; versions sealed before the
-  migration are filled at store open (idempotent, one transaction per version; pre-release
-  data is disposable, so no other backfill). Retired entries are stored with a flag and are
-  never eligible.
-- **Linking on view** (rules 1–2; rules 3–4 are step 4). For each saved row of a list whose
-  name property has the member, with a non-blank name: (1) if the key property holds a key that
-  resolves in the latest sealed version to an eligible entry (type filter, not retired) whose
-  normalised name equals the cell's, link it; (2) otherwise link the single eligible entry with
-  that normalised name; none or several: no link (no warning yet, step 4). One query per list
-  under the existing catalogue read path's rules (readers: the custodian or an active Master;
-  the pin a supported runtime pin linking the catalogue), within `QUERY_BUDGET`; a failure or
-  timeout shows no links and is logged without names.
+  At most one member per list. Admission domain checks, one diagnostic each, path
+  `/fields/{i}/items/properties/{j}/catalogue`: `id` is one of the definition's `catalogues`
+  links (`catalogue-member-unlinked`); a second member in the list (`catalogue-member-repeated`);
+  `key` names another property of the same list (`catalogue-key-unknown`) that is `text`,
+  `optional` and has no member (`catalogue-key-invalid`); `quick_add.name` naming the key
+  property (`/fields/{i}/items/quick_add quick-add-name-is-catalogue-key`). Canonical encoding
+  keeps the member's schema order and omits it when absent, so every existing hash is
+  unchanged (the frozen vectors stay; a new frozen vector covers a definition with the member).
+  The runtime definition contract and the profile copies under `tools/` follow.
+- **Entry type.** Checked at draft save and in the publication snapshot only: declared in the
+  linked catalogue's latest sealed version (`linked-catalogue-entry-type-unknown`). Readiness
+  stays existence-only (R27, D8); a catalogue version cannot drop a type
+  (`dropped-entry-types`), so a published type stays valid.
+- **Key property.** Rendered as the link, never a control: the full form, the cell route and
+  the new-row form never take it; a posted value is refused like an unknown key (400); every
+  save keeps the stored value, and a new or quick-added row leaves it absent. Formulas see it
+  as an ordinary optional text property. Writing and clearing it belong to step 4.
+- **Normalised names.** One shared normaliser (new `text_fold` module or similar), used by
+  linking and by `upload_exclusions::normalize`'s non-digit part, on DEP-31's crates
+  (`unicode-normalization`, `unicase`; no new dependency): remove default-ignorable code points
+  (Cf included), NFKC, full case fold (`unicase`), NFD and drop `Mn` (the step `lexer::fold`
+  does, which then uses the shared function), recompose NFC, collapse whitespace, trim. A
+  constant `NAME_FOLD_VERSION` names the rule and the crates' Unicode version.
+- **Name index.** Migration 33 adds `catalogue_entry_names(version_id, entry_key, norm)`,
+  primary key `(version_id, entry_key)`, index `(version_id, norm)`, for the latest sealed
+  version of each catalogue only (as the FTS index), with insert-only triggers like the
+  catalogue tables; type and retirement are joined from `catalogue_entries`. A one-row marker
+  table holds `NAME_FOLD_VERSION`. The seal transaction replaces the catalogue's rows; at store
+  open, a marker that differs from the build's rebuilds every catalogue's rows in one
+  transaction and updates it. `verify-catalogues` recomputes and compares the rows;
+  `rebuild-catalogue-index` rebuilds them too.
+- **Linking on view** (rules 1–2; rules 3–4 are step 4). For each saved row of a list with the
+  member and a non-blank name: (1) if the key property holds a key of an eligible entry of the
+  latest sealed version (type filter, not retired) whose norm equals the cell's, link it; (2)
+  otherwise link the single eligible entry with that norm; none or several: no link (no
+  warning yet, step 4). One query per list, within `QUERY_BUDGET`, only where the catalogue read
+  route would serve (a supported runtime pin linking the catalogue, a sealed version); a
+  failure or timeout shows no links and logs no names.
 - **Display.** The name cell gets a short link to the entry page (new tab), named "<name> in
-  <catalogue title>" through `aria-labelledby` where that keeps markup short. Measure the
-  worst-case page fixtures in `src/campaigns/list_tests.rs` with every row linked; the budget
-  is never enlarged; if it no longer fits, stop and bring the trade-off to the user.
+  <catalogue title>" through `aria-labelledby` where that keeps markup short; the same link in
+  the JSON unit answer (`sheet_json::unit_json`). The worst-case page fixtures in
+  `src/campaigns/list_tests.rs` get every row linked with 64-character catalogue IDs and entry
+  keys on every list; `form_budget` at publication must still bound the result; the budget is
+  never enlarged; if it no longer fits, stop and bring the trade-off to the user.
 - **Demo.** A synthetic catalogue `assist-gear` (owner text only: Shield with a numeric rule,
   Rope, Healing draught with a number, two entries named Sword of different types for step 4),
   published by `tools/assist_demo.py` and the smoke helper; the assist definition's Equipment
   name gets the member with a key property `gear_key`.
 - **Tests.** Admission: each refusal code, the omitted member keeps the old hash, the new
-  frozen vector. Store: each of the three sites with an unknown entry type. Names: NFKC,
-  folding (`Straße`/`STRASSE` when full folding is available), diacritics, whitespace,
-  Cf characters. Linking: key resolves and names match → that entry, also when duplicates
-  exist; key resolves but name differs → rule 2; dangling key → rule 2; duplicates without a
-  key → no link; retired and wrong-type entries never linked; a reader without catalogue
-  rights sees no link. Routes: a posted key property → 400, every save keeps it. Browser
-  (`tools/catalogue_browser.py` or the sheet smoke): the link at both viewports, no overflow.
+  frozen vector. Store: draft save and publication with an unknown entry type; readiness
+  unchanged. Normaliser: NFKC, folding (`Straße`/`STRASSE`), diacritics, whitespace, Cf and
+  other default-ignorables; the exclusions and lexer behaviour unchanged. Name index: seal
+  replaces rows, a marker change rebuilds, `verify-catalogues` reports a tampered or missing
+  row, rebuild repairs it. Linking: key resolves and names match → that entry, also among
+  duplicates; key resolves but name differs → rule 2; dangling key → rule 2; duplicates without
+  a key → no link; retired and wrong-type entries never linked; an unsupported or native pin
+  or an unlinked catalogue → no link. Routes: a posted key property → 400, every save keeps it.
+  Browser (the sheet smoke): the link at both viewports, no overflow.
+- **Limits recorded:** dropping `Mn` merges names in scripts whose marks carry meaning
+  (Devanagari, Hebrew, Arabic); the FTS tokenizer (`unicode61 remove_diacritics 2`) folds
+  differently, which step 4's suggestions must account for.
 
-#### 3b Bundles: proposals of up to 4 changes, apply and Undo
+#### 3b Bundles: multi-change proposals, apply and Undo
 
 - **Proposal model.** `Proposal` becomes 1–4 `Change {address, before, after, expr | enum |
-  bool, refs}` with distinct targets (a duplicate target drops the option; a 5th change drops
-  it too). Targets: integer, enum or boolean addresses, scalars or saved-row cells by host ID,
-  no row adds or removes. An integer change is an expression checked as in 2c (provenance,
-  checked evaluation); an enum change names a declared option ID; a boolean change a value;
-  a change equal to the current value drops the option. Interpretation options stay one
-  integer change on their target; only reminders (3c) produce more.
-- **Freshness binding (D-P).** The content hash and the apply check cover, per option: every
-  change (address, before, after, expression), every reference with its value, and the
-  option's context read set: each list-row name sent with its row's host ID, its remembered
-  key, the catalogue ID, sealed version and entry key of any entry text sent, and every enum
-  value sent. Apply re-reads them all under the permit; any difference is 409 "Something this
-  proposal used has changed: ask again."
-- **Apply.** One revision; one `confirmed` note per change, all with one new bundle number;
-  bound to the origin note inside the `IMMEDIATE` transaction as today; a row that disappeared
-  or a target outside the pin is 409.
-- **Bundle Undo.** Undo on a member whose current note belongs to a bundle with more than one
-  note reverts every member, only if each member's current note is still that bundle's note
-  and still holds its `after`; then one revision with one `reverted` note per member sharing a
-  new bundle number (so Undo of that Undo works the same way). Otherwise nothing is written
-  and the 409 page lists the members that changed. A single-member bundle behaves as today.
-  The Undo offer on a bundle member says "Last change: … (with 2 other fields)".
-- **Tests.** A 4-change bundle in one revision with one bundle number; a 5th change and a
-  duplicate target each drop the option; one member changed → 409; each contextual binding
-  changed with every number unchanged (row name, remembered key, sealed version, enum) →
-  409; bundle Undo all-or-nothing, the 409 list, Undo of the bundle Undo; existing
-  interpretation tests unchanged.
+  bool, refs}` with distinct targets (a duplicate target or a 5th change drops the option).
+  Targets: integer, enum or boolean addresses, scalars or saved-row cells by host ID, no row
+  adds or removes. An integer change is an expression checked as in 2c (provenance, checked
+  evaluation); an enum change names a declared option ID; a boolean change a value; a change
+  equal to the current value drops the option. Interpretation options stay one integer change
+  on their target. The content hash covers every change and every bound value; its domain tag
+  becomes `mimik-proposal-v2`.
+- **Job kind and origin.** `Job` carries an explicit kind (`Interpretation`, `Reminder`; the
+  reminder kind's producer lands in 3c). Apply checks the origin per kind: interpretation, the
+  current `unresolved` note on the target (as today); reminder, the decrease note still current
+  on its field and that field still holding its `after`. Both bound inside the `IMMEDIATE`
+  transaction (`bound_notes_hold`). Confirmed notes: `raw` = the phrase for an interpretation;
+  for a reminder, the hint cut to 200 characters.
+- **Apply.** One revision; one `confirmed` note per change, all with one new bundle number; a
+  row that disappeared or a target outside the pin is 409. The JSON answer carries every
+  changed unit (`units`, in change order; the module redraws each like a save answer; the
+  old single `unit` member stays for one-change answers until the module moves over in this
+  slice).
+- **Bundle Undo.** `Stored` gains `bundle`; migration 33 also adds the index
+  `(sheet_id, bundle)` (bounded member lookup and `max(bundle)` without a scan). Undo on a
+  member whose current note belongs to a bundle with more than one note reverts every member,
+  only if each member's current note is still that bundle's note and still holds its `after`;
+  then one revision with one `reverted` note per member sharing a new bundle number (so Undo of
+  that Undo works the same way). Otherwise nothing is written and the 409 page lists the members
+  that changed; a member whose row was removed, or restored under a new host ID, is one of
+  them. The answer carries every reverted unit. The offer on a member says "Last change: …
+  (with N other fields)": one bundle-size query per page for the bundles of its current notes
+  (at most 4 members each), counted in the worst-case page and query fixtures. A single-member
+  bundle behaves as today.
+- **Tests.** A 4-change proposal (built by a test producer) applied in one revision with one
+  bundle number and all units answered; a 5th change and a duplicate target each drop the
+  option; one member changed → 409; the reminder-kind origin check (decrease note superseded,
+  field changed → 409); bundle Undo all-or-nothing, the 409 list (value changed, row removed),
+  Undo of the bundle Undo; the bundle index used (query plan); existing interpretation tests
+  unchanged. Contextual bindings (row names, keys, versions) are tested in 3c with their
+  producer.
 
 #### 3c Reminders
 
+- **Path (v1).** Reminders run on the GPU path only. On the CPU path B is at most 1,024 bytes
+  ("related fields only"), so entry text can never fit, and each reminder re-evaluates its
+  addendum within an R calibrated for interpretations. A later step may enable the CPU path
+  after a measurement. On the CPU path the save answer carries no reminder key and the route
+  answers 404.
+- **Shared prefix.** A reminder request sends the interpretation system message byte for byte
+  (the pinned prefix, so llama-server's common-prefix reuse keeps the cache for both kinds;
+  `--parallel 1 --cache-ram 0`); the reminder instructions and the data go in the user message;
+  `response_format` carries the reminder schema. No second priming. The live slice measures
+  the time to first token of an interpretation right after a reminder against R; if the
+  cache is not kept, reminders stay off and the result goes to the user.
 - **Trigger (D-W).** A save that commits, on a top-level integer field, a note of op `literal`,
-  `sum`, `sign_literal`, `switched` or `confirmed` with known `before` > known `after` (not
-  `reverted`, so an Undo never triggers one). With the assistant on, the JSON save answer
-  carries `unit.reminder.key` (the note key); without JavaScript nothing happens.
-- **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; same order of
-  checks as the interpretation start; 202 `{job, poll}`), polled through the existing job
-  route. Admission: the note must be current; one reminder per account (a newer one supersedes
-  it); reminders take no interpretation slot of the account (the one-live-job rule and D are
-  untouched); at most 8 queued reminders in total, beyond that 429 and the module stays quiet.
-- **Worker priority.** The worker takes a reminder only when no interpretation is queued; an
-  admitted interpretation cancels a running reminder (it ends silently, breaker-neutral).
-  Reminders have their own queue wait (60 s) and the run deadline R; expiries end silently.
-  Generation changes, the breaker and the note hook apply as to interpretations.
+  `sum`, `sign_literal`, `switched` or an interpretation's `confirmed`, with known `before` >
+  known `after` (never `reverted` or a reminder's `confirmed`, so Undo and applied reminders do
+  not chain). The JSON save answer carries `unit.reminder.key` on that unit; a full-form save
+  with several decreases names the first in definition order.
+- **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; the interpretation
+  start's order of checks; 202 `{job, poll}`), polled through the existing job route. The route
+  re-derives every trigger condition from the stored note (current, top-level integer field,
+  allowed op and origin, known `before` > `after`) and requires the assistant on the GPU path;
+  otherwise 409 (404 off the GPU path).
+- **Scheduling.** Reminders are outside the one-live-job rule, repeat detection, D, Q and the
+  64 live interpretation records: their own records (at most 8 live, one per account, a newer
+  one superseding the account's older one; 429 beyond, and the module stays quiet), queue wait
+  60 s, run deadline R. The worker takes a reminder only when no interpretation is queued; an
+  admitted interpretation cancels a running reminder, and its admission adds the
+  `busy_after_expiry` slack to its wait estimate. A reminder never takes the breaker's
+  half-open probe (refused while half-open), reminder expiries and cancellations never feed the
+  hung detector, and reminder transport failures count for the breaker like interpretations'.
+  Generation changes and the note hook (the decrease note superseded) end reminders silently.
+  Reminder options live 10 minutes in their own records.
 - **Context.** `{"decrease": {id, label, before, after, phrase}, "fields": [{id, label, type,
-  value?}], "rows": [{id: "r<n>", list, name, entry?}]}`: other integer and enum top-level
-  fields; for each list whose name property has the catalogue member, each row's name (quoted
-  data) and, when 3a links it, the entry text (the catalogue page's text rule, `<bdi>`-free
-  plain text, ≤ 2,000 characters, cut at a character boundary; none when the badge is
-  "Description unavailable"). Never text or multiline fields, notes, keys or other properties.
-  Bounds B and N(B): entry texts dropped first (last row first), then rows, then fields; the
-  decrease is never dropped; if it alone exceeds them, no job.
-- **Contract.** `schemas/reminder-v1.json` and its instructions file: a second fixed prefix,
-  pinned by SHA-256 like the interpretation one. Reply `{relevant, row, hint, option}`:
-  `relevant` boolean, `row` one of the request's row IDs or null, `hint` 1–120 characters,
-  `option` null or `{changes: [1–4 of {ref, expr} | {ref, enum} | {ref, bool}], explanation}`
-  with `ref` limited to the request's field IDs (row cells are not targets in v1, so `row`
-  only cites). `relevant: false` ends the job with nothing shown. Priming and calibration stay
-  on the interpretation prefix; the reminder prefix's cost after an interpretation (the slot's
-  cache is per prefix) is measured live in this slice.
-- **Provenance extension.** A reminder literal is allowed when it is a number of the
-  decrease's phrase, the decrease's before or after value or their difference, a change
-  target's current value, a 2, 3, 4 or 100 with a fraction or percent word in the phrase, or a
-  number that appears literally (the 2c lexer) in the entry text of the row the reply cites
-  (`row`), bound by catalogue version and entry key in the read set. A number from another
-  row's entry text drops the option. The option is shown with its source: "from <entry name>:
-  …" with the number's surrounding words (≤ 64 characters) in `<bdi>`.
+  value}], "rows": [{id: "r<n>", list, name, entry?}]}`: the other integer and enum top-level
+  fields with values; the decreased field is a change target under its own ID; for the list
+  with the catalogue member, each row's name (quoted data) and, when 3a links it, the entry
+  text (the catalogue page's text rule, plain text, ≤ 2,000 characters cut at a character
+  boundary; none when the badge is "Description unavailable"). Never booleans, text or
+  multiline fields, notes, keys or other properties. Bounds B and N(B): entry texts dropped
+  first (last row first), then rows, then fields; the decrease is never dropped; if it alone
+  exceeds them, no job.
+- **Contract.** `schemas/reminder-v1.json` and its instructions text (SHA-256 pinned). Reply
+  `{relevant, row, hint, option}`: `relevant` boolean; `row` a request row ID or null; `hint`
+  1–120 characters; `option` null or `{changes: [1–4 of {ref, expr} | {ref, enum}],
+  explanation}` with `ref` limited to the decreased field and the sent fields (no booleans and
+  no row cells as targets in v1; `row` only cites). `relevant: false` ends the job with
+  nothing shown.
+- **Read set.** Every value sent (decrease, fields, enum values), every row's name with its
+  host ID, its remembered key, and the catalogue ID, sealed version and entry key of every
+  entry text sent; all in the content hash, re-read by apply (409 on any difference).
+- **Provenance extension** (§1.5, extended here): a reminder literal is allowed when it is a
+  number of the decrease's phrase, its `before`, `after` or their difference, a change target's
+  current value, 2, 3, 4 or 100 with a fraction or percent word in the phrase, or a number in
+  the entry text of the cited row as sent in this request (a cited row whose text was dropped
+  or absent admits none). A number only in another row's text drops the option. The option
+  shows its source: "from <entry name>: …" with the number's surrounding words (≤ 64
+  characters) in `<bdi>`.
 - **Display.** Below the decreased field, a `role="status"` box: "Reminder: <hint>" (and the
   cited row's name), the option as for interpretations (current values, expressions, effects,
   explanation, source) with Use, and Dismiss, which only hides it in the page. Never blocking;
-  nothing is stored; a reload shows nothing. Use posts the existing apply route.
-- **Eval.** The reminder relevance class (8 synthetic cases) in `tools/assist_eval.py` with
-  unit tests; a live screen on the CPU path (2 threads, allowed in weekday hours) and the GPU
-  path (evening or weekend); results with scope and denominators in `docs/results.md`.
-- **Tests.** A reminder only on a decrease of a top-level integer (not an increase, a row
-  cell, an unknown, an Undo); none with the assistant off; it takes no account slot (an
-  interpretation start right after it is admitted and cancels it); duplicate names without a
-  key → no entry text in the prompt; text and multiline never in the prompt (asserted on the
-  stub request); entry text cut to 2,000; injection in entry text → at most a fully shown
-  option; a number in the cited entry → allowed and shown "from <entry>: …"; a number only in
-  an uncited row's entry → dropped; a number in no source → dropped; `relevant: false` →
-  nothing shown; browser: the hint, Use, Dismiss, both viewports, no CSP violation.
+  nothing is stored; a reload shows nothing. Use posts the apply route and redraws every unit.
+- **Eval.** The reminder relevance class in `tools/assist_eval.py` with unit tests (8 synthetic
+  cases: a smoke check only, too few for a quality conclusion, stated in `docs/results.md`);
+  a live run on the GPU path (evening or weekend) with the cache measurement above.
+- **Tests.** Trigger only on the allowed decreases (not an increase, a row cell, an unknown, an
+  Undo, an applied reminder); forged keys to the route (increase, enum, row cell, `reverted`)
+  → 409; off the GPU path and with the assistant off → 404; scheduling: no account slot taken,
+  an interpretation admitted during a reminder cancels it and fits its estimate, no probe, no
+  hung-detector signal; duplicate names without a key → no entry text; text, multiline and
+  booleans never in the prompt (asserted on the stub request); the request's system message
+  equals the interpretation's; entry text cut to 2,000; contextual freshness (row name, key,
+  sealed version, enum, integer field changed with the changes' numbers unchanged → 409);
+  injection in entry text → at most a fully shown option; a number in the cited entry →
+  allowed and shown "from <entry>: …"; a number only in an uncited row's text, or in a cited
+  row's dropped text → dropped; a number in no source → dropped; `relevant: false` → nothing
+  shown; browser: the hint, Use, Dismiss, both viewports, no CSP violation.
 
-**Deviation from §1.4, for review and the user.** §1.4 says catalogue entry text also joins
-the interpretation context. Interpretations use prompt format D (ASSIST-56: context by ID, no
-values), chosen by measurement; adding names and entry text would change that format without
-a screen. This plan keeps interpretations on D and sends catalogue text only to reminders. If
-the user wants it in interpretations too, it is a later step with its own screen.
+**Deviation from §1.4 (proposed, user to confirm).** Interpretations keep prompt format D
+(ASSIST-56: context by ID, no values, chosen by measurement) and get no catalogue text; only
+reminders send it. Adding it to interpretations would be a later step with its own screen.
 
 ### 4 Suggestions and "Which Sword?"
 
