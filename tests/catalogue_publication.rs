@@ -1792,7 +1792,12 @@ async fn verify_reports_foreign_keys_sequence_seals_identity_and_extra_rows() {
         (
             format!("DELETE FROM catalogue_seals WHERE version_id={v2}"),
             format!("INSERT INTO catalogue_seals(version_id) VALUES({v2})"),
-            vec![(1, Some(2), "version-not-sealed"), (0, None, "name-index-mismatch")],
+            // The derived name rows of version 2 no longer belong to the latest sealed version.
+            vec![
+                (1, Some(2), "version-not-sealed"),
+                (0, None, "name-index-mismatch"),
+                (0, None, "entry-names-mismatch"),
+            ],
         ),
         (
             "INSERT INTO catalogue_entries VALUES(99,'orphan',0,'spell','Orphan',0,'owner_text','x','{}')".into(),
@@ -1978,4 +1983,156 @@ async fn cli_reference_limit_rejection_is_redacted() {
     let file = fixture.write("spells.json", &serde_json::to_vec(&value).unwrap());
     failed(&fixture.import(&file, 0), "unit-reference-limit");
     assert_eq!(fixture.drafts(), 0);
+}
+
+/// Assisted sheet step 3a: the normalised entry names behind linking on view. The seal replaces
+/// a catalogue's rows (latest sealed version only), `verify-catalogues` recomputes them and
+/// the marker, `rebuild-catalogue-index` repairs them, and store open rebuilds them when the
+/// marker differs from the build's.
+#[tokio::test]
+async fn entry_names_follow_the_seal_and_are_verified_rebuilt_and_marked() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let names = || -> Vec<(i64, String, String)> {
+        fixture
+            .db()
+            .prepare("SELECT version_id,entry_key,norm FROM catalogue_entry_names ORDER BY version_id,entry_key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let marker = || -> Option<String> {
+        fixture
+            .db()
+            .query_row(
+                "SELECT version FROM catalogue_name_fold WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    let base = rich(&fixture);
+    fixture.publish(&base).await.unwrap();
+    let first = names();
+    assert_eq!(
+        first,
+        [
+            (1, "zqxkey-charm".into(), "charm zqxname".into()),
+            (1, "zqxkey-flare".into(), "name zqxname".into())
+        ]
+    );
+    // A new sealed version replaces the rows: the index holds the latest version only.
+    let mut next = base.clone();
+    next["entries"][0]["name"] = "\u{c9}clair  STRASSE".into();
+    fixture.publish(&next).await.unwrap();
+    assert_eq!(
+        names(),
+        [
+            (2, "zqxkey-charm".into(), "charm zqxname".into()),
+            (2, "zqxkey-flare".into(), "eclair strasse".into())
+        ]
+    );
+    let build_marker = marker().expect("the marker is written at open");
+    assert_eq!(
+        fixture.store.verify_catalogues().await.unwrap().status,
+        "ok"
+    );
+    // Each tampering is reported by one code and repaired by the rebuild.
+    for (tamper, code) in [
+        (
+            "DELETE FROM catalogue_entry_names WHERE entry_key='zqxkey-flare'",
+            "entry-names-mismatch",
+        ),
+        (
+            "INSERT INTO catalogue_entry_names VALUES (2,'stray','stray')",
+            "entry-names-mismatch",
+        ),
+        (
+            "UPDATE catalogue_entry_names SET norm='charm' WHERE entry_key='zqxkey-charm'",
+            "entry-names-mismatch",
+        ),
+        (
+            "UPDATE catalogue_entry_names SET version_id=1",
+            "entry-names-mismatch",
+        ),
+        (
+            "UPDATE catalogue_name_fold SET version='an older rule'",
+            "entry-names-marker-mismatch",
+        ),
+    ] {
+        fixture.db().execute(tamper, []).unwrap();
+        let report = fixture.store.verify_catalogues().await.unwrap();
+        assert_eq!(
+            report.problems.iter().map(|p| p.code).collect::<Vec<_>>(),
+            [code],
+            "{tamper}"
+        );
+        fixture.store.rebuild_catalogue_index().await.unwrap();
+        assert_eq!(
+            fixture.store.verify_catalogues().await.unwrap().status,
+            "ok",
+            "{tamper}"
+        );
+        assert_eq!(marker().as_deref(), Some(build_marker.as_str()));
+    }
+}
+
+/// A marker that differs from the build's rebuilds the rows when the store opens.
+#[tokio::test]
+async fn a_changed_name_marker_rebuilds_the_entry_names_at_store_open() {
+    let _guard = TEST_LOCK.lock().await;
+    let fixture = fixture().await;
+    let names = || -> Vec<(i64, String)> {
+        fixture
+            .db()
+            .prepare("SELECT version_id,entry_key FROM catalogue_entry_names ORDER BY version_id,entry_key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let marker = || -> String {
+        fixture
+            .db()
+            .query_row(
+                "SELECT version FROM catalogue_name_fold WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    fixture.publish(&rich(&fixture)).await.unwrap();
+    let build_marker = marker();
+    // A marker that differs from the build's rebuilds the rows when the store opens.
+    fixture
+        .db()
+        .execute_batch("UPDATE catalogue_name_fold SET version='an older rule'; DELETE FROM catalogue_entry_names; INSERT INTO catalogue_entry_names VALUES (1,'old','old');")
+        .unwrap();
+    drop(Store::open(&fixture.database).unwrap());
+    assert_eq!(
+        names(),
+        [
+            (1, "zqxkey-charm".to_owned()),
+            (1, "zqxkey-flare".to_owned())
+        ]
+    );
+    assert_eq!(marker(), build_marker);
+    assert_eq!(
+        fixture.store.verify_catalogues().await.unwrap().status,
+        "ok"
+    );
+    // A matching marker leaves the rows alone at open.
+    fixture
+        .db()
+        .execute(
+            "DELETE FROM catalogue_entry_names WHERE entry_key='zqxkey-charm'",
+            [],
+        )
+        .unwrap();
+    drop(Store::open(&fixture.database).unwrap());
+    assert_eq!(names().len(), 1);
 }

@@ -14,7 +14,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   values) is merged too, and so is 2d-2 (model downloads, `docs/model-downloads.md`). There is
   no level 2 (ASSIST-48). Owed for 2d-2: live checks 4 (browser, Downloads panel) and 5 (certificate
   outside the system store, clean machine) (`docs/assisted-sheet-plan.md`, "2d-2"). Checks 1-3
-  ran (`docs/results.md`). Next: 3. Level 3's return is its
+  ran (`docs/results.md`). Step 3a (catalogue member, linking on view) is merged; next: 3b
+  (bundles), then 3c (reminders). Level 3's return is its
   own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
@@ -147,6 +148,18 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   situation input, first-release features, games after the POC.
 
 ## Other next actions
+
+- **`tools/browser_smoke.py` is stale since navigation slice 1 (b269454):** with `--auth` it fails at
+  the Owner landing check ("Open administration" link), in `material_browser.py` (a
+  `wait_for_function` string refused by the CSP), in `catalogue_browser.py` (the shared header's
+  logo image and script) and after the restart ("session lost", with the account step skipped).
+  The principal check now reads the header's display name. The 3a check ran from a scratch copy
+  skipping those parts (assisted sheet with and without JS, both viewports). Bring the tool and
+  `catalogue_browser.py`/`material_browser.py` up to date, then run it in every gate.
+- Gates must use `--all-features` (the auth-feature suites hid a stale `<nav>` assertion until
+  2026-11-17).
+- Catalogues (3a review, Minor): no failure-injection test that a failed `names::replace_rows`
+  rolls the whole seal back.
 
 - **Interactive walkthrough of the model tests (owner, 2026-10-26):** show the owner how the
   interpretation screens work, using a few cases (for example from `tools/assist-eval/fieldref-cases.json`):

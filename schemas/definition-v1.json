@@ -83,8 +83,13 @@
         "id": {"$ref": "#/$defs/id"}, "label": {"$ref": "#/$defs/label"},
         "control": {"enum": ["text", "multiline", "integer", "boolean", "enum"]},
         "optional": {"type": "boolean"},
-        "options": {"type": ["array", "null"], "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/choice"}}
+        "options": {"type": ["array", "null"], "minItems": 1, "maxItems": 128, "items": {"$ref": "#/$defs/choice"}},
+        "catalogue": {"$ref": "#/$defs/catalogue_member"}
       }
+    },
+    "catalogue_member": {
+      "type": "object", "additionalProperties": false, "required": ["id", "key"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "entry_type": {"$ref": "#/$defs/id"}, "key": {"$ref": "#/$defs/id"}}
     },
     "region": {
       "type": "object", "additionalProperties": false, "required": ["source_id", "page_id", "unit_id"],

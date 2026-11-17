@@ -39,7 +39,7 @@ fn choices_valid(options: &[super::Choice]) -> bool {
     })
 }
 
-fn items(index: usize, field: &Field) -> Result<(), DefinitionError> {
+fn items(index: usize, field: &Field, definition: &Definition) -> Result<(), DefinitionError> {
     let path = format!("/fields/{index}");
     match (field.control, &field.items) {
         (Control::List, None) => return Err(report(&path, "list-items-required")),
@@ -77,6 +77,7 @@ fn items(index: usize, field: &Field) -> Result<(), DefinitionError> {
             (_, None) => {}
         }
     }
+    catalogue_members(&path, field, definition)?;
     match field
         .items
         .as_ref()
@@ -85,6 +86,52 @@ fn items(index: usize, field: &Field) -> Result<(), DefinitionError> {
         Some(quick) => quick_add(&format!("{path}/quick_add"), field, quick),
         None => Ok(()),
     }
+}
+
+/// The `catalogue` member (assisted sheet step 3a): on a text property, naming one of the
+/// definition's linked catalogues; at most one per list; its `key` names another optional
+/// text property of the list that has no member itself. Paths are exact, codes static.
+fn catalogue_members(
+    path: &str,
+    field: &Field,
+    definition: &Definition,
+) -> Result<(), DefinitionError> {
+    let properties: Vec<_> = field
+        .items
+        .iter()
+        .flat_map(|items| &items.properties)
+        .collect();
+    let mut seen = false;
+    for (j, property) in properties.iter().enumerate() {
+        let Some(member) = &property.catalogue else {
+            continue;
+        };
+        let at = format!("{path}/properties/{j}/catalogue");
+        if property.control != Control::Text {
+            return Err(report(&at, "catalogue-member-not-text"));
+        }
+        if !definition
+            .catalogues
+            .iter()
+            .any(|link| link.id == member.id)
+        {
+            return Err(report(&at, "catalogue-member-unlinked"));
+        }
+        if std::mem::replace(&mut seen, true) {
+            return Err(report(&at, "catalogue-member-repeated"));
+        }
+        let key = properties
+            .iter()
+            .enumerate()
+            .find(|(k, other)| *k != j && other.id == member.key);
+        let Some((_, key)) = key else {
+            return Err(report(&at, "catalogue-key-unknown"));
+        };
+        if key.control != Control::Text || !key.optional || key.catalogue.is_some() {
+            return Err(report(&at, "catalogue-key-invalid"));
+        }
+    }
+    Ok(())
 }
 
 /// A list's quick-add line (assisted sheet slice 1.6, ASSIST-3) fills only the mapped name
@@ -101,6 +148,13 @@ fn quick_add(path: &str, field: &Field, quick: &super::QuickAdd) -> Result<(), D
     };
     if control(&quick.name) != Some(Control::Text) {
         return Err(report(path, "quick-add-name-not-text-property"));
+    }
+    let key = properties
+        .clone()
+        .find_map(|property| property.catalogue.as_ref())
+        .map(|member| member.key.as_str());
+    if key == Some(quick.name.as_str()) {
+        return Err(report(path, "quick-add-name-is-catalogue-key"));
     }
     if let Some(quantity) = &quick.quantity
         && control(quantity) != Some(Control::Integer)
@@ -390,7 +444,7 @@ pub(super) fn check(definition: &Definition) -> Result<Option<formula::Compiled>
     }
     let mut distinct: BTreeSet<&Region> = BTreeSet::new();
     for (index, field) in definition.fields.iter().enumerate() {
-        items(index, field)?;
+        items(index, field, definition)?;
         if let Some(item) = &field.formula {
             if field.nullable {
                 return Err(report(

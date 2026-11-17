@@ -180,7 +180,11 @@ impl Unit {
                 keys.insert("set".into());
             }
             Self::NewRow(f) => {
+                let key = values::key_property(&definition.fields[f]);
                 for (p, property) in values::properties(&definition.fields[f]).iter().enumerate() {
+                    if key == Some(p) {
+                        continue;
+                    }
                     keys.insert(format!("row-{p}"));
                     if property.optional {
                         keys.insert(format!("set-{p}"));

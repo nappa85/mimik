@@ -276,6 +276,27 @@ kept read-only to copy (`kept-<f>`) with no form that could add it. Success is a
 those of the other unit routes (parse, CSRF, request auth, the D-X3 wait, rights 403, then
 400 for routes and keys, then the writer's `IMMEDIATE` rechecks).
 
+## Catalogue links
+
+Step 3a, `docs/runtime-definition-contract.md` ("Catalogue member"). A list whose text
+property carries `catalogue: {id, entry_type?, key}` links each saved row's name cell to an
+entry of the linked catalogue, on view, without a model. Names are compared through
+`text_fold::name_norm` (NFKC, full fold, no marks, white space collapsed) against the stored
+normalised names of the catalogue's latest sealed version (`docs/catalogues.md`). For each saved
+row with a non-blank name: (1) if the key property holds the key of an eligible entry (not
+retired, of the member's entry type when it has one) whose norm equals the cell's, that entry;
+(2) otherwise the single eligible entry with that norm; none or several: no link, and no
+warning yet (step 4 adds rules 3 and 4). One query per list under `QUERY_BUDGET`, only on
+pages whose pin the catalogue read route would serve; a failure or timeout shows no links and
+logs no names. Draft re-renders show none.
+
+The name cell gets an "Open entry" link to the entry page (new tab, `rel="noopener"`), named
+through `aria-labelledby` ("Open entry" + the cell's value + the catalogue's panel item); the
+sheet JSON answer of a cell save carries `unit.link` (`{href, catalogue}` or `null`) and the
+module puts it back or drops it. The key property is never a control: not on the page, not in
+the full form, the cell route (400), the new-row form or the quick-add line; every save keeps
+its stored value and new rows leave it absent. Nothing writes it yet.
+
 ## Page-size bound
 
 Rendered sheet pages stay within `FIXED_PAGE_BYTES` (64 KiB) + render units ×
@@ -290,7 +311,10 @@ on each cell, every cell its own form: about 2.6% headroom (ASSIST-L2). Fixtures
 with both the densest sign-led notes and kept 200-`"` scribbles, the quick-add line on the
 widest list (255 and 256 rows, and a refused entry kept from a full list), a new row kept
 read-only from a full list (the tightest re-render, about 2.0% within its bound plus echo)
-and an orphaned cell's kept draft, each asserting its `readonly` textareas. Rerun those fixtures whenever per-cell markup grows.
+and an orphaned cell's kept draft, each asserting its `readonly` textareas, and the same wide
+list with every row linked to an entry (64-character catalogue ID, entry type and keys:
+7.6 MB within a 20.0 MB bound, about 62% headroom; it fits because `render_units` still counts the hidden key property's control,
+while the page renders none). Rerun those fixtures whenever per-cell markup grows.
 
 ## Validity flag
 
@@ -609,5 +633,8 @@ python3 tools/assist_demo.py target/release/mimik --fixture target/demo-source -
 `--exit-after-setup` stops once the sheet exists. `--reset-passwords` (with `--data` naming an existing demo folder, no `--fixture`) gives both demo accounts new dummy passwords, prints them and signs both out. The definition
 (`tests/support/source_fixture.rs`, `assist_definition`): integers Current HP, Max HP,
 Armour modifier and nullable Luck; an Equipment list (Item name, Quantity, Weight, optional
-Broken boolean) with a quick-add line (name and quantity; try "3 torches"); derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
+Broken boolean) with a quick-add line (name and quantity; try "3 torches"); the Python tools
+add the linked synthetic catalogue `assist-gear` (Shield, Rope, Healing draught and two entries
+named Sword) and the `catalogue` member on the Item name with its key property `gear_key`
+(`assist_definition_with_gear` in `tests/support/source_fixture.rs`; `tools/smoke_release.py` publishes the catalogue first): a row named "shield" links to its entry; derived Load = `sum(equipment.map(i, i.quantity * i.weight))`; the check
 `hp <= max_hp`: set Current HP above Max HP, or blank it, and the header says "Not validated".

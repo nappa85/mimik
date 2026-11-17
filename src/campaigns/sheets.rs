@@ -36,6 +36,9 @@ pub(crate) struct SheetView {
     /// read boundary; empty on the create page (no sheet to read them through) and on history
     /// pages (the routes read the current revision, not a historical pin).
     pub catalogues: Vec<super::catalogue::LinkView>,
+    /// Saved rows linked to a catalogue entry (step 3a), read with the links above; empty
+    /// wherever those are.
+    pub entry_links: super::catalogue::EntryLinks,
     /// Change notes (assisted sheet slice 1.2): the current note of each live address on a
     /// current page, the revision's notes on a history page, and the notes a save writes.
     pub notes: super::notes::Notes,
@@ -233,6 +236,7 @@ impl Store {
                     editable,
                     changes,
                     catalogues: Vec::new(),
+                    entry_links: super::catalogue::EntryLinks::new(),
                     notes: super::notes::Notes::default(),
                 },
                 base,
@@ -309,6 +313,7 @@ impl Store {
                     editable: true,
                     changes: None,
                     catalogues: Vec::new(),
+                    entry_links: super::catalogue::EntryLinks::new(),
                     notes: super::notes::Notes::default(),
                 },
                 permit,
@@ -504,6 +509,7 @@ impl Store {
             // history page (another revision's pin) lists no catalogue links.
             if let Some(pin)=view.immutable.as_ref().filter(|_|!create && history.is_none()){
                 view.catalogues=super::catalogue::links(&tx,pin)?;
+                view.entry_links=super::catalogue::entry_links(&tx,pin,&view.snapshot.data);
             }
             if let Some(pin)=&view.immutable{
                 let status=pin.readiness(&tx)?;

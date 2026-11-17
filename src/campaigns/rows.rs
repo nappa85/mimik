@@ -117,6 +117,10 @@ pub(crate) fn cell(
     pending: &mut Vec<Note>,
 ) -> Result<Plan, StatusCode> {
     let list = &pin.definition().fields[f];
+    // The catalogue key property is never a control: its cell takes no value (step 3a).
+    if values::key_property(list) == Some(p) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let property = &values::properties(list)[p];
     let host = host_at(&base.data, list, r)
         .ok_or(StatusCode::BAD_REQUEST)?

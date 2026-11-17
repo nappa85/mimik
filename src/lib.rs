@@ -17,6 +17,7 @@ mod registry_admin;
 pub(crate) mod sandbox;
 pub mod sources;
 mod store;
+mod text_fold;
 mod web;
 
 pub use store::{SCHEMA_VERSION, Store};

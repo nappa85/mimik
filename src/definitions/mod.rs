@@ -4,6 +4,8 @@ mod admission;
 pub(crate) use admission::valid_field_id;
 #[cfg(test)]
 mod catalogue_link_tests;
+#[cfg(test)]
+mod catalogue_member_tests;
 pub(crate) mod decode;
 mod formula_admission;
 // Public so `examples/formula_eval.rs` (development CLI) links and the library-only
@@ -16,7 +18,7 @@ pub(crate) mod formula_pack_tests;
 pub(crate) mod private_pin;
 mod publication;
 #[cfg(test)]
-mod quick_add_tests;
+pub(crate) mod quick_add_tests;
 #[cfg(test)]
 pub(crate) use publication::tests::fixture as source_fixture;
 mod store;
@@ -229,6 +231,23 @@ pub struct ItemProperty {
     pub optional: bool,
     #[serde(default)]
     pub options: Option<Vec<Choice>>,
+    /// The catalogue member (assisted sheet step 3a): this text property names entries of a
+    /// linked catalogue. Last, and omitted when absent, so every definition without it keeps
+    /// its canonical bytes and hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue: Option<CatalogueMember>,
+}
+
+/// The `catalogue` member of a text item property: the linked catalogue, an optional entry
+/// type filter, and the sibling optional text property that holds the remembered entry key.
+/// The key property is rendered as the entry link, never as a control (`docs/assisted-entry.md`).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogueMember {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_type: Option<String>,
+    pub key: String,
 }
 
 /// A derived value: CEL source plus rule citations and source evidence.

@@ -16,6 +16,8 @@ const UNIT_PATH = /^\/private-sheets\/\d+\/(?:meta\/(?:name|notes)|fields\/[^/]+
 const PROPOSAL_PATH = /^\/private-sheets\/\d+\/proposals\/[0-9a-f]{32}\/\d+$/;
 const POLL_PATH = /^\/private-sheets\/\d+\/interpretations\/[0-9a-f]{32}$/;
 const DIGITS = /^\d+$/;
+/** The only href a catalogue entry link may carry (step 3a): the sheet's own entry route. */
+const ENTRY_PATH = /^\/private-sheets\/\d+\/catalogue\/[a-z][a-z0-9-]{0,63}\/[a-z][a-z0-9-]{0,63}$/;
 const JSON_TYPE = 'application/json';
 
 /** Unit state by form. */
@@ -32,7 +34,7 @@ let assistantOn = true;
  * loads anything. */
 const ATTRIBUTES = new Set([
   'action', 'aria-describedby', 'aria-label', 'aria-labelledby', 'class', 'for', 'form',
-  'hidden', 'href', 'id', 'method', 'name', 'role', 'type', 'value',
+  'hidden', 'href', 'id', 'method', 'name', 'rel', 'role', 'target', 'type', 'value',
 ]);
 
 function element(tag, attributes, ...children) {
@@ -300,10 +302,42 @@ function showUnit(unit, shown, revision, replace) {
     }
   }
   const button = saveButton(unit.form);
+  showLink(unit, shown.link);
   const noteIds = showNote(unit, shown.note, button);
   const after = unit.form.querySelector('.entry-note') || button;
   const offerIds = showActions(unit, shown.actions, revision, after);
   describe(unit, [...noteIds, ...offerIds]);
+}
+
+/** The catalogue entry link of a saved name cell (step 3a): put back as the page draws it, or
+ * dropped when the save left the row without one. An answer without the member leaves it. */
+function showLink(unit, link) {
+  if (link === undefined) {
+    return;
+  }
+  const old = unit.form.querySelector('.entry-link');
+  const cell = /^row-(\d+-\d+-\d+)$/.exec(unit.control.id);
+  if (old) {
+    old.remove();
+  }
+  if (link === null || !cell) {
+    return;
+  }
+  const id = `entry-${cell[1]}`;
+  unit.control.after(
+    element(
+      'a',
+      {
+        class: 'entry-link',
+        id,
+        href: link.href,
+        target: '_blank',
+        rel: 'noopener',
+        'aria-labelledby': `${id} ${unit.control.id} catalogue-${link.catalogue}`,
+      },
+      'Open entry',
+    ),
+  );
 }
 
 function setText(id, text) {
@@ -471,6 +505,9 @@ function validUnit(unit, refused) {
   return (
     text(unit.value) &&
     textOrNull(unit.state) &&
+    (unit.link === undefined ||
+      unit.link === null ||
+      (record(unit.link) && ENTRY_PATH.test(unit.link.href) && DIGITS.test(unit.link.catalogue))) &&
     (note === null ||
       (record(note) && text(note.kind) && text(note.shown) && text(note.value))) &&
     (actions === null ||

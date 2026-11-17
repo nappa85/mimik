@@ -1045,7 +1045,7 @@ fn seeded_coverage_database(dir: &std::path::Path) -> std::path::PathBuf {
     drop(Store::open(&path).unwrap());
     let db = Connection::open(&path).unwrap();
     schema_fixture::drop_search_schema(&db);
-    db.execute_batch(&format!("DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts; DROP TABLE private_sheet_notes; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models; PRAGMA user_version={}; PRAGMA foreign_keys=ON;", mimik::sources::SEARCH_SCHEMA - 1)).unwrap();
+    db.execute_batch(&format!("DROP TABLE catalogue_name_fold; DROP TABLE catalogue_entry_names; DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts; DROP TABLE private_sheet_notes; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models; PRAGMA user_version={}; PRAGMA foreign_keys=ON;", mimik::sources::SEARCH_SCHEMA - 1)).unwrap();
     // One PDF of three pages read in two sources: page 1 only in 1, page 3 only in 2, page 2 in both.
     seed_source(
         &db,

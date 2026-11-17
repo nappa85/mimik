@@ -1073,6 +1073,22 @@ def run_assist_browser(page, campaign, version):
         "The quick-add button is not named Add Equipment",
     )
     no_overflow(page, "assisted sheet after a quick-add")
+    # Step 3a: a row named like an `assist-gear` entry links to it (new tab), and the key
+    # property gear_key (property 4) is rendered as that link, never as a control.
+    line = page.get_by_role("textbox", name="Quick add Equipment", exact=True)
+    line.fill("shield")
+    enter(line)
+    link = page.locator("#entry-4-3-0")
+    require(
+        link.count() == 1
+        and link.is_visible()
+        and link.get_attribute("target") == "_blank"
+        and link.get_attribute("href").endswith("/catalogue/assist-gear/shield")
+        and page.locator("#entry-4-1-0").count() == 0
+        and page.locator("#row-4-3-4").count() == 0,
+        "The shield row has no entry link, or the catalogue key property is a control",
+    )
+    no_overflow(page, "assisted sheet with an entry link")
     # Review round 1: a refused entry with a line break comes back in a textarea, so the
     # control really holds the break and a retry posts what was typed (an input strips it).
     typed = "3 torches\nand rope"
@@ -2221,7 +2237,12 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
             f"Browser login failed with HTTP{submitted.value.status} (diagnostics redacted)",
         )
         page.wait_for_url("**/")
-        require(name in page.locator("main").inner_text(), "Browser current principal differs")
+        # The shared header names the signed-in account by its display name.
+        display = {"smoke-owner": "Synthetic Owner", "auth-player": "SyntheticLongDisplay" * 5}[name]
+        require(
+            display in page.locator("header.site details.account summary").inner_text(),
+            "Browser current principal differs",
+        )
         require(
             all(password.decode() not in page.content() for password in passwords),
             "Browser auth DOM echoed password",

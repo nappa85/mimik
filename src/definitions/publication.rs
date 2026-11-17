@@ -264,6 +264,7 @@ fn comparison(
     revision: i64,
     data: &admission::Admitted,
 ) -> Result<Comparison, DefinitionError> {
+    super::store::member_entry_types(db, data)?;
     let snapshot = snapshot(db, data)?;
     let latest_version_id = latest_version(db, data)?;
     let (current_approval_id, withdrawn) = approval_state(

@@ -35,7 +35,7 @@ pub const SENTINELS: &[&str] = &[
 ];
 
 /// Every catalogue object, children first, for rewinding a fixture to an older schema.
-pub const DROP_CATALOGUE_SCHEMA: &str = "DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts;";
+pub const DROP_CATALOGUE_SCHEMA: &str = "DROP TABLE catalogue_name_fold; DROP TABLE catalogue_entry_names; DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts;";
 
 pub struct Fixture {
     pub _dir: tempfile::TempDir,

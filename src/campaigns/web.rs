@@ -667,6 +667,8 @@ struct PropertyView {
     control: &'static str,
     optional: bool,
     options: Vec<(String, String)>,
+    /// The list's catalogue key property (step 3a): never rendered as a control.
+    key: bool,
 }
 
 struct CellView {
@@ -688,6 +690,8 @@ struct CellView {
     /// for a new row whose first property is optional, its Set/Not set select (slice 1.5b).
     autofocus: bool,
     focus_set: bool,
+    /// The catalogue entry this saved name cell links to (step 3a), if any.
+    link: Option<super::catalogue::EntryLink>,
 }
 
 /// What a saved, editable page offers under a cell from its current note (slice 1.3): the
@@ -1034,13 +1038,16 @@ impl ListView {
             Some(values::Focus::Down(list, row)) if (list, row) == (f, r) => RowFocus::Down,
             _ => RowFocus::None,
         };
+        let key = values::key_property(field);
         let properties = values::properties(field)
             .iter()
-            .map(|property| PropertyView {
+            .enumerate()
+            .map(|(p, property)| PropertyView {
                 label: property.label.clone(),
                 control: control_name(property.control),
                 optional: property.optional,
                 options: choices(property.options.as_ref()),
+                key: key == Some(p),
             })
             .collect();
         let declared = values::properties(field);
@@ -1087,6 +1094,7 @@ impl ListView {
                             name: "value".into(),
                             autofocus: false,
                             focus_set: false,
+                            link: None,
                         }
                     })
                     .collect(),
@@ -1106,6 +1114,22 @@ impl ListView {
             focus_quick: focus == Some(values::Focus::Quick(f)),
             quick: None,
             kept: None,
+        }
+    }
+    /// Puts the catalogue entry link on each linked saved row's name cell (step 3a).
+    fn link(&mut self, view: &SheetView, f: usize, field: &crate::definitions::Field) {
+        let Some(name) = values::properties(field)
+            .iter()
+            .position(|property| property.catalogue.is_some())
+        else {
+            return;
+        };
+        for row in &mut self.rows {
+            if let Some(link) = view.entry_links.get(&(f, row.id.clone()))
+                && let Some(cell) = row.cells.get_mut(name)
+            {
+                cell.link = Some(link.clone());
+            }
         }
     }
     /// Adds the switch and Undo of each saved row cell (slice 1.3).
@@ -1245,6 +1269,7 @@ impl ListView {
                     name: format!("row-{p}"),
                     autofocus: submitted.is_some() && p == 0 && !property.optional,
                     focus_set: submitted.is_some() && p == 0 && property.optional,
+                    link: None,
                 })
                 .collect(),
         );
@@ -1645,6 +1670,7 @@ fn list_view(
     // Switch and Undo on a saved list only, never over a re-rendered draft.
     if list_raw.is_none() {
         list.offer(view, field, forms);
+        list.link(view, f, field);
         if units {
             list.units(view, field, unit_draft, forms);
         }

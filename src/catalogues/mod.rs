@@ -7,6 +7,7 @@
 //! ids or values, owner text or unit text. Diagnostics are static codes with index-only paths.
 mod admission;
 pub(crate) mod decode;
+pub(crate) mod names;
 mod publication;
 pub(crate) mod read;
 mod store;
@@ -15,7 +16,7 @@ pub use decode::MAX_BYTES;
 
 /// Every catalogue object, children first, for test fixtures that rewind to older schemas.
 #[cfg(test)]
-pub(crate) const DROP_SCHEMA: &str = "DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts;";
+pub(crate) const DROP_SCHEMA: &str = "DROP TABLE catalogue_name_fold; DROP TABLE catalogue_entry_names; DROP TABLE catalogue_names_fts; DROP TABLE catalogue_seals; DROP TABLE catalogue_entry_units; DROP TABLE catalogue_entries; DROP TABLE catalogue_entry_types; DROP TABLE catalogue_versions; DROP TABLE catalogues; DROP TABLE catalogue_drafts;";
 pub use publication::{
     BadgeCounts, CatalogueComparison, CatalogueIndexRebuild, CatalogueVerification,
     CatalogueVersionSummary, ChangeCounts, IntegrityProblem, PublishRequest, PublishedCatalogue,

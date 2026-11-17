@@ -279,8 +279,9 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 
 - **CAT-L7** [catalogues] (later) Catalogue administration is CLI-only with no withdrawal command; Owner browser pages over the shared transitions are allowed (PROD-18).
 - **RR-L4** [definitions] (later) Definition publish and withdraw are CLI-only (PROD-18). Phase B `/admin/definitions` keeps CLI output byte-identical, attributes `account:<id>` via insert-only web events and pins the ticket hash.
-- **CAT-L9** [catalogues] (later) Sheets cannot store catalogue references (catalogue step 4, shelved 2026-10-19); if resumed, an unknown key warns (RR-2).
+- **CAT-L9** [catalogues] (later) Sheets link a list row to an entry by name on view only (assisted sheet step 3a, rules 1 and 2); nothing writes or clears the key property yet, and an unknown or duplicate name shows no warning (step 4: rules 3 and 4, an unknown key warns, RR-2).
 - **CAT-L16** [catalogues] (later) Manual page images are not shown to players beside catalogue entries (Q1); allowed after the assisted-sheet POC.
+- **CAT-L18** [catalogues] Name matching drops nonspacing marks (`Mn`), so names in scripts whose marks carry meaning (Devanagari, Hebrew, Arabic) merge with their unmarked forms; it is a link rule only, nothing is rewritten. The FTS tokenizer (`unicode61 remove_diacritics 2`) folds differently from `name_norm` (for example it keeps `ß` and compatibility forms apart), so the suggestions of step 4 must not assume the two agree.
 - **RR-L5** [formulas] (later) Derived values are read-only and cannot be overridden by the player (RR-7); needs a definition-level override design with its own review.
 - **RR-L6** [sheets] (later) Controls are fixed per value type (booleans are unknown/true/false selects); no custom per-field input controls (RR-7).
 - **PROD-L2** [sheets] (later) Sheets are generic editors: no official layout mapping, print or export, no layout fidelity tests.
