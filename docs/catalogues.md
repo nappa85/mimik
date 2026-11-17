@@ -1,12 +1,12 @@
 # Catalogues
 
 Read-only game catalogues (spells, items, other entries) that players browse and read through
-a sheet. The Owner publishes them from the CLI. Sheets do not store catalogue references yet
-(`CAT-L9` in [limitations.md](limitations.md)). Decisions: "Catalogues" in
+a sheet. The Owner publishes them from the CLI. A sheet links a list row to an entry by name
+on view (step 3a) but writes no catalogue reference yet (`CAT-L9` in [limitations.md](limitations.md)). Decisions: "Catalogues" in
 [decisions.md](decisions.md).
 
-Code: `src/catalogues/` (`decode`, `admission`, `store`, `publication`, `read`),
-`migrations/019_catalogues.sql`, `schemas/catalogue-v1.json` (example
+Code: `src/catalogues/` (`decode`, `admission`, `store`, `publication`, `read`, `names`),
+`migrations/019_catalogues.sql`, `migrations/033_catalogue_entry_names.sql`, `schemas/catalogue-v1.json` (example
 `schemas/catalogue-example.json`), the definition link in `src/definitions/`, routes in
 `src/campaigns/catalogue.rs` and `catalogue_web.rs`, templates `catalogue_*.html`.
 
@@ -139,6 +139,21 @@ Name index `catalogue_names_fts`: FTS5 `unicode61 remove_diacritics 2`, prefix 3
 derived, no triggers; rowid = surrogate × 2^20 + ordinal; publication replaces a catalogue's
 rowid range.
 
+Normalised names `catalogue_entry_names(version_id, entry_key, norm)` (migration 033; primary
+key `(version_id, entry_key)`, index `(version_id, norm)`): for the latest sealed version of
+each catalogue only, a derived table like the FTS index and without the immutability triggers;
+type and retirement are joined from `catalogue_entries`. `norm` is `text_fold::name_norm`:
+remove default-ignorable code points and `Cf`, NFKC, full case fold, NFD and drop `Mn`, NFC,
+collapse white space, trim. A one-row table `catalogue_name_fold` holds that marker
+(`text_fold::name_fold_version()`: the rule number and `unicode_normalization::UNICODE_VERSION`;
+a test ties it to the locked `unicase`, `unicode-normalization` and `unicode-general-category`
+versions). The seal transaction replaces the catalogue's
+rows; at store open a marker that differs from the build's rebuilds the rows one catalogue per
+transaction (the latest sealed version re-read inside each) and writes the marker after the last;
+a failure is logged without names, the application starts, and the marker stays unset. `verify-catalogues` opens the store, so a stale marker is repaired at open before it
+verifies; it recomputes the rows (`entry-names-mismatch`) and compares the marker (`entry-names-marker-mismatch`);
+`rebuild-catalogue-index` rebuilds them with the FTS index.
+
 ## Linking from a definition
 
 The optional `catalogues` member lists 1–8 unique slugs (`[{"id": "spells"}]`, display
@@ -148,6 +163,11 @@ a sealed version at three sites: draft save (`/catalogues/N linked-catalogue-not
 the publication snapshot (comparison and approval) and readiness
 (`private_evidence_available`; wiring becomes stale). Existence only: catalogue state never
 enters the wiring snapshot, so a new catalogue version never stales an approval.
+
+A text item property may also carry the `catalogue` member (entry-type filter, key property):
+[runtime-definition-contract.md](runtime-definition-contract.md#lists). Its entry type is
+checked at draft save and in the publication snapshot only; the sheet resolves rows through
+the normalised-name rows above ([assisted-entry.md](assisted-entry.md#catalogue-links)).
 
 ## Reading through a sheet
 

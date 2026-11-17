@@ -199,6 +199,12 @@ fn unit_json<'a>(
                     (&cell.value, property.optional.then_some(&cell.state)),
                     (cell.note.as_ref(), cell.actions.as_ref()),
                 );
+                // The catalogue entry link of a name cell (step 3a): `null` when it has none,
+                // so a script drops a link its save made stale.
+                answer["link"] = cell.link.as_ref().map_or(
+                    Value::Null,
+                    |link| json!({"href": link.href(sheet), "catalogue": link.index.to_string()}),
+                );
                 if let Some(host) = host {
                     let address =
                         super::super::notes::cell_address(&list_field.id, host, &property.id);

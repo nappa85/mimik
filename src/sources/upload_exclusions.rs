@@ -6,7 +6,6 @@ use super::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use unicode_normalization::UnicodeNormalization;
 
 pub type BoxPoints = [f64; 4];
 pub(crate) const COMPARISON_LIMIT: &str =
@@ -342,9 +341,9 @@ fn append(
 }
 
 fn normalize(text: &str) -> String {
-    let nfkc: String = text.nfkc().collect();
-    let collapsed = nfkc.split_whitespace().collect::<Vec<_>>().join(" ");
-    let folded = unicase::UniCase::unicode(collapsed).to_folded_case();
+    let folded = crate::text_fold::full_fold(&crate::text_fold::collapse_whitespace(
+        &crate::text_fold::nfkc(text),
+    ));
     let mut result = String::new();
     let mut digits = false;
     for c in folded.chars() {

@@ -186,3 +186,151 @@ pub(super) fn links(
         })
         .collect()
 }
+
+/// A saved row's link to a catalogue entry (assisted sheet step 3a, linking rules 1 and 2):
+/// the catalogue's place in the definition's links (which names the link on the page through
+/// the Catalogues panel) and its id, and the entry key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntryLink {
+    pub index: usize,
+    pub catalogue: String,
+    pub key: String,
+}
+
+impl EntryLink {
+    /// The entry page of the sheet's catalogue route.
+    pub(crate) fn href(&self, sheet: i64) -> String {
+        format!(
+            "/private-sheets/{sheet}/catalogue/{}/{}",
+            self.catalogue, self.key
+        )
+    }
+}
+
+/// Links of the saved rows, by `(list field index, row host ID)`.
+pub(crate) type EntryLinks = std::collections::BTreeMap<(usize, String), EntryLink>;
+
+/// Linking on view for the saved `data` of a sheet pinned to `pin`: for each saved row of a
+/// list with a `catalogue` member and a non-blank name, (1) the entry the stored key property
+/// names, if it is an eligible entry of the latest sealed version whose normalised name equals
+/// the cell's, else (2) the single eligible entry with that name; none or several: no link.
+/// Eligible means not retired and of the member's entry type, when it has one. One query per
+/// list under `QUERY_BUDGET`; a failure or timeout gives no links for that list and logs
+/// nothing about names. The catalogue must be reachable the way the catalogue route would
+/// serve it (a sealed version), which the caller's supported runtime pin already guarantees.
+pub(super) fn entry_links(
+    db: &rusqlite::Connection,
+    pin: &private_pin::ImmutablePin,
+    data: &serde_json::Value,
+) -> EntryLinks {
+    entry_links_within(db, pin, data, (crate::sources::search::QUERY_BUDGET, None))
+}
+
+/// `entry_links` with its budget and, for tests that must interrupt very short reads, the
+/// VM-instruction interval of the budget check.
+pub(super) fn entry_links_within(
+    db: &rusqlite::Connection,
+    pin: &private_pin::ImmutablePin,
+    data: &serde_json::Value,
+    budget: (std::time::Duration, Option<i32>),
+) -> EntryLinks {
+    let definition = pin.definition();
+    let mut links = EntryLinks::new();
+    for (f, field) in definition.fields.iter().enumerate() {
+        let properties = super::values::properties(field);
+        let (Some(name), Some(key)) = (
+            properties
+                .iter()
+                .position(|property| property.catalogue.is_some()),
+            super::values::key_property(field),
+        ) else {
+            continue;
+        };
+        let Some(member) = properties[name].catalogue.as_ref() else {
+            continue;
+        };
+        let Some(index) = definition
+            .catalogues
+            .iter()
+            .position(|link| link.id == member.id)
+        else {
+            continue;
+        };
+        let rows = data[&field.id].as_array().map_or(&[][..], Vec::as_slice);
+        let outcome = rows_links(
+            db,
+            pin,
+            (index, member),
+            (&properties[name].id, &properties[key].id),
+            rows,
+            budget,
+        );
+        match outcome {
+            Ok(found) => links.extend(found.into_iter().map(|(host, link)| ((f, host), link))),
+            Err(_) => eprintln!("Mimik: catalogue links unavailable for one list"),
+        }
+    }
+    links
+}
+
+fn rows_links(
+    db: &rusqlite::Connection,
+    pin: &private_pin::ImmutablePin,
+    (index, member): (usize, &crate::definitions::CatalogueMember),
+    (name, key): (&str, &str),
+    rows: &[serde_json::Value],
+    budget: (std::time::Duration, Option<i32>),
+) -> Result<Vec<(String, EntryLink)>, AppError> {
+    let definition = pin.definition();
+    let Some(linked) =
+        read::latest_sealed(db, &definition.game_id, &definition.edition_id, &member.id)?
+    else {
+        return Ok(Vec::new());
+    };
+    let named: Vec<(&str, String, Option<&str>)> = rows
+        .iter()
+        .filter_map(|row| {
+            let norm = crate::text_fold::name_norm(row[name].as_str()?);
+            (!norm.is_empty()).then_some((row["id"].as_str()?, norm, row[key].as_str()))
+        })
+        .collect();
+    if named.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut wanted: Vec<String> = named.iter().map(|(_, norm, _)| norm.clone()).collect();
+    wanted.sort();
+    wanted.dedup();
+    let found = {
+        let _budget = match budget.1 {
+            Some(ops) => crate::sources::search::Budget::checking_every(db, budget.0, ops),
+            None => crate::sources::search::Budget::start(db, budget.0),
+        };
+        crate::catalogues::names::eligible(
+            db,
+            linked.version_id,
+            member.entry_type.as_deref(),
+            &wanted,
+        )
+    }
+    .map_err(AppError::from)?;
+    let link = |entry: &str| EntryLink {
+        index,
+        catalogue: member.id.clone(),
+        key: entry.to_owned(),
+    };
+    let mut by_norm: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (norm, entry) in &found {
+        by_norm.entry(norm).or_default().push(entry);
+    }
+    Ok(named
+        .into_iter()
+        .filter_map(|(host, norm, stored)| {
+            let matching = by_norm.get(norm.as_str())?;
+            let chosen = stored
+                .and_then(|stored| matching.iter().copied().find(|entry| *entry == stored))
+                .or_else(|| (matching.len() == 1).then(|| matching[0]))?;
+            Some((host.to_owned(), link(chosen)))
+        })
+        .collect())
+}

@@ -1135,10 +1135,55 @@ def publish_list_definition(binary, directory, fixture):
     return published["id"]
 
 
+def assist_gear_catalogue():
+    """The demo catalogue `assist-gear` (assisted sheet step 3a): synthetic owner-written text
+    only, no source. Shield has a numeric rule, Healing draught a number, and two entries are
+    named Sword with different types (the "Which Sword?" case of step 4)."""
+
+    def entry(key, entry_type, name, text):
+        return {
+            "key": key,
+            "type": entry_type,
+            "name": name,
+            "properties": {},
+            "description": {"owner_text": text},
+        }
+
+    return {
+        "contract_version": 1,
+        "game_id": "synthetic-game",
+        "edition_id": "first",
+        "catalogue_id": "assist-gear",
+        "title": "Synthetic gear",
+        "sources": [],
+        "entry_types": [
+            {"id": "armour", "label": "Armour", "properties": []},
+            {"id": "consumable", "label": "Consumable", "properties": []},
+            {"id": "tool", "label": "Tool", "properties": []},
+            {"id": "weapon", "label": "Weapon", "properties": []},
+        ],
+        "entries": [
+            entry("shield", "armour", "Shield", "A shield turns aside one blow: armour 1."),
+            entry("rope", "tool", "Rope", "Fifty feet of rope that holds one climber."),
+            entry(
+                "healing-draught",
+                "consumable",
+                "Healing draught",
+                "Drinking a healing draught restores 6 hit points.",
+            ),
+            entry("sword", "weapon", "Sword", "A sword is a plain blade for the fray."),
+            entry("sword-prop", "tool", "Sword", "A blunt prop sword used in stage fights."),
+        ],
+    }
+
+
 def publish_assist_definition(binary, directory, fixture):
     """Publishes the assisted-sheet demo definition (assisted sheet plan §5); returns its
-    version ID. The unknown-game ruleset and its source must already be registered."""
+    version ID. The unknown-game ruleset and its source must already be registered. The
+    fixture's definition links the synthetic catalogue `assist-gear` (the Equipment name carries
+    the `catalogue` member and its key property `gear_key`), so it is published first."""
     sources, mapping = unknown_source_mapping(directory, fixture)
+    publish_catalogue(binary, directory, assist_gear_catalogue(), "assist-gear.json")
     definition = json.loads((fixture / "assist-definition.json").read_text())
     definition["sources"] = sources
     definition["fields"][0]["mapping"] = mapping

@@ -93,7 +93,7 @@ pub fn fixture_pair(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     fs::write(
         root.join("assist-definition.json"),
-        serde_json::to_vec(&assist_definition())?,
+        serde_json::to_vec(&assist_definition_with_gear())?,
     )?;
     review_fixture(root)?;
     Ok(())
@@ -282,6 +282,27 @@ pub fn assist_definition() -> serde_json::Value {
         "constraints": [{"id": "hp-cap", "expr": "hp <= max_hp", "rule_ids": ["synthetic-2"],
                          "message": "Current HP is at most Max HP.", "evidence": unresolved}]
     })
+}
+
+/// [`assist_definition`] as the demo and the smoke publish it (assisted sheet step 3a): linked
+/// to the synthetic catalogue `assist-gear` (published by `tools/smoke_release.py` first), the
+/// Item name carrying the `catalogue` member and its key property `gear_key` appended last so
+/// no property index moves. Separate because unit tests publish `assist_definition` without a
+/// catalogue.
+///
+/// # Panics
+/// Never for the fixed definition.
+#[must_use]
+pub fn assist_definition_with_gear() -> serde_json::Value {
+    let mut definition = assist_definition();
+    let properties = definition["fields"][4]["items"]["properties"]
+        .as_array_mut()
+        .expect("the equipment list");
+    properties[0]["catalogue"] = json!({"id": "assist-gear", "key": "gear_key"});
+    properties
+        .push(json!({"id": "gear_key", "label": "Gear key", "control": "text", "optional": true}));
+    definition["catalogues"] = json!([{"id": "assist-gear"}]);
+    definition
 }
 
 /// Scalar, list-free formula definition for the unpacked browser gate (lists wait for M4).

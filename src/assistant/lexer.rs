@@ -8,7 +8,6 @@
 //! "no one" is not 1) admits a number the player did not mean, so the option is shown and the
 //! owner confirms it (`docs/limitations.md`).
 use unicode_general_category::{GeneralCategory, get_general_category};
-use unicode_normalization::UnicodeNormalization;
 
 /// The most digits of a number the lexer finds.
 const MAX_DIGITS: usize = 18;
@@ -144,11 +143,12 @@ pub(crate) const FRACTION_LITERALS: [u64; 4] = [2, 3, 4, 100];
 
 /// Lower case, decomposed, combining marks removed.
 fn fold(text: &str) -> String {
-    text.chars()
-        .flat_map(char::to_lowercase)
-        .nfd()
-        .filter(|&c| get_general_category(c) != GeneralCategory::NonspacingMark)
-        .collect()
+    crate::text_fold::strip_marks(
+        &text
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect::<String>(),
+    )
 }
 
 /// Whether the phrase contains a fraction or percent word as a whole word (letters and

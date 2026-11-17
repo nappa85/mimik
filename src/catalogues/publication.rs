@@ -7,7 +7,7 @@
 use super::{
     Catalogue, CatalogueCounts, CatalogueError,
     admission::{self, ADMISSION_PROFILE, Admitted},
-    invalid,
+    invalid, names,
     store::{Draft, admit, load_draft, references},
 };
 use crate::Store;
@@ -22,7 +22,7 @@ pub(super) const ROWID_SHIFT: u32 = 20;
 const _: () = assert!(super::decode::MAX_ENTRIES < 1 << ROWID_SHIFT);
 const TICKET_PREFIX: &[u8] = b"mimik-catalogue-comparison-v1\0";
 /// Latest sealed version of every catalogue (used by the index check and rebuild).
-const LATEST: &str = "SELECT v.catalogue AS catalogue, v.id AS version_id FROM catalogue_versions v JOIN catalogue_seals s ON s.version_id=v.id WHERE v.version=(SELECT max(v2.version) FROM catalogue_versions v2 JOIN catalogue_seals s2 ON s2.version_id=v2.id WHERE v2.catalogue=v.catalogue)";
+pub(super) const LATEST: &str = "SELECT v.catalogue AS catalogue, v.id AS version_id FROM catalogue_versions v JOIN catalogue_seals s ON s.version_id=v.id WHERE v.version=(SELECT max(v2.version) FROM catalogue_versions v2 JOIN catalogue_seals s2 ON s2.version_id=v2.id WHERE v2.catalogue=v.catalogue)";
 
 fn publication(code: &str) -> CatalogueError {
     invalid("/publication", code)
@@ -690,6 +690,10 @@ pub(super) fn publish_in(
         "INSERT INTO catalogue_seals(version_id) VALUES (?1)",
         [version_id],
     )?)?;
+    // The normalised-name rows follow the seal inside the same transaction (step 3a).
+    if names::replace_rows(db, surrogate, version_id)? != rows.entries.len() {
+        return Err(publication("unexpected-rows-affected"));
+    }
     Ok(PublishedCatalogue {
         published: true,
         version: summary_in(db, version_id, draft.data.counts)?,
@@ -989,6 +993,11 @@ fn verify_all(db: &mut Connection) -> Result<CatalogueVerification, CatalogueErr
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let (index, index_rows) = index_problems(&tx)?;
     problems.extend(index);
+    problems.extend(
+        names::problems(&tx)?
+            .into_iter()
+            .map(|code| problem(0, None, code)),
+    );
     tx.rollback()?;
     Ok(CatalogueVerification {
         catalogues: usize::try_from(catalogues).map_err(|_| CatalogueError::Configuration)?,
@@ -1006,6 +1015,7 @@ fn rebuild_in(db: &Connection) -> Result<CatalogueIndexRebuild, CatalogueError> 
         &format!("INSERT INTO catalogue_names_fts(rowid,name,catalogue_row_id,key) SELECT (l.catalogue<<{ROWID_SHIFT})+e.ordinal,e.name,l.catalogue,e.key FROM ({LATEST}) l JOIN catalogue_entries e ON e.version_id=l.version_id"),
         [],
     )?;
+    names::rebuild_in(db)?;
     let catalogues: i64 = db.query_row(&format!("SELECT count(*) FROM ({LATEST})"), [], |row| {
         row.get(0)
     })?;

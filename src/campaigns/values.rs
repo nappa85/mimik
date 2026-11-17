@@ -67,9 +67,13 @@ pub(crate) fn sheet_keys<'a>(
                 .items
                 .as_ref()
                 .map_or(&[][..], |items| &items.properties);
+            let key = key_property(field);
             for r in 0..rows.get(&f).map_or(0, BTreeSet::len) {
                 keys.insert(format!("id-{f}-{r}"));
                 for (p, property) in properties.iter().enumerate() {
+                    if key == Some(p) {
+                        continue;
+                    }
                     keys.insert(format!("row-{f}-{r}-{p}"));
                     if property.optional {
                         keys.insert(format!("set-{f}-{r}-{p}"));
@@ -324,6 +328,20 @@ pub(crate) fn properties(field: &Field) -> &[crate::definitions::ItemProperty] {
         .map_or(&[][..], |items| &items.properties)
 }
 
+/// The index of a list's catalogue key property (assisted sheet step 3a): the optional text
+/// property that holds the remembered entry key. It is rendered as the entry link, never as a
+/// control, so no form carries it, every save keeps its stored value and a new row leaves it
+/// absent. `None` for a list without a `catalogue` member (and for every other field).
+pub(crate) fn key_property(field: &Field) -> Option<usize> {
+    let properties = properties(field);
+    let key = properties
+        .iter()
+        .find_map(|property| property.catalogue.as_ref())?
+        .key
+        .as_str();
+    properties.iter().position(|property| property.id == key)
+}
+
 /// One list row as submitted or saved: raw strings, never validated here (plan D5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DraftRow {
@@ -421,9 +439,13 @@ impl ListDraft {
                 .any(|prefix| key.starts_with(prefix.as_str()))
         });
         let properties = properties(field);
+        let key = key_property(field);
         for (r, row) in self.rows.iter().enumerate() {
             form.insert(format!("id-{f}-{r}"), row.id.clone());
             for (p, property) in properties.iter().enumerate() {
+                if key == Some(p) {
+                    continue;
+                }
                 form.insert(
                     format!("row-{f}-{r}-{p}"),
                     row.values.get(p).cloned().unwrap_or_default(),
@@ -845,7 +867,16 @@ pub(crate) fn row_item(
 ) -> Result<Value, AppError> {
     let mut item = serde_json::Map::new();
     item.insert("id".into(), Value::String(id.into()));
+    let key = key_property(field);
     for (p, property) in properties(field).iter().enumerate() {
+        if key == Some(p) {
+            // Never a control: a saved row keeps the stored key, a new row leaves it absent;
+            // nothing is read from the form and no note is recorded.
+            if let Some(stored) = saved.and_then(|saved| saved.get(&property.id)) {
+                item.insert(property.id.clone(), stored.clone());
+            }
+            continue;
+        }
         let value = row_cell(
             (
                 super::notes::cell_address(&field.id, id, &property.id),

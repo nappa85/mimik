@@ -312,7 +312,7 @@ async fn writer_accepts_mixed_retained_new_rows_per_list_reuse_and_swaps() {
 
 /// Inserts a create row with arbitrary (pre-M4, non-host) item IDs, as the writer's own SQL
 /// does, bypassing only the host-ID invariant.
-async fn legacy_create(setup: &Setup, auth: usize, values: Value) {
+pub(super) async fn legacy_create(setup: &Setup, auth: usize, values: Value) {
     let mut snapshot = blank(setup, auth).await;
     snapshot.sheet_id = 1;
     snapshot.revision = 1;
@@ -509,7 +509,7 @@ async fn decoder_bound_snapshot_writes_reopens_and_freezes() {
     assert_eq!(frozen.data, created.data);
 }
 
-fn pair(key: impl Into<String>, value: impl Into<String>) -> (String, String) {
+pub(super) fn pair(key: impl Into<String>, value: impl Into<String>) -> (String, String) {
     (key.into(), value.into())
 }
 
@@ -2505,7 +2505,7 @@ pub(super) const FIXED_PAGE_BYTES: usize = 64 * 1024;
 pub(super) const UNIT_MARKUP_BYTES: usize = 2_048;
 
 /// Render units of a formula-free list definition with `rows[f]` rows per list (plan D7).
-fn render_units(definition: &Value, rows: &[usize]) -> usize {
+pub(super) fn render_units(definition: &Value, rows: &[usize]) -> usize {
     let choices = |item: &Value| match item["control"].as_str().unwrap() {
         "enum" => item["options"].as_array().unwrap().len() + 1,
         "boolean" => 3,
@@ -2855,7 +2855,7 @@ async fn noted_setup(definition: &Value, data: Value, notes: Vec<SeedNote>) -> (
     (setup, html)
 }
 
-fn within_unit_bound(html: &str, units: usize, label: &str) {
+pub(super) fn within_unit_bound(html: &str, units: usize, label: &str) {
     assert!(
         html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES,
         "{label}: {} bytes for {units} units",
@@ -2885,7 +2885,7 @@ fn stored(value: Option<i64>) -> Value {
 /// One list with a 64-character ID and 32 properties with 64-character IDs and labels of
 /// 100 `"`: all integers, or 31 integers and an enum (`with_enum`) whose options are a
 /// 64-character ID and `b`.
-fn wide_list_definition(with_enum: bool) -> Value {
+pub(super) fn wide_list_definition(with_enum: bool) -> Value {
     let label = "\"".repeat(100);
     let integers = if with_enum { 31 } else { 32 };
     let mut properties: Vec<Value> = (0..integers)

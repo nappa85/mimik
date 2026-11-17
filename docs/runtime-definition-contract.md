@@ -70,7 +70,7 @@ about the game's rules. No decimals, scripts, nested groups, nested lists or upl
 hooks exist.
 
 **Lists.** `items.properties` declares 1–32 properties, each `{id, label, control, optional,
-options?}` with a scalar control (no nested list). Each stored record also has a host-managed
+options?, catalogue?}` with a scalar control (no nested list). Each stored record also has a host-managed
 `id`. Item integers are i64 or `null`; no other property holds `null`. Row IDs, addressing and
 the list form are described in [formulas.md](formulas.md#lists-and-plain-list-editing).
 
@@ -83,7 +83,26 @@ refuses it, at `/fields/{i}/items/quick_add`, when `name` is not a text property
 (`quick-add-quantity-not-integer-property`), or the list has a required enum or boolean
 (`quick-add-required-choice-property`) or a required text or multiline property other than
 `name` (`quick-add-required-text-property`): a quick-add row can leave only integers unknown.
+`name` must not be the catalogue key property (below): `quick-add-name-is-catalogue-key`.
 The line itself is described in [assisted-entry.md](assisted-entry.md#quick-add).
+
+**Catalogue member.** A `text` item property may declare `catalogue: {id, entry_type?, key}`:
+`id` is one of the definition's `catalogues` links, `entry_type` an optional entry-type filter
+and `key` the ID of another property of the same list, an optional text property that holds the
+remembered entry key. The object is closed and last in the property, omitted when absent, so
+every definition without it keeps its canonical bytes and hash (the frozen vectors in
+`src/definitions/admission.rs`, `quick_add_tests.rs` and `catalogue_member_tests.rs`). Admission
+refuses it at `/fields/{i}/items/properties/{j}/catalogue` with one code each: a property that
+is not `text` (`catalogue-member-not-text`), an `id` that is not a link
+(`catalogue-member-unlinked`), a second member in the list (`catalogue-member-repeated`), a
+`key` that names no other property (`catalogue-key-unknown`) or one that is not optional text
+or carries a member itself (`catalogue-key-invalid`). The entry type is checked when a draft is
+saved and in the publication snapshot, against the linked catalogue's latest sealed version
+(`linked-catalogue-entry-type-unknown`); readiness stays existence-only, and a catalogue
+version cannot drop an entry type, so a published type stays valid. The key property is
+rendered as the entry link and is never a control: no form carries it (a posted value is 400),
+every save keeps its stored value and a new or quick-added row leaves it absent; formulas see
+it as an ordinary optional text property. Linking on view: [assisted-entry.md](assisted-entry.md#catalogue-links).
 
 **Formulas and constraints.** A field with `formula: {expr, rule_ids, evidence}` is derived:
 computed on saved-sheet views and history views (including the GET that follows a save) from

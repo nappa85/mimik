@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 32;
+pub const SCHEMA_VERSION: i64 = 33;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 32] = [
+const MIGRATIONS: [&str; 33] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -43,6 +43,7 @@ const MIGRATIONS: [&str; 32] = [
     include_str!("../migrations/030_owner_replacements.sql"),
     include_str!("../migrations/031_home_marks.sql"),
     include_str!("../migrations/032_assistant_reply_length.sql"),
+    include_str!("../migrations/033_catalogue_entry_names.sql"),
 ];
 
 #[derive(Clone)]
@@ -130,6 +131,13 @@ impl Store {
         }
         crate::sources::search::ensure(&tx)?;
         tx.commit()?;
+        // A failure must not stop the application: the marker stays unset, the next open
+        // starts again, and `rebuild-catalogue-index` repairs it by hand. Nothing names data.
+        if crate::catalogues::names::ensure(&mut connection).is_err() {
+            eprintln!(
+                "Mimik: the catalogue name rows could not be rebuilt at open; run rebuild-catalogue-index"
+            );
+        }
         Ok(Self(
             Arc::new(Mutex::new(connection)),
             Arc::new(std::sync::OnceLock::new()),

@@ -28,6 +28,8 @@ mod assistant_admin_tests;
 mod assistant_download_tests;
 #[path = "assistant_model_tests.rs"]
 mod assistant_model_tests;
+#[path = "catalogue_member_tests.rs"]
+mod catalogue_member_tests;
 #[path = "catalogue_tests.rs"]
 mod catalogue_tests;
 #[path = "cell_tests.rs"]

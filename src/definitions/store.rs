@@ -106,6 +106,49 @@ fn linked_catalogues(db: &Connection, data: &Admitted) -> Result<(), DefinitionE
     Ok(())
 }
 
+/// Assisted sheet step 3a: the entry type a `catalogue` member names is declared in the
+/// linked catalogue's latest sealed version. Checked at draft save and in the publication
+/// comparison and approval only (`save` and `publication::comparison` call it, not `references`
+/// and not the snapshot that readiness and the wiring status recompute), never by readiness: a catalogue version cannot drop
+/// an entry type (`dropped-entry-types`), so a published type stays valid. A missing sealed
+/// version is `linked_catalogues`' finding, reported first.
+pub(super) fn member_entry_types(db: &Connection, data: &Admitted) -> Result<(), DefinitionError> {
+    let definition = &data.definition;
+    for (f, field) in definition.fields.iter().enumerate() {
+        let properties = field.items.iter().flat_map(|items| &items.properties);
+        for (p, member) in properties
+            .enumerate()
+            .filter_map(|(p, property)| Some((p, property.catalogue.as_ref()?)))
+        {
+            let Some(entry_type) = &member.entry_type else {
+                continue;
+            };
+            let declared = match crate::catalogues::read::latest_sealed(
+                db,
+                &definition.game_id,
+                &definition.edition_id,
+                &member.id,
+            )? {
+                Some(linked) => db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM catalogue_entry_types WHERE version_id=?1 AND type_id=?2)",
+                        params![linked.version_id, entry_type],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(AppError::from)?,
+                None => false,
+            };
+            if !declared {
+                return Err(ValidationReport::one(
+                    &format!("/fields/{f}/items/properties/{p}/catalogue"),
+                    "linked-catalogue-entry-type-unknown",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether every linked catalogue still has a sealed version (the readiness site, D8).
 pub(super) fn linked_catalogues_available(
     db: &Connection,
@@ -125,6 +168,7 @@ fn save(
 ) -> Result<DefinitionDraft, DefinitionError> {
     let tx = db.transaction().map_err(AppError::from)?;
     references(&tx, data)?;
+    member_entry_types(&tx, data)?;
     let definition = &data.definition;
     let existing: Option<(i64,i64)> = tx.query_row("SELECT id,revision FROM definition_drafts WHERE game_id=?1 AND edition_id=?2 AND definition_id=?3", params![definition.game_id,definition.edition_id,definition.definition_id], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(AppError::from)?;
     let (id, revision) = match existing {

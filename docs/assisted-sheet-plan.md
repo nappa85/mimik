@@ -580,76 +580,9 @@ Merged (reference [model-downloads.md](model-downloads.md)). Remaining, in this 
 
 ### 3 Bundles and reminders
 
-Scope: §1.5. Three slices, each with its own branch, failing-first tests, implementation review
+Scope: §1.5. Slices 3b and 3c remain (3a, the catalogue member and linking on view, is built:
+`docs/assisted-entry.md`), each with its own branch, failing-first tests, implementation review
 and merge, in this order; the demo stays usable after each.
-
-#### 3a Catalogue member and linking on view (no model)
-
-- **Contract.** `schemas/definition-v1.json` gains the optional `catalogue` member on a `text`
-  item property: `{"id": <slug>, "entry_type": <slug>?, "key": <property id>}`, closed object.
-  At most one member per list. Admission domain checks, one diagnostic each, path
-  `/fields/{i}/items/properties/{j}/catalogue`: `id` is one of the definition's `catalogues`
-  links (`catalogue-member-unlinked`); a second member in the list (`catalogue-member-repeated`);
-  `key` names another property of the same list (`catalogue-key-unknown`) that is `text`,
-  `optional` and has no member (`catalogue-key-invalid`); `quick_add.name` naming the key
-  property (`/fields/{i}/items/quick_add quick-add-name-is-catalogue-key`). Canonical encoding
-  keeps the member's schema order and omits it when absent, so every existing hash is
-  unchanged (the frozen vectors stay; a new frozen vector covers a definition with the member).
-  The runtime definition contract and the profile copies under `tools/` follow.
-- **Entry type.** Checked at draft save and in the publication snapshot only: declared in the
-  linked catalogue's latest sealed version (`linked-catalogue-entry-type-unknown`). Readiness
-  stays existence-only (R27, D8); a catalogue version cannot drop a type
-  (`dropped-entry-types`), so a published type stays valid.
-- **Key property.** Rendered as the link, never a control: the full form, the cell route and
-  the new-row form never take it; a posted value is refused like an unknown key (400); every
-  save keeps the stored value, and a new or quick-added row leaves it absent. Formulas see it
-  as an ordinary optional text property. Writing and clearing it belong to step 4.
-- **Normalised names.** Shared primitives (an NFKC step, a full-fold step on `unicase`, a
-  mark-stripping step), on DEP-31's crates (no new dependency); `upload_exclusions::normalize`
-  and `lexer::fold` are recomposed from them with their current behaviour unchanged (their
-  tests stay as they are). The name rule composes: remove default-ignorable code points (Cf
-  included), NFKC, full fold, NFD and drop `Mn`, NFC, collapse whitespace, trim.
-  `NAME_FOLD_VERSION` is built from a rule number and `unicode_normalization::UNICODE_VERSION`;
-  a test ties it to `unicase`'s pinned version, so a crate update that changes the tables
-  changes the marker.
-- **Name index.** Migration 33 adds `catalogue_entry_names(version_id, entry_key, norm)`,
-  primary key `(version_id, entry_key)`, index `(version_id, norm)`, for the latest sealed
-  version of each catalogue only: a derived table like the FTS index, without the immutability
-  triggers; type and retirement are joined from `catalogue_entries`. A one-row marker table
-  holds `NAME_FOLD_VERSION`. The seal transaction replaces the catalogue's rows; at store open,
-  a marker that differs from the build's rebuilds the rows one catalogue per transaction (each
-  within the publication lock budget) and updates the marker after the last. `verify-catalogues` recomputes and compares the rows;
-  `rebuild-catalogue-index` rebuilds them too.
-- **Linking on view** (rules 1–2; rules 3–4 are step 4). For each saved row of a list with the
-  member and a non-blank name: (1) if the key property holds a key of an eligible entry of the
-  latest sealed version (type filter, not retired) whose norm equals the cell's, link it; (2)
-  otherwise link the single eligible entry with that norm; none or several: no link (no
-  warning yet, step 4). One query per list, within `QUERY_BUDGET`, only where the catalogue read
-  route would serve (a supported runtime pin linking the catalogue, a sealed version); a
-  failure or timeout shows no links and logs no names.
-- **Display.** The name cell gets a short link to the entry page (new tab), named "<name> in
-  <catalogue title>" through `aria-labelledby` where that keeps markup short; the same link in
-  the JSON unit answer (`sheet_json::unit_json`). The worst-case page fixtures in
-  `src/campaigns/list_tests.rs` get every row linked with 64-character catalogue IDs and entry
-  keys on every list; `form_budget` at publication must still bound the result; the budget is
-  never enlarged; if it no longer fits, stop and bring the trade-off to the user.
-- **Demo.** A synthetic catalogue `assist-gear` (owner text only: Shield with a numeric rule,
-  Rope, Healing draught with a number, two entries named Sword of different types for step 4),
-  published by `tools/assist_demo.py` and the smoke helper; the assist definition's Equipment
-  name gets the member with a key property `gear_key`.
-- **Tests.** Admission: each refusal code, the omitted member keeps the old hash, the new
-  frozen vector. Store: draft save and publication with an unknown entry type; readiness
-  unchanged. Normaliser: NFKC, folding (`Straße`/`STRASSE`), diacritics, whitespace, Cf and
-  other default-ignorables; the exclusions and lexer behaviour unchanged. Name index: seal
-  replaces rows, a marker change rebuilds, `verify-catalogues` reports a tampered or missing
-  row, rebuild repairs it. Linking: key resolves and names match → that entry, also among
-  duplicates; key resolves but name differs → rule 2; dangling key → rule 2; duplicates without
-  a key → no link; retired and wrong-type entries never linked; an unsupported or native pin
-  or an unlinked catalogue → no link. Routes: a posted key property → 400, every save keeps it.
-  Browser (the sheet smoke): the link at both viewports, no overflow.
-- **Limits recorded:** dropping `Mn` merges names in scripts whose marks carry meaning
-  (Devanagari, Hebrew, Arabic); the FTS tokenizer (`unicode61 remove_diacritics 2`) folds
-  differently, which step 4's suggestions must account for.
 
 #### 3b Bundles: multi-change proposals, apply and Undo
 

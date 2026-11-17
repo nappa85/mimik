@@ -10,9 +10,10 @@ const EXAMPLE: &[u8] = include_bytes!("../../schemas/definition-formula-example.
 /// The formula example (a list without `quick_add`) and `gear()`, captured from the pre-1.6
 /// implementation (master 77a4c1e). New members must not change them.
 const EXAMPLE_HASH: &str = "a8749172ce6d6b60728e0ada6850f37636b64bd21eacdc49e6d4f4830fdc29d5";
-const GEAR_HASH: &str = "b6650d7c99ee2b4e46c0b7eb472a5244085ab65f176477fd79e8a3d9cf8a4c2e";
+pub(super) const GEAR_HASH: &str =
+    "b6650d7c99ee2b4e46c0b7eb472a5244085ab65f176477fd79e8a3d9cf8a4c2e";
 
-fn code(result: Result<admission::Admitted, DefinitionError>) -> String {
+pub(super) fn code(result: Result<admission::Admitted, DefinitionError>) -> String {
     match result {
         Err(DefinitionError::Invalid(report)) => {
             format!(
@@ -25,17 +26,17 @@ fn code(result: Result<admission::Admitted, DefinitionError>) -> String {
     }
 }
 
-fn admit(value: &Value) -> Result<admission::Admitted, DefinitionError> {
+pub(super) fn admit(value: &Value) -> Result<admission::Admitted, DefinitionError> {
     admission::validate(&serde_json::to_vec(value).unwrap())
 }
 
-fn property(id: &str, control: &str, optional: bool) -> Value {
+pub(super) fn property(id: &str, control: &str, optional: bool) -> Value {
     json!({"id": id, "label": id.to_uppercase(), "control": control, "optional": optional})
 }
 
 /// A list (field 1) of a required text `name`, a required integer `count`, a required integer
 /// `weight` and optional enum, yes/no, text and multiline properties.
-fn gear() -> Value {
+pub(super) fn gear() -> Value {
     let unresolved = json!({"state": "unresolved", "reason": "r"});
     let mut kind = property("kind", "enum", true);
     kind["options"] = json!([{"id": "tool", "label": "Tool"}]);
