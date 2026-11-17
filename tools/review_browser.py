@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlsplit
 
 from assist_demo import OWNER, create_accounts, demo_passwords, fresh_directory
 from browser_smoke import CSP_PROBE, csp_clean, no_overflow
-from smoke_release import registry_cli, require, start, stop
+from smoke_release import registry_cli, require, start, stop, wait_until
 
 REGION_CROP = re.compile(r"/admin/materials/pages/\d+/units/\d+/image")
 ORIGIN = "http://127.0.0.1:3000"
@@ -183,7 +183,8 @@ class Checks:
 
     def crops_ready(self, page):
         if self.javascript:
-            page.wait_for_function(
+            wait_until(
+                page,
                 """({exhausted, contended}) => [...document.querySelectorAll('.source-region img')]
                 .filter(i => i.currentSrc).every(i => {
                   const status = i.closest('figure').querySelector('.region-status')?.textContent.trim();
@@ -329,7 +330,8 @@ def crop_retries(checks, page, path, units):
     checks.goto(page, path)
     for unit in (units[1], units[2]):
         page.locator(f"#unit-{unit} .source-region img").scroll_into_view_if_needed()
-    page.wait_for_function(
+    wait_until(
+        page,
         """({once, always}) => {
           const status = unit => document.querySelector(`#unit-${unit} .region-status`)?.textContent.trim();
           return status(once) === 'Region preview loaded.' && status(always) ===
@@ -377,9 +379,10 @@ def overlay(checks, page, path, manifest, units, suggestions):
     if checks.javascript:
         # Busy crops are retried by source-regions.js; the first preview must arrive.
         page.locator(".source-region img").first.scroll_into_view_if_needed()
-        page.wait_for_function(
+        wait_until(
+            page,
             "() => { const i = document.querySelector('.source-region img');"
-            " return i.complete && i.naturalWidth > 0; }"
+            " return i.complete && i.naturalWidth > 0; }",
         )
     modes = ("fit", "one", "two") if checks.javascript else ("fit",)
     polygons = {
@@ -391,7 +394,8 @@ def overlay(checks, page, path, manifest, units, suggestions):
     for mode in modes:
         if checks.javascript:
             page.locator(f'[data-zoom="{mode}"]').click()
-            page.wait_for_function(
+            wait_until(
+                page,
                 "mode => document.querySelector(`[data-zoom=${mode}]`).getAttribute('aria-pressed') === 'true'",
                 arg=mode,
             )
@@ -1014,7 +1018,8 @@ def scenario(
         for index in (1, 2, 3, 4, 5):
             image = page.locator(f"#unit-{units[index]} .source-region img")
             image.scroll_into_view_if_needed()
-            page.wait_for_function(
+            wait_until(
+                page,
                 "unit => { const f = document.querySelector(`#unit-${unit}`);"
                 " const i = f.querySelector('.source-region img');"
                 " return i.complete && i.naturalWidth > 0 &&"

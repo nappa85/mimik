@@ -359,9 +359,7 @@ class WorkflowTests(unittest.TestCase):
                 with (
                     patch.object(live, "threads_allowed", return_value=True),
                     patch.object(live, "start", return_value=(Mock(), Mock())) as start,
-                    patch.object(
-                        live, "auth_request", return_value=(303, {"location": "/"}, "")
-                    ),
+                    patch.object(live, "auth_request", return_value=(303, {"location": "/"}, "")),
                     patch.object(live, "auth_cookie", return_value="cookie"),
                     patch.object(live, "auth_fields", return_value={}),
                 ):
@@ -391,9 +389,7 @@ class WorkflowTests(unittest.TestCase):
         with (
             patch.object(live, "trial_allowed", return_value=True),
             patch.object(live, "start", return_value=(Mock(), Mock())) as start,
-            patch.object(
-                live, "auth_request", return_value=(303, {"location": "/"}, "")
-            ),
+            patch.object(live, "auth_request", return_value=(303, {"location": "/"}, "")),
             patch.object(live, "auth_cookie", return_value="cookie"),
             patch.object(live, "auth_fields", return_value={}),
         ):

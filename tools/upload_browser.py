@@ -14,7 +14,7 @@ from pathlib import Path
 from assist_demo import OWNER, create_accounts, demo_passwords, fresh_directory
 from browser_smoke import CSP_PROBE, csp_clean, no_overflow
 from review_browser import ORIGIN, STRICT_CSP, rows
-from smoke_release import registry_cli, require, start, stop
+from smoke_release import registry_cli, require, start, stop, wait_until
 
 PDF = (Path(__file__).resolve().parent / "fixtures/upload-three-pages.pdf.txt").read_bytes()
 EXTRA = ("--upload-dev-worker-ms", "2000")
@@ -157,9 +157,10 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         page.locator(".upload-image").nth(2).wait_for(timeout=10000)
         for index in range(3):
             page.locator(".upload-image").nth(index).scroll_into_view_if_needed()
-        page.wait_for_function(
+        wait_until(
+            page,
             "Array.from(document.querySelectorAll('.upload-image')).every("
-            "image => image.complete && image.naturalWidth > 0)"
+            "image => image.complete && image.naturalWidth > 0)",
         )
         clean()
         if javascript:
@@ -188,10 +189,11 @@ def scenario(browser, binary, directory, viewport, javascript, password):
             for route in delayed:
                 route.continue_()
             page.unroute("**/pages/1/image", delay_image)
-            page.wait_for_function(
+            wait_until(
+                page,
                 "() => { const image = document.querySelector('.upload-image');"
                 "return image.naturalWidth > 0 && "
-                "parseFloat(image.style.width) === image.naturalWidth * 2; }"
+                "parseFloat(image.style.width) === image.naturalWidth * 2; }",
             )
             page.locator('[data-upload-zoom="2"]').first.click()
             clean()

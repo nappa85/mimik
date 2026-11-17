@@ -39,9 +39,7 @@ def require(condition, message):
 
 
 def state_of(page):
-    return (
-        page.locator("section.panel").first.locator("strong").first.inner_text().strip()
-    )
+    return page.locator("section.panel").first.locator("strong").first.inner_text().strip()
 
 
 def mark(page):
@@ -66,21 +64,15 @@ def clean(page, label):
 
 def watch_start(page, label):
     """The step advances in one document, then the page reaches Ready by itself."""
-    require(
-        state_of(page) == "Starting", f"{label}: the page did not open while starting"
-    )
+    require(state_of(page) == "Starting", f"{label}: the page did not open while starting")
     text = page.locator("#progress-text")
-    require(
-        text.get_attribute("aria-live") == "polite", "Step text is not aria-live polite"
-    )
+    require(text.get_attribute("aria-live") == "polite", "Step text is not aria-live polite")
     bar = page.locator("#progress-bar")
     require(
         bar.get_attribute("aria-labelledby") == "progress-text",
         "Bar is not named by step",
     )
-    require(
-        page.locator("#live-stop").is_visible(), "Stop updating button is not shown"
-    )
+    require(page.locator("#live-stop").is_visible(), "Stop updating button is not shown")
     mark(page)
     steps, times = [text.inner_text()], {page.locator("#progress-time").inner_text()}
     deadline = time.monotonic() + START_LIMIT_S
@@ -99,9 +91,7 @@ def watch_start(page, label):
     while state_of(page) != "Ready":
         require(time.monotonic() < deadline, f"{label}: never reached Ready by itself")
         page.wait_for_timeout(1000)
-    require(
-        page.locator("#live-progress").count() == 0, "Progress block shown while ready"
-    )
+    require(page.locator("#live-progress").count() == 0, "Progress block shown while ready")
     print(f"{label}: {len(steps)} steps seen in place: {' / '.join(steps)}", flush=True)
     return steps
 
@@ -145,18 +135,12 @@ def browser(cookie_file):
         require("starting" in state_of(page).lower(), "Restart did not show Starting")
         # The stop may already be over when the redirect lands; the 8-step list is the one
         # with the stop step.
-        require(
-            " of 8, " in first, f"Restart did not walk the list with the stop: {first}"
-        )
+        require(" of 8, " in first, f"Restart did not walk the list with the stop: {first}")
         print(f"after Restart: {first}", flush=True)
         nojs, plain = context({"width": 390, "height": 844}, javascript=False)
         plain.goto(PAGE)
-        require(
-            plain.locator("#progress-text").count() == 1, "No-JS page lacks the step"
-        )
-        require(
-            plain.locator("#live-stop").is_hidden(), "No-JS page shows Stop updating"
-        )
+        require(plain.locator("#progress-text").count() == 1, "No-JS page lacks the step")
+        require(plain.locator("#live-stop").is_hidden(), "No-JS page shows Stop updating")
         require(
             "reload it" in plain.locator("#live-progress").inner_text(),
             "No-JS reload text",
@@ -175,9 +159,7 @@ def browser(cookie_file):
             require(same_document(page), "The page reloaded over a typed field")
             require(time.monotonic() < deadline, "No state change reached the page")
             page.wait_for_timeout(1000)
-        require(
-            field.input_value() == "local:typed-by-the-check.gguf", "Typed field lost"
-        )
+        require(field.input_value() == "local:typed-by-the-check.gguf", "Typed field lost")
         page.locator("#live-stop").click()
         require(
             note.inner_text() == "Updating stopped: reload to resume",
@@ -190,9 +172,7 @@ def browser(cookie_file):
         small.goto(PAGE)
         clean(small, "390 starting")
         while state_of(small) != "Ready":
-            require(
-                time.monotonic() < deadline, "390 page never reached Ready by itself"
-            )
+            require(time.monotonic() < deadline, "390 page never reached Ready by itself")
             small.wait_for_timeout(1000)
         clean(small, "390 ready")
         narrow.close()

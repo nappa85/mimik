@@ -55,7 +55,11 @@ def _ltr(page, selector, label):
 
 def _no_script_or_image(page, label):
     require(
-        page.locator("script").count() == 0 and page.locator("img").count() == 0,
+        page.locator("main script").count() == 0
+        and page.locator("main img").count() == 0
+        # The shared layout adds the logo and, on non-strict pages, nav.js; nothing else.
+        and page.locator("img:not(header.site a.logo img)").count() == 0
+        and page.locator("script:not([src='/assets/nav.js'])").count() == 0,
         f"Catalogue {label} loads a script or shows an image",
     )
 

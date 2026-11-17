@@ -47,6 +47,26 @@ def revision(html):
     return int(match[1])
 
 
+def wait_until(page, expression, arg=None, timeout=15_000):
+    """`page.wait_for_function` without eval: Playwright's in-page polling builds the predicate
+    with `new Function`, which a page's CSP without 'unsafe-eval' refuses. Each attempt is one
+    DevTools evaluation, which the CSP does not govern. `timeout` is in milliseconds (15 s, the
+    smoke contexts' default). The predicate must return a boolean (Python truthiness differs
+    from JavaScript's for `[]` and `{}`). A navigation that destroys the context mid-attempt is
+    retried, as `wait_for_function` survives navigations."""
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        try:
+            if page.evaluate(expression, arg):
+                return
+        except Exception as error:  # noqa: BLE001 (only a navigation in progress is retried)
+            if "Execution context was destroyed" not in str(error):
+                raise
+        if time.monotonic() > deadline:
+            raise AssertionError("Timed out waiting for the page")
+        page.wait_for_timeout(100)
+
+
 def require(condition, message):
     if not condition:
         raise AssertionError(message)

@@ -25,6 +25,7 @@ from smoke_release import (
     smoke_environment,
     start,
     stop,
+    wait_until,
 )
 
 
@@ -91,8 +92,9 @@ def run_scenario(browser, viewport):
     )
     try:
         page.goto("http://127.0.0.1:3000")
-        page.wait_for_function(
-            "document.querySelector('.brand img').complete && document.querySelector('.brand img').naturalWidth > 0"
+        wait_until(
+            page,
+            "document.querySelector('.brand img').complete && document.querySelector('.brand img').naturalWidth > 0",
         )
         expect(page.get_by_role("link", name="Mimik home", exact=True)).to_be_visible()
         require(page.locator(".brand").inner_text() == "", "Redundant header title remains")
@@ -319,8 +321,9 @@ def run_scenario(browser, viewport):
         page.locator("section.panel").filter(
             has=page.get_by_role("heading", name="Synthetic source", exact=True)
         ).get_by_role("link", name="PDF page 1", exact=False).click()
-        page.wait_for_function(
-            "document.querySelector('.source-original img').complete && document.querySelector('.source-original img').naturalWidth > 0"
+        wait_until(
+            page,
+            "document.querySelector('.source-original img').complete && document.querySelector('.source-original img').naturalWidth > 0",
         )
         preview_url = page.locator(".source-region img").first.get_attribute("src")
         attempts = {}
@@ -338,8 +341,9 @@ def run_scenario(browser, viewport):
             "(figure,url)=>{for(let i=0;i<3;i++){const clone=figure.cloneNode(true);clone.classList.add('retry-probe');const img=clone.querySelector('img');img.loading='eager';img.src=url+'?probe='+i;figure.parentNode.insertBefore(clone,figure)}}",
             preview_url,
         )
-        page.wait_for_function(
-            "[...document.querySelectorAll('.retry-probe img')].length===3 && [...document.querySelectorAll('.retry-probe img')].every(img=>img.complete && img.naturalWidth===9)"
+        wait_until(
+            page,
+            "[...document.querySelectorAll('.retry-probe img')].length===3 && [...document.querySelectorAll('.retry-probe img')].every(img=>img.complete && img.naturalWidth===9)",
         )
         require(
             len(attempts) == 3 and all(value >= 2 for value in attempts.values()),
@@ -371,8 +375,9 @@ def run_scenario(browser, viewport):
             "figures=>figures.forEach(figure=>figure.remove())"
         )
         page.locator(".source-region img").first.scroll_into_view_if_needed()
-        page.wait_for_function(
-            "document.querySelector('.source-region img').complete && document.querySelector('.source-region img').naturalWidth === 9 && document.querySelector('.source-region img').naturalHeight === 3"
+        wait_until(
+            page,
+            "document.querySelector('.source-region img').complete && document.querySelector('.source-region img').naturalWidth === 9 && document.querySelector('.source-region img').naturalHeight === 3",
         )
         with page.expect_download() as download_info:
             page.get_by_role("link", name="Download region PNG", exact=True).first.click()
@@ -583,7 +588,8 @@ def run_list_browser(page, campaign, version, submit):
     def active():
         # Autofocus runs at the next rendering opportunity, after DOMContentLoaded.
         try:
-            page.wait_for_function(
+            wait_until(
+                page,
                 "document.activeElement && document.activeElement !== document.body",
                 timeout=3_000,
             )
@@ -1040,7 +1046,8 @@ def run_assist_browser(page, campaign, version):
     def focused():
         # Autofocus runs at the next rendering opportunity, after DOMContentLoaded.
         try:
-            page.wait_for_function(
+            wait_until(
+                page,
                 "document.activeElement && document.activeElement !== document.body",
                 timeout=3_000,
             )
@@ -2024,9 +2031,7 @@ def run_account_admin_browser(browser, owner_page, viewport, directory):
     )
     owner_page.context.grant_permissions(["clipboard-read", "clipboard-write"])
     owner_page.get_by_role("button", name="Copy link", exact=True).click()
-    owner_page.wait_for_function(
-        'document.getElementById("copy-status").textContent === "Link copied."'
-    )
+    wait_until(owner_page, 'document.getElementById("copy-status").textContent === "Link copied."')
     link = owner_page.evaluate("navigator.clipboard.readText()")
     token = urlsplit(link).fragment.removeprefix("token=")
     require(
@@ -2062,8 +2067,8 @@ def run_account_admin_browser(browser, owner_page, viewport, directory):
         row = owner_page.locator("article").filter(has_text="browser-enrolled")
         row.get_by_role("button", name="Issue password reset", exact=True).click()
         owner_page.get_by_role("button", name="Copy link", exact=True).click()
-        owner_page.wait_for_function(
-            'document.getElementById("copy-status").textContent === "Link copied."'
+        wait_until(
+            owner_page, 'document.getElementById("copy-status").textContent === "Link copied."'
         )
         reset_link = owner_page.evaluate("navigator.clipboard.readText()")
         reset = urlsplit(reset_link).fragment.removeprefix("token=")
@@ -2169,8 +2174,12 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
     process, log = start(binary, directory, auth=True)
     context = browser.new_context(viewport=viewport)
     context.set_default_timeout(15_000)
+    # CSP and Trusted Types violations on every page of the scenario (checked after each stage).
+    context.add_init_script(CSP_PROBE)
     page = context.new_page()
     violations = []
+    consoles = []
+    page.on("console", lambda message: consoles.append(message.text))
 
     def inspect(request):
         url = urlsplit(request.url)
@@ -2238,7 +2247,9 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
         )
         page.wait_for_url("**/")
         # The shared header names the signed-in account by its display name.
-        display = {"smoke-owner": "Synthetic Owner", "auth-player": "SyntheticLongDisplay" * 5}[name]
+        display = {"smoke-owner": "Synthetic Owner", "auth-player": "SyntheticLongDisplay" * 5}[
+            name
+        ]
         require(
             display in page.locator("header.site details.account summary").inner_text(),
             "Browser current principal differs",
@@ -2254,8 +2265,18 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
         no_overflow(page, "auth session long display")
         if name == "smoke-owner":
             require(
-                page.get_by_role("link", name="Open administration", exact=True).count() == 1
-                and page.get_by_role("link", name="Open campaign workspace", exact=True).count()
+                page.locator("main .home-links")
+                .get_by_role("link", name="Accounts", exact=True)
+                .count()
+                == 1
+                and page.locator("header.site nav.menu > details > summary")
+                .get_by_text("Play", exact=True)
+                .count()
+                == 0
+                and page.locator(
+                    'header.site a[href="/campaigns"], main a[href="/campaigns"], '
+                    'header.site a[href="/private-sheets"], main a[href="/private-sheets"]'
+                ).count()
                 == 0,
                 "Production Owner landing exposed gameplay",
             )
@@ -2294,8 +2315,11 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
         anonymous = cookies()
         owner = login("smoke-owner", passwords[0])
         run_material_browser(page, "http://127.0.0.1:3000")
+        csp_clean(page, consoles, [])
         run_admin_ruleset_browser(page, "http://127.0.0.1:3000")
+        csp_clean(page, consoles, [])
         run_account_admin_browser(browser, page, viewport, directory)
+        csp_clean(page, consoles, [])
         stop(process, log)
         process, log = start(binary, directory, auth=True)
         require("disabled" in page.reload().text(), "Browser account state lost on restart")
@@ -2334,8 +2358,12 @@ def run_auth_scenario(browser, viewport, binary, directory, fixture):
         stop(process, log)
         process, log = start(binary, directory, auth=True)
         response = page.reload()
+        # /auth/session lands on the home page; the header names the account by display name.
+        account = page.locator("header.site details.account summary")
         require(
-            response.status == 200 and "auth-player" in page.locator("main").inner_text(),
+            response.status == 200
+            and account.count() == 1
+            and "SyntheticLongDisplay" in account.inner_text(),
             "Browser session lost across restart",
         )
         require(cookies() == current, "Restart/status read changed cookie")
