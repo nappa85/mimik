@@ -604,19 +604,21 @@ and merge, in this order; the demo stays usable after each.
   the new-row form never take it; a posted value is refused like an unknown key (400); every
   save keeps the stored value, and a new or quick-added row leaves it absent. Formulas see it
   as an ordinary optional text property. Writing and clearing it belong to step 4.
-- **Normalised names.** One shared normaliser (new `text_fold` module or similar), used by
-  linking and by `upload_exclusions::normalize`'s non-digit part, on DEP-31's crates
-  (`unicode-normalization`, `unicase`; no new dependency): remove default-ignorable code points
-  (Cf included), NFKC, full case fold (`unicase`), NFD and drop `Mn` (the step `lexer::fold`
-  does, which then uses the shared function), recompose NFC, collapse whitespace, trim. A
-  constant `NAME_FOLD_VERSION` names the rule and the crates' Unicode version.
+- **Normalised names.** Shared primitives (an NFKC step, a full-fold step on `unicase`, a
+  mark-stripping step), on DEP-31's crates (no new dependency); `upload_exclusions::normalize`
+  and `lexer::fold` are recomposed from them with their current behaviour unchanged (their
+  tests stay as they are). The name rule composes: remove default-ignorable code points (Cf
+  included), NFKC, full fold, NFD and drop `Mn`, NFC, collapse whitespace, trim.
+  `NAME_FOLD_VERSION` is built from a rule number and `unicode_normalization::UNICODE_VERSION`;
+  a test ties it to `unicase`'s pinned version, so a crate update that changes the tables
+  changes the marker.
 - **Name index.** Migration 33 adds `catalogue_entry_names(version_id, entry_key, norm)`,
   primary key `(version_id, entry_key)`, index `(version_id, norm)`, for the latest sealed
-  version of each catalogue only (as the FTS index), with insert-only triggers like the
-  catalogue tables; type and retirement are joined from `catalogue_entries`. A one-row marker
-  table holds `NAME_FOLD_VERSION`. The seal transaction replaces the catalogue's rows; at store
-  open, a marker that differs from the build's rebuilds every catalogue's rows in one
-  transaction and updates it. `verify-catalogues` recomputes and compares the rows;
+  version of each catalogue only: a derived table like the FTS index, without the immutability
+  triggers; type and retirement are joined from `catalogue_entries`. A one-row marker table
+  holds `NAME_FOLD_VERSION`. The seal transaction replaces the catalogue's rows; at store open,
+  a marker that differs from the build's rebuilds the rows one catalogue per transaction (each
+  within the publication lock budget) and updates the marker after the last. `verify-catalogues` recomputes and compares the rows;
   `rebuild-catalogue-index` rebuilds them too.
 - **Linking on view** (rules 1–2; rules 3–4 are step 4). For each saved row of a list with the
   member and a non-blank name: (1) if the key property holds a key of an eligible entry of the
@@ -664,12 +666,15 @@ and merge, in this order; the demo stays usable after each.
   current `unresolved` note on the target (as today); reminder, the decrease note still current
   on its field and that field still holding its `after`. Both bound inside the `IMMEDIATE`
   transaction (`bound_notes_hold`). Confirmed notes: `raw` = the phrase for an interpretation;
-  for a reminder, the hint cut to 200 characters.
+  for a reminder, the decrease note's phrase (the hint, model text, is never stored). Migration
+  33 adds op `reminded` (the op CHECK and `Op`) for a reminder's applied changes, displayed and
+  undone like `confirmed`, so a reminder's write is told apart from an interpretation's.
 - **Apply.** One revision; one `confirmed` note per change, all with one new bundle number; a
   row that disappeared or a target outside the pin is 409. The JSON answer carries every
-  changed unit (`units`, in change order; the module redraws each like a save answer; the
-  old single `unit` member stays for one-change answers until the module moves over in this
-  slice).
+  changed unit (`units`, in change order; the module redraws each like a save answer); the
+  single `unit` member of apply answers is replaced within this slice. A refused apply or bundle
+  Undo answers 409 with the fixed message and, for a bundle Undo, the labels of the members
+  that changed.
 - **Bundle Undo.** `Stored` gains `bundle`; migration 33 also adds the index
   `(sheet_id, bundle)` (bounded member lookup and `max(bundle)` without a scan). Undo on a
   member whose current note belongs to a bundle with more than one note reverts every member,
@@ -694,24 +699,27 @@ and merge, in this order; the demo stays usable after each.
 - **Path (v1).** Reminders run on the GPU path only. On the CPU path B is at most 1,024 bytes
   ("related fields only"), so entry text can never fit, and each reminder re-evaluates its
   addendum within an R calibrated for interpretations. A later step may enable the CPU path
-  after a measurement. On the CPU path the save answer carries no reminder key and the route
-  answers 404.
-- **Shared prefix.** A reminder request sends the interpretation system message byte for byte
-  (the pinned prefix, so llama-server's common-prefix reuse keeps the cache for both kinds;
-  `--parallel 1 --cache-ram 0`); the reminder instructions and the data go in the user message;
-  `response_format` carries the reminder schema. No second priming. The live slice measures
-  the time to first token of an interpretation right after a reminder against R; if the
-  cache is not kept, reminders stay off and the result goes to the user.
+  after a measurement. `RuntimeEvent::Ready` gains the path (GPU or CPU); off the GPU path the
+  save answer carries no reminder key and the route answers 404, and a GPU → CPU fallback, a
+  generation change, ends queued and running reminders silently.
+- **Own prefix.** A reminder sends its own pinned system message (fixed prefix, reminder
+  instructions, the reminder schema's text; SHA-256 pinned like the interpretation one), the
+  data in the user message as `<data>…</data>`, and `response_format` with the reminder schema.
+  It is not primed. With one slot, the next interpretation re-evaluates its prefix (about
+  1.3 s on the GPU path, §1.4a); interpretation admission adds that re-evaluation to its wait
+  estimate after a reminder ran. The live slice measures an interpretation's time to first
+  token right after a reminder against R and the busy slack; if it does not fit, reminders
+  stay off and the result goes to the user.
 - **Trigger (D-W).** A save that commits, on a top-level integer field, a note of op `literal`,
-  `sum`, `sign_literal`, `switched` or an interpretation's `confirmed`, with known `before` >
-  known `after` (never `reverted` or a reminder's `confirmed`, so Undo and applied reminders do
-  not chain). The JSON save answer carries `unit.reminder.key` on that unit; a full-form save
-  with several decreases names the first in definition order.
+  `sum`, `sign_literal`, `switched` or `confirmed`, with known `before` > known `after` (never
+  `reverted` or `reminded`, so Undo and applied reminders do not chain). The JSON answer
+  carries `reminder.key` on the unit whose note qualifies (per-unit routes only; the no-JS
+  full form never triggers one); in a `units` answer, on the qualifying unit.
 - **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; the interpretation
   start's order of checks; 202 `{job, poll}`), polled through the existing job route. The route
   re-derives every trigger condition from the stored note (current, top-level integer field,
-  allowed op and origin, known `before` > `after`) and requires the assistant on the GPU path;
-  otherwise 409 (404 off the GPU path).
+  an allowed op, known `before` > `after`); otherwise 409. Without the assistant or off the GPU
+  path it answers 404.
 - **Scheduling.** Reminders are outside the one-live-job rule, repeat detection, D, Q and the
   64 live interpretation records: their own records (at most 8 live, one per account, a newer
   one superseding the account's older one; 429 beyond, and the module stays quiet), queue wait
@@ -721,7 +729,8 @@ and merge, in this order; the demo stays usable after each.
   half-open probe (refused while half-open), reminder expiries and cancellations never feed the
   hung detector, and reminder transport failures count for the breaker like interpretations'.
   Generation changes and the note hook (the decrease note superseded) end reminders silently.
-  Reminder options live 10 minutes in their own records.
+  Reminder options live 10 minutes in their own records, at most 32 records in all (a start
+  evicts the oldest finished one, never a live one).
 - **Context.** `{"decrease": {id, label, before, after, phrase}, "fields": [{id, label, type,
   value}], "rows": [{id: "r<n>", list, name, entry?}]}`: the other integer and enum top-level
   fields with values; the decreased field is a change target under its own ID; for the list
@@ -756,7 +765,8 @@ and merge, in this order; the demo stays usable after each.
   a live run on the GPU path (evening or weekend) with the cache measurement above.
 - **Tests.** Trigger only on the allowed decreases (not an increase, a row cell, an unknown, an
   Undo, an applied reminder); forged keys to the route (increase, enum, row cell, `reverted`)
-  → 409; off the GPU path and with the assistant off → 404; scheduling: no account slot taken,
+  → 409; off the GPU path and with the assistant off → 404; an applied reminder (`reminded`)
+  never triggers one; scheduling: no account slot taken,
   an interpretation admitted during a reminder cancels it and fits its estimate, no probe, no
   hung-detector signal; duplicate names without a key → no entry text; text, multiline and
   booleans never in the prompt (asserted on the stub request); the request's system message
