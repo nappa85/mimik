@@ -64,7 +64,8 @@ steps add:
 - **2d-2 (built):** the binary contains TLS for downloads (`reqwest`, DEP-27), so the model
   client's plain-HTTP property rests on its URL guard, not on the dependency tree.
 - **3:** reminder jobs have their own context and records (§1.5, step 3c) and a low-priority
-  slot on the same worker, after interpretations, one per account, on the GPU path; the
+  slot on the same worker, after interpretations, one per account, behind the owner's setting
+  (ASSIST-60); the
   catalogue provenance extension (§1.5); bundles in the proposal freshness binding and in apply
   (step 3b). Interpretations keep prompt format D without catalogue text (step 3, deviation).
 - **Not built:** token log-probabilities, if the runtime returns them, are not recorded on the
@@ -629,20 +630,28 @@ and merge, in this order; the demo stays usable after each.
 
 #### 3c Reminders
 
-- **Path (v1).** Reminders run on the GPU path only. On the CPU path B is at most 1,024 bytes
-  ("related fields only"), so entry text can never fit, and each reminder re-evaluates its
-  addendum within an R calibrated for interpretations. A later step may enable the CPU path
-  after a measurement. `RuntimeEvent::Ready` gains the path (GPU or CPU); off the GPU path the
-  save answer carries no reminder key and the route answers 404, and a GPU → CPU fallback, a
-  generation change, ends queued and running reminders silently.
+- **Setting (ASSIST-60).** "Reminders" on `/admin/assistant`, on or off, stored like the reply
+  length (migration 34; one row, not per model file); unset means on for the GPU path and off
+  for the CPU path. Beside it, from the current generation's calibration: the path, threads and
+  model; the estimated reminder time (the reminder prefix's evaluation, scaled from the
+  measured priming rate by its token count, plus its reply bound at the measured per-token
+  speed); the extra wait of a scribble reading right after one (the interpretation prefix's
+  re-evaluation, from priming); on the CPU path, "item names only: catalogue text does not fit".
+  `RuntimeEvent::Ready` gains the path; while reminders are off, or the assistant is not ready,
+  the save answer carries no reminder key and the route answers 404. A generation change (also
+  a GPU → CPU fallback) ends queued and running reminders silently.
+- **Reminder budget.** Its own reply bound (`max_tokens` 384: a 120-character hint and four
+  changes) and its own run deadline from the same measurements (prefix evaluation plus reply
+  bound, the per-path slowdown, within the 600 s ceiling); expiries never feed the hung
+  detector. On the CPU path B leaves no room for entry text, so the context there has names
+  only and the provenance extension never applies.
 - **Own prefix.** A reminder sends its own pinned system message (fixed prefix, reminder
   instructions, the reminder schema's text; SHA-256 pinned like the interpretation one), the
   data in the user message as `<data>…</data>`, and `response_format` with the reminder schema.
   It is not primed. With one slot, the next interpretation re-evaluates its prefix (about
-  1.3 s on the GPU path, §1.4a); interpretation admission adds that re-evaluation to its wait
-  estimate after a reminder ran. The live slice measures an interpretation's time to first
-  token right after a reminder against R and the busy slack; if it does not fit, reminders
-  stay off and the result goes to the user.
+  1.3 s on the GPU path, about 117 s on the CPU path, §1.4a); interpretation admission adds
+  that re-evaluation to its wait estimate after a reminder ran, and the page states it. The
+  live slice measures both on each path against the estimates shown.
 - **Trigger (D-W).** A save that commits, on a top-level integer field, a note of op `literal`,
   `sum`, `sign_literal`, `switched` or `confirmed`, with known `before` > known `after` (never
   `reverted` or `reminded`, so Undo and applied reminders do not chain). The JSON answer
@@ -651,8 +660,8 @@ and merge, in this order; the demo stays usable after each.
 - **Route.** `POST /private-sheets/{id}/reminders` (exactly `csrf`, `note`; the interpretation
   start's order of checks; 202 `{job, poll}`), polled through the existing job route. The route
   re-derives every trigger condition from the stored note (current, top-level integer field,
-  an allowed op, known `before` > `after`); otherwise 409. Without the assistant or off the GPU
-  path it answers 404.
+  an allowed op, known `before` > `after`); otherwise 409. Without the assistant or with reminders
+  off it answers 404.
 - **Scheduling.** Reminders are outside the one-live-job rule, repeat detection, D, Q and the
   64 live interpretation records: their own records (at most 8 live, one per account, a newer
   one superseding the account's older one; 429 beyond, and the module stays quiet), queue wait
@@ -695,10 +704,13 @@ and merge, in this order; the demo stays usable after each.
   nothing is stored; a reload shows nothing. Use posts the apply route and redraws every unit.
 - **Eval.** The reminder relevance class in `tools/assist_eval.py` with unit tests (8 synthetic
   cases: a smoke check only, too few for a quality conclusion, stated in `docs/results.md`);
-  a live run on the GPU path (evening or weekend) with the cache measurement above.
+  a live run on the CPU path (2 threads) and the GPU path (evening or weekend) comparing the
+  measured reminder time and the extra wait with the estimates the page shows.
 - **Tests.** Trigger only on the allowed decreases (not an increase, a row cell, an unknown, an
   Undo, an applied reminder); forged keys to the route (increase, enum, row cell, `reverted`)
-  → 409; off the GPU path and with the assistant off → 404; an applied reminder (`reminded`)
+  → 409; reminders off (also the CPU default) and the assistant off → 404; the setting
+  (default per path, stored choice, the estimates shown from given budgets, the CPU names-only
+  note); an applied reminder (`reminded`)
   never triggers one; scheduling: no account slot taken,
   an interpretation admitted during a reminder cancels it and fits its estimate, no probe, no
   hung-detector signal; duplicate names without a key → no entry text; text, multiline and
@@ -710,9 +722,7 @@ and merge, in this order; the demo stays usable after each.
   row's dropped text → dropped; a number in no source → dropped; `relevant: false` → nothing
   shown; browser: the hint, Use, Dismiss, both viewports, no CSP violation.
 
-**Deviation from §1.4 (proposed, user to confirm).** Interpretations keep prompt format D
-(ASSIST-56: context by ID, no values, chosen by measurement) and get no catalogue text; only
-reminders send it. Adding it to interpretations would be a later step with its own screen.
+Interpretations keep prompt format D without catalogue text (ASSIST-61); only reminders send it.
 
 ### 4 Suggestions and "Which Sword?"
 
