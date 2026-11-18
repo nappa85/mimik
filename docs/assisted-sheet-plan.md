@@ -672,7 +672,7 @@ counts the reminder's whole prompt (about 16 s on the GPU) plus the GPU fallback
 s), while a reminder whose system message is cached costs about 1 s. The owner chose both: count
 the real cost (A) and let a reminder lengthen a scribble reading's wait by that cost, shown on
 the page (B). Plan reviewed (fresh Opus, 2026-11-18: rework; B1, M1-M4 and the minors are
-folded in below).
+folded in below; re-review: approve with changes, folded in).
 
 1. **Prime the reminder prefix before Ready, after the samples.** Calibration and trials stay as
    they are (no budget depends on the reminder setting). In the reminder planning step
@@ -682,10 +682,13 @@ folded in below).
    reminder's run deadline), so the template start and system message match token for token.
    It runs on the GPU path always, and on the CPU path only when reminders are on at the start
    (the stored choice, passed to the manager before it starts: no race with
-   `set_reminder_choice`). Its own progress step; start-up step times are kept apart for starts
+   `set_reminder_choice`). Order: `/tokenize`, derive the reminder budgets, then the prime; when
+   the derive gives Unavailable there is no prime. Its own progress step; start-up step times are kept apart for starts
    with and without it. A failure or timeout leaves the generation Ready with reminders
    unavailable ("the reminder prompt could not be prepared"); after a timeout the server is
-   presumed busy for the prime's bound (`--parallel 1` keeps evaluating). After the prime, arm
+   presumed busy for the prime's bound (`--parallel 1` keeps evaluating): the Ready transition
+   carries that time and `Assistant` sets its `busy_until` from it for this generation, so the
+   first admission counts it. After the prime, arm
    the existing interpretation cache check, so the first interpretation verifies the
    interpretation entry's restore (a miss switches reminders off, as today).
 2. **Not prepared.** A CPU generation started with reminders off gets `Reminders::NotPrepared`:
@@ -697,8 +700,9 @@ folded in below).
    - verified: `restore(reminder entry) + p x (N(B) + TEMPLATE_MARGIN_TOKENS)`, the variable
      part and the user turn's template tail.
    The unverified term applies until a reminder of this generation has completed with
-   `cached_tokens` at least 75 % of the reminder system tokens; cancelled reminders do not
-   verify. The restore of the interpretation entry after a reminder stays counted in X too (on
+   `cached_tokens` at least 75 % of the reminder system tokens, and again after any cancelled
+   reminder until a later one completes and verifies (a cancelled reminder shows no figure, so
+   an entry evicted after verification is never assumed cached). The restore of the interpretation entry after a reminder stays counted in X too (on
    purpose, conservative: it also falls in the next interpretation's run, under
    `BeyondMargin`). Entry sizes count the whole saved entry: the reminder's from system + N(B) +
    reply bound, the interpretation's from prefix + N(B) + `max_tokens` (`entry_mib`). The
@@ -729,8 +733,9 @@ folded in below).
 8. **Tests** (each failing before the change where it is a behaviour change): budgets from
    samples that reproduce the current R (with the slowdown factor) and the stated
    `REMINDER_PREFIX` token count: the dev host's GPU (p 5.17 ms, N(B) 1,128, D 1) gives reminders
-   available with verified X at most 7 s; the CPU (p about 40-43 ms, N(B) 280) gives them
-   available; a reading admitted behind a reminder at the boundary (X + R + busy = Q + X) is
+   available with verified X at most 7 s and the unverified Y (about 13-16 s) within
+   `WorseThanInterpretation`; the CPU (p about 40-43 ms, N(B) 280) gives them available with Y
+   about 68 s; a reading admitted behind a reminder at the boundary (X + R + busy = Q + X) is
    neither refused nor expired, and a reading admitted with no reminder keeps Q; the unverified
    term applies before the first verifying reminder and after a cancelled one; a low or missing
    reminder `cached_tokens` switches reminders off without clearing the interpretation check; a
@@ -740,7 +745,8 @@ folded in below).
 9. **Docs:** `docs/model-runtime.md` ("Prompt cache and reminders"), `docs/assisted-entry.md`
    (reminders' timing), `docs/decisions.md` (a line for C beside ASSIST-60),
    `docs/limitations.md` (remove REMIND-REPRIME, update REMIND-RESTORE, add: an evicted reminder
-   entry after verification makes one reminder cost its whole prompt), `TODO.md`.
+   entry after verification makes the next completed reminder cost its whole prompt before it
+   switches reminders off; a reading queued behind it may wait past its allowance once), `TODO.md`.
 10. **Live** (GPU outside the weekday window with the fan on manual; CPU at 2 threads allowed in
    the window): `calibrate` on both paths shows reminders available; the cache tool with a
    sequence of priming, samples, three or more interpretations with long replies, then a
