@@ -657,14 +657,12 @@ on the CPU path and falls back to the re-prime on the GPU path), no re-prime whi
 works, and the GPU restore cost (0.53 ms per MiB of entry plus 10 ms) in the extra wait, the
 margin check and the page (the fallback re-prime counts in Q and the extra wait), with the `BeyondMargin` check on both paths.
 
-Remaining (pending live runs):
+Remaining:
 
-- Re-measure on the GPU (Qwen3.5-9B, `--ctx-checkpoints 4`) that the user-boundary checkpoint
-  survives the cap with variable-length envelope sequences, recording the checkpoint count, and
-  that the cache's token estimate stays at or above the two entries' tokens.
+- Reminders are unavailable on both paths of the dev host (`docs/results.md`, 3c-1b GPU entry):
+  decide what the queue rule counts for a reminder, then re-measure.
 - RAM headroom on the documented minimum host for the GPU path (Qwen about 5.3 GiB model +
   1,015 MiB cache + 251 MiB slot + 1 GiB margin).
-- Recalibrate the restore constants with the flag (no live run in this slice).
 - The tool also writes the thermal guard's minimum and maximum into its JSON.
 
 ##### 3c-2 Catalogue entry text and provenance (GPU path)

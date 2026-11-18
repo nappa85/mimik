@@ -164,9 +164,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   expiry/transport and its absence for a low figure; the page text should say the GPU estimate
   includes re-priming when the cache fails; the comment of the ctx-0 assertion in
   `the_memory_check_counts_the_cache_and_the_slots_checkpoints` is wrong; the live test's second
-  readiness loop does not notice a server that died. Pending live: the GPU re-measurement that
-  the user-boundary checkpoint survives `--ctx-checkpoints 4`, recalibration with the flags, RAM
-  headroom on the minimum host.
+  readiness loop does not notice a server that died. Pending live: RAM headroom on the minimum
+  host.
+- **Reminders unavailable on the dev host, both paths (decision owed, 2026-11-18):** the queue
+  rule lets a reminder cost at most Q minus D x R (6 s on the GPU, R 105 s, Q 111 s), and counts
+  its whole prompt plus the GPU fallback re-prime (129 s needed); measured reminders cost about
+  1 s once cached (`docs/results.md`, 3c-1b GPU entry).
 - Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled
   Undo offer runs `changed_members` (about 32,000 `locate` calls on the worst page); compute once
   per bundle if slow. The module's multi-unit redraw (`settleApplied`: drafted, held and in-flight

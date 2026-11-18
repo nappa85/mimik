@@ -13,9 +13,9 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   proves confusing.
 - **REMIND-REPRIME** [GPU path] The fallback re-prime after a failed cache check
   (`Interpreter::reprime`) is tested with stubs only, and its time counts in the generation's availability
-  checks (the longer of the restore and the re-prime, for Q and for a running interpretation's wait). Whether the user-boundary checkpoint survives
-  `--ctx-checkpoints 4`, and the restore constants with the flag, are pending a GPU re-measurement
-  (3c-1b).
+  checks (the longer of the restore and the re-prime, for Q and for a running interpretation's wait). The checkpoint cap and the
+  restore constant were measured live on the dev host (`docs/results.md`, 3c-1b GPU entry); the
+  re-prime path itself was not exercised live.
 - **MEMORY-ENTRY** [prompt cache] Only the two shipped default files have measured entry sizes;
   any other file gets a conservative size bound from its file size (no GGUF parser), so
   `--cache-ram` and the memory check may be larger than needed, or, for an unusual architecture,

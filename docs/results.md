@@ -151,6 +151,38 @@ the pinned CPU build and Granite 4.2 3B mounted read-only, the launcher's own fl
 (`--cache-ram 1280 --ctx-checkpoints 4`, 2 threads), real prompts (the pinned interpretation and
 reminder prefixes), greedy. Limits: one run, one host, short replies, the GPU path not run.
 
+## Prompt cache with the checkpoint cap and GPU start-up, GPU path (3c-1b, 2026-11-18)
+
+Live inference, prototype tooling, RX 6650 XT, fan manual 255, evening (18:30-18:40).
+Conclusion: `--ctx-checkpoints 4` keeps the user-boundary checkpoint that restores the
+interpretation prefix after a reminder, and Mimik's `--cache-ram` for Qwen3.5-9B (1,015 MiB)
+holds both entries; but with these budgets reminders are **unavailable on the GPU path of the
+dev host**, as on its CPU path (below).
+
+- **Cap (cache tool):** `assist_runtime_measure.py cache --gpu-device Vulkan0 --cache-ram-sizes
+  1015 --ctx-checkpoints 4 --sequence full --reps 2`, Qwen3.5-9B Q4_K_M (SHA-256 checked by hand
+  against the pinned GPU default), 4 threads. Every interpretation after a reminder or a
+  re-prime reused `cache_n` 1,810 of the 1,805-token prefix (10 of 10, 0.38-0.55 s to first
+  token, against 9.9-10.9 s cold); later reminders restored their own entry (`cache_n` 1,819,
+  1.0 s). The server never held more than 3 checkpoints (positions n-516, 1,810 and n-4; "3 of 4"
+  at most, 50 times), so the cap did not bind. Entries 213-263 MiB, under the 308 MiB that
+  `entry_mib` gives for 1,832 tokens; the cache's token estimate stayed at 8,192 or more.
+- **Restore cost:** `prompt cache update took` 96-158 ms for the restores that precede an
+  interpretation (0.51 ms per MiB idle, 0.56 in the first rep, which overlapped a release
+  build); one first save took 438 ms under that build. `GPU_RESTORE_S_PER_MIB` (0.53 ms) plus 10
+  ms is under the loaded figure by about 9 ms, far below the whole seconds the budgets round to.
+- **Start-up in the app** (release build of master `d10b289`, `calibrate --device auto`, 2 runs):
+  ready after 39.7 and 39.2 s; priming 1,961 tokens in 10.5 and 10.4 s; samples W 10.4-10.5 s
+  (prompt 1,140-1,142 tokens in 5.9 s, 1,917 cached, 64 tokens in 4.5-4.6 s); B 4,096, N(B)
+  1,128, R 105 s, D 1, Q 111 s, busy after expiry 6 s.
+- **Reminders unavailable:** both runs: "a scribble reading waiting behind a reminder and the
+  readings ahead of it could wait 129 s, more than the 111 s it may". With D 1, Q is R plus 6 s,
+  so a reminder may cost at most 6 s, while the budget counts its whole prompt at the measured
+  rate (about 16 s: the reminder system message plus N(B) at 5.2 ms per token) plus the GPU
+  fallback re-prime (10.5 s). Measured reminders cost 1.0 s once their system message is cached
+  (11 s the first time). The rule is consistent with "a scribble reading is never refused
+  because of a reminder"; what it should count is an open decision (`TODO.md`).
+
 ## Prompt cache across prompts, GPU path (3c-0, 2026-11-18)
 
 Prototype tier, live inference; reviewed (fresh Opus subagent, 2026-11-18: sound with caveats,

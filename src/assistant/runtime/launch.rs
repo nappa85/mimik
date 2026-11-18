@@ -34,9 +34,9 @@ pub(crate) const CTX_SIZE: u32 = 8192;
 /// `--ctx-checkpoints`: the most context checkpoints the server keeps per slot (and so per
 /// cache entry). 4 is one slack checkpoint over the 3 per prompt that b12110 made in 3c-0. b12110 takes the user-message boundary checkpoint that restores the
 /// interpretation prefix after a reminder along with others (n-516 and n-4 of the prompt); the
-/// cap bounds a slot's and an entry's recurrent-state copies at `1 + CHECKPOINT_CAP`. That the
-/// boundary checkpoint survives this cap is pending a GPU re-measurement
-/// (`docs/assisted-sheet-plan.md`, 3c-1b).
+/// cap bounds a slot's and an entry's recurrent-state copies at `1 + CHECKPOINT_CAP`. The
+/// boundary checkpoint survives this cap (GPU, Qwen3.5-9B: at most 3 held, `docs/results.md`,
+/// 3c-1b).
 pub(crate) const CHECKPOINT_CAP: u32 = 4;
 
 /// What one prompt-cache entry costs for a model: the KV part per token and one recurrent-state

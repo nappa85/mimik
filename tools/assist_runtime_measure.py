@@ -119,6 +119,7 @@ def calibrate(args):
         str(args.threads),
         *(("--assistant-model", f"local:{args.model}") if args.model else ()),
         *(("--assistant-model-sha256", args.sha256) if args.sha256 else ()),
+        *(("--assistant-device", args.device) if args.device else ()),
     ]
     began = time.monotonic()
     process = subprocess.Popen(
@@ -234,6 +235,11 @@ class Server:
             "--no-warmup",
             "--cache-ram",
             str(getattr(args, "cache_ram", 0)),
+            *(
+                ["--ctx-checkpoints", str(args.ctx_checkpoints)]
+                if getattr(args, "ctx_checkpoints", None)
+                else []
+            ),
             "--reasoning",
             "off",
             *(["--verbosity", str(args.verbosity)] if getattr(args, "verbosity", None) else []),
@@ -745,6 +751,7 @@ def main(argv=None):
     cal.add_argument("--limit", type=int, default=1800)
     cal.add_argument("--model", help="a model file other than the default Granite one")
     cal.add_argument("--sha256", help="its SHA-256 (required with --model)")
+    cal.add_argument("--device", choices=["cpu", "auto"], help="Mimik's device (default auto)")
     srv = commands.add_parser("server")
     srv.add_argument("--models-dir", type=Path, required=True)
     srv.add_argument("--runtime", type=Path, required=True)
@@ -766,6 +773,9 @@ def main(argv=None):
     che.add_argument("--verbosity", type=int, help="llama-server log verbosity (for sizes)")
     che.add_argument("--sequence", choices=["min", "pair", "short", "full"], default="full")
     che.add_argument("--gpu-device", help="run the Vulkan build on this device (Vulkan0)")
+    che.add_argument(
+        "--ctx-checkpoints", type=int, help="the checkpoint cap (Mimik passes 4, 3c-1b)"
+    )
     che.add_argument("--log-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "cache":
