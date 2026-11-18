@@ -66,10 +66,13 @@ default reply length 1,024.
 
 Prototype tier, live inference. Conclusion: with Granite 4.2 3B on the CPU path, llama.cpp's
 host-RAM prompt cache (`--cache-ram`) restores the interpretation prefix after a reminder-sized
-prompt (99 % of the prefix reused, 1.0 s to first token at 5 threads, 2.5 s at 2 threads),
+prompt (99 % of the prefix reused, 1.1 s to first token at 5 threads, 2.5 s at 2 threads),
 where `--cache-ram 0` as shipped re-evaluates it whole (64 s, 150 s). The cache needs room for
 two entries: one entry fits and thrashes. Choice (c) passes the 75 % rule; (a) costs the full
-prompt time on every reminder. The GPU part (Qwen3.5-9B, host-to-device copy time) is pending.
+prompt time on every reminder. Scope of the decision: the CPU path with Granite 4.2 (dense
+attention) on this host; the GPU path (Qwen3.5-9B, linear-attention layers, where a restored
+entry may not roll back to the prefix's end) stays on (a) until measured. Reviewed (fresh Opus
+subagent, 2026-11-18): sound with caveats, applied below.
 
 - **Setup:** the pinned llama-server b12110 CPU build, native (ASSIST-40), host AMD Ryzen 5
   1600, Granite 4.2 3B Q4_K_M, the shipped flag vector (`launch.rs`) except `--cache-ram`,
@@ -91,8 +94,12 @@ prompt time on every reminder. The GPU part (Qwen3.5-9B, host-to-device copy tim
 - **(c) with room for two entries** (300, 512 and 1,024 MiB; 2 repetitions each at 5
   threads, 1 at 2 threads with 512): every interpretation after a reminder reused
   `cache_n` 1,842 of 1,855 (99.3 %, at least 75 % in 18/18 interpretations after a reminder at
-  5 threads and 3/3 at 2 threads, plus 3/3 in the first 512 MiB full sequence), `prompt_n` 13, 1.04-1.11 s to first token at 5 threads and
-  2.47-2.49 s at 2 threads. The sequences reminder -> interpretation -> reminder ->
+  5 threads and 3/3 at 2 threads, plus 3/3 in the first 512 MiB full sequence; judged by hand
+  against the cold `prompt_n`), `prompt_n` 13, 1.10-1.11 s to first token at 5 threads and
+  2.47-2.49 s at 2 threads. Almost all of that is the evaluation of the 13 differing tokens,
+  which R's `t` term already covers; the restore itself is about 20-55 ms (an interpretation
+  without a restore: 1,016 ms; the log's `prompt cache update took ~54 ms`), and it scales with
+  the entry size and the host's memory bandwidth. The sequences reminder -> interpretation -> reminder ->
   interpretation -> reminder -> interpretation kept the interpretation entry every time. A
   second reminder reuses the first one's system message (`cache_n` 1,760, 5.7 s at 5 threads,
   13.2 s at 2 threads).
@@ -103,7 +110,9 @@ prompt time on every reminder. The GPU part (Qwen3.5-9B, host-to-device copy tim
   needs room for both entries: 64 MiB skipped every entry ("exceeds cache size limit"); 256 MiB
   (one entry) evicted the interpretation each time ("making room", no reuse: 0 of 3
   interpretations after a reminder, `cache_n` 4); 300 MiB (295.7 MiB needed) worked. The cache
-  also has a token limit equal to the context size (8,192). The slot is chosen by longest
+  also has a token limit equal to the context size (8,192); whether it bounds each entry or
+  the sum of entries was not checked. An entry holds the prompt and the generated tokens
+  (`saving prompt with length 1866` for 1,855 prompt and 11 generated tokens). The slot is chosen by longest
   common prefix similarity (`f_sim_best` over 0.1), else the least recently used slot, and the
   cache entry by prefix match.
 - **Hybrid or not:** the Granite 4.2 file's architecture is `granite` (dense attention; the
@@ -112,12 +121,17 @@ prompt time on every reminder. The GPU part (Qwen3.5-9B, host-to-device copy tim
   measured here.
 - **Limitations:** one host, one model, 5 and 2 threads (at night, so no desktop-hours
   contention), a stand-in reminder prompt (no real reminder schema or grammar), an interpretation
-  envelope that is a one-line note (the shipped dynamic part is longer, so its entry is larger:
-  size `--cache-ram` as two entries of prefix plus the largest dynamic part, about 80 KiB per
-  token for this model, 512 MiB being 2.2x the measured pair), no process memory (RSS) or
-  swap figure, restore cost taken from time to first token with 16-token replies; the
-  1 s restore is the evaluation of the 13 tokens that differ plus the entry load (the 32-35 ms
-  cache save is in the server log). The GPU path (Qwen3.5-9B, host-to-device copy) is pending
+  envelope that is a one-line note and 16-token replies, so the measured entries are the lower
+  end. Sizing: an entry is its prompt plus its reply, so `--cache-ram` must hold the largest
+  interpretation entry (prefix + N(B) + the reply length, up to 2,560) plus the largest reminder
+  entry, at about 80 KiB per token for this model: 512 MiB (1.73x the measured pair) fits at the
+  default reply length of 1,024 (about 420 MiB) but not at 2,560 (about 538 MiB); context ×
+  bytes per token (640 MiB here) bounds it whatever the reply length. No process memory (RSS) or
+  swap figure; no check that a restored cache gives the same greedy reply as a fresh one (the
+  tool did not record reply text); no third prompt kind between (a different reminder prompt, a
+  calibration or trial, a cancelled reminder's partial state): back-to-back reminders keep the
+  interpretation entry only because they share one system message; the 2-thread daytime window
+  was enforced by the tool but every run was at night. The GPU path (Qwen3.5-9B, host-to-device copy) is pending
   until the fan can be read as manual.
 
 ## Prompt cache, grammar cost, reply length and VRAM (ASSIST-L47, ASSIST-L52, 2026-11-16)

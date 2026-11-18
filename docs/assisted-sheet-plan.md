@@ -616,6 +616,20 @@ the measurement-relevant flag vector (`launch.rs`): choosing (c) re-checks calib
 updates that vector's text and test. A shared system message is excluded (two conflicting
 tasks, earlier review). The chosen mechanism and its measured cost feed 3c-1.
 
+CPU result (2026-11-18, `docs/results.md`): (c) passes with Granite 4.2 on the CPU path (99 %
+reuse); the GPU path is pending (fan on manual, night or weekend), with the tool recording reply
+text and the per-step pass rule (denominator: `/tokenize` of the prefix), and stays on (a) until
+measured. Because of (c), 3c-1 also: sizes `--cache-ram` per model and context (context × bytes
+per token, or the largest interpretation entry plus the largest reminder entry, each prompt plus
+reply bound); checks in b12110's source or by a run whether the 8,192-token limit bounds each
+entry or their sum, and at Ready falls back to (a) or makes reminders unavailable when the two
+entries do not fit; checks RAM headroom on the documented minimum host; tests a third prompt
+kind (a cancelled reminder mid-prompt then an interpretation, reminders of two accounts,
+calibration or a trial then a reminder then an interpretation); compares an interpretation's
+reply after a restore with a fresh one; re-runs calibration with the flag and updates the
+flag-vector text and test; takes the restore cost as the entry load time with its scaling
+stated, not the dev host's 1 s.
+
 ##### 3c-1 Reminders with item names
 
 - **Setting (ASSIST-60).** "Reminders" on `/admin/assistant`, on or off, stored like the reply
