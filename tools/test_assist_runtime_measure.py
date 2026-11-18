@@ -86,7 +86,13 @@ def args_for(folder, gpu="Vulkan0"):
     server.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
     server.chmod(server.stat().st_mode | stat.S_IXUSR)
     return mock.Mock(
-        runtime=runtime, models_dir=Path(folder), model="m.gguf", threads=2, gpu_device=gpu
+        runtime=runtime,
+        models_dir=Path(folder),
+        model="m.gguf",
+        threads=2,
+        gpu_device=gpu,
+        log=None,
+        cache_ram=0,
     )
 
 
@@ -149,6 +155,48 @@ class GpuGuardTests(unittest.TestCase):
             self.assertIsNotNone(spawned[0].poll())
             with self.assertRaises(ProcessLookupError):
                 os.killpg(spawned[0].pid, 0)
+
+
+class CacheMeasureTests(unittest.TestCase):
+    def test_reuse_fraction_and_the_75_percent_rule(self):
+        self.assertEqual(measure.reuse_fraction(0, 1946), 0.0)
+        self.assertEqual(measure.reuse_fraction(3000, 1946), 1.0)
+        self.assertEqual(measure.reuse_fraction(5, 0), 0.0)
+        self.assertTrue(measure.passes(1460, 1946))
+        self.assertFalse(measure.passes(1459, 1946))
+
+    def test_stream_result_reads_first_token_and_last_timings(self):
+        lines = [
+            b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n',
+            b"\n",
+            b'data: {"choices":[{"delta":{"content":""}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"{"}}]}\n',
+            b'data: {"choices":[],"timings":{"prompt_n":5,"cache_n":1900}}\n',
+            b"data: [DONE]\n",
+        ]
+        ticks = iter([2.5])
+        first, timings = measure.stream_result(lines, 1.0, clock=lambda: next(ticks))
+        self.assertEqual(first, 1.5)
+        self.assertEqual(timings, {"prompt_n": 5, "cache_n": 1900})
+        self.assertEqual(measure.stream_result([b"data: [DONE]\n"], 0.0), (None, None))
+
+    def test_reminder_prompt_has_its_size_and_shares_no_prefix(self):
+        system = measure.reminder_system(7000)
+        self.assertEqual(len(system), 7000)
+        self.assertNotEqual(system[:40], measure.PREFIX[:40])
+        self.assertIn("<data>", measure.reminder_user(1))
+        self.assertNotEqual(measure.reminder_user(1), measure.reminder_user(2))
+
+    def test_the_window_allows_two_threads_only_in_the_weekday_day(self):
+        from datetime import datetime
+
+        monday_noon = datetime(2026, 11, 16, 12, 0)
+        monday_night = datetime(2026, 11, 16, 3, 0)
+        sunday_noon = datetime(2026, 11, 15, 12, 0)
+        self.assertTrue(measure.window_allows(2, monday_noon))
+        self.assertFalse(measure.window_allows(3, monday_noon))
+        self.assertTrue(measure.window_allows(5, monday_night))
+        self.assertTrue(measure.window_allows(5, sunday_noon))
 
 
 if __name__ == "__main__":

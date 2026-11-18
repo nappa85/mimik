@@ -62,6 +62,78 @@ default reply length 1,024.
   models, thread counts and GPUs (ASSIST-L47). The release smoke tool needed a fix to ignore
   the header's Sign out form (since the shared top menu).
 
+## Prompt cache across prompts, CPU path (3c-0, 2026-11-18)
+
+Prototype tier, live inference. Conclusion: with Granite 4.2 3B on the CPU path, llama.cpp's
+host-RAM prompt cache (`--cache-ram`) restores the interpretation prefix after a reminder-sized
+prompt (99 % of the prefix reused, 1.1 s to first token at 5 threads, 2.5 s at 2 threads),
+where `--cache-ram 0` as shipped re-evaluates it whole (64 s, 150 s). The cache needs room for
+two entries: one entry fits and thrashes. Choice (c) passes the 75 % rule; (a) costs the full
+prompt time on every reminder. Scope of the decision: the CPU path with Granite 4.2 (dense
+attention) on this host; the GPU path (Qwen3.5-9B, linear-attention layers, where a restored
+entry may not roll back to the prefix's end) stays on (a) until measured. Reviewed (fresh Opus
+subagent, 2026-11-18): sound with caveats, applied below.
+
+- **Setup:** the pinned llama-server b12110 CPU build, native (ASSIST-40), host AMD Ryzen 5
+  1600, Granite 4.2 3B Q4_K_M, the shipped flag vector (`launch.rs`) except `--cache-ram`,
+  one slot, ctx 8192, thinking off, greedy, `max_tokens` 16, streamed. Interpretation requests:
+  the real `FIXED_PREFIX` (hash-pinned copy `assist_eval.contract_prefix("v2")`) plus a data
+  envelope, with the 2c reply grammar; 1,855 prompt tokens cold, 1,842 of them (99 %) in
+  common with the next request. The stand-in reminder: a different system message of 7,000
+  characters (about 1,880 prompt tokens, no shared start) plus a six-item data envelope;
+  the same system message for every reminder, as the product's will be. Tool:
+  `tools/assist_runtime_measure.py cache`.
+- **Baseline `--cache-ram 0`:** after a reminder the interpretation's `cache_n` is 4 (the
+  template start), `prompt_n` 1,851: 63.5-64.0 s to first token at 5 threads (3 interpretations
+  in the full sequence; 3 more with `--cache-ram 64`, which skips every entry, 63.3-63.8 s),
+  150.3-150.5 s at 2 threads (3 interpretations). Slot reuse without a reminder between works
+  (repeat: `cache_n` 1,842, 1.0 s). Re-priming (a) after a reminder: 63.9 s at 5 threads
+  (`prompt_n` 1,849, 1 occurrence); the next interpretation then reuses the prefix (`cache_n`
+  1,840, 1.2 s). At 2 threads the re-prime is the same prompt, so about 150 s (not measured
+  separately).
+- **(c) with room for two entries** (300, 512 and 1,024 MiB; 2 repetitions each at 5
+  threads, 1 at 2 threads with 512): every interpretation after a reminder reused
+  `cache_n` 1,842 of 1,855 (99.3 %, at least 75 % in 18/18 interpretations after a reminder at
+  5 threads and 3/3 at 2 threads, plus 3/3 in the first 512 MiB full sequence; judged by hand
+  against the cold `prompt_n`), `prompt_n` 13, 1.10-1.11 s to first token at 5 threads and
+  2.47-2.49 s at 2 threads. Almost all of that is the evaluation of the 13 differing tokens,
+  which R's `t` term already covers; the restore itself is about 20-55 ms (an interpretation
+  without a restore: 1,016 ms; the log's `prompt cache update took ~54 ms`), and it scales with
+  the entry size and the host's memory bandwidth. The sequences reminder -> interpretation -> reminder ->
+  interpretation -> reminder -> interpretation kept the interpretation entry every time. A
+  second reminder reuses the first one's system message (`cache_n` 1,760, 5.7 s at 5 threads,
+  13.2 s at 2 threads).
+- **Entry size and the selection rule:** one entry is 145.8-150 MiB for 1,855-1,915 tokens
+  (about 80 KiB per token, the same as the KV cache: 640 MiB for 8,192 tokens), reported by the
+  server log at verbosity 4 (`cache state: N prompts, X MiB`). The server saves the slot's
+  state into the cache before it looks for the next prompt, so keeping the interpretation
+  needs room for both entries: 64 MiB skipped every entry ("exceeds cache size limit"); 256 MiB
+  (one entry) evicted the interpretation each time ("making room", no reuse: 0 of 3
+  interpretations after a reminder, `cache_n` 4); 300 MiB (295.7 MiB needed) worked. The cache
+  also has a token limit equal to the context size (8,192); whether it bounds each entry or
+  the sum of entries was not checked. An entry holds the prompt and the generated tokens
+  (`saving prompt with length 1866` for 1,855 prompt and 11 generated tokens). The slot is chosen by longest
+  common prefix similarity (`f_sim_best` over 0.1), else the least recently used slot, and the
+  cache entry by prefix match.
+- **Hybrid or not:** the Granite 4.2 file's architecture is `granite` (dense attention; the
+  file has no state-space or sliding-window keys), so reuse needs no context checkpoint; it
+  restores at the prefix's end (the common 1,842 tokens). Qwen3.5 (linear attention) is not
+  measured here.
+- **Limitations:** one host, one model, 5 and 2 threads (at night, so no desktop-hours
+  contention), a stand-in reminder prompt (no real reminder schema or grammar), an interpretation
+  envelope that is a one-line note and 16-token replies, so the measured entries are the lower
+  end. Sizing: an entry is its prompt plus its reply, so `--cache-ram` must hold the largest
+  interpretation entry (prefix + N(B) + the reply length, up to 2,560) plus the largest reminder
+  entry, at about 80 KiB per token for this model: 512 MiB (1.73x the measured pair) fits at the
+  default reply length of 1,024 (about 420 MiB) but not at 2,560 (about 538 MiB); context ×
+  bytes per token (640 MiB here) bounds it whatever the reply length. No process memory (RSS) or
+  swap figure; no check that a restored cache gives the same greedy reply as a fresh one (the
+  tool did not record reply text); no third prompt kind between (a different reminder prompt, a
+  calibration or trial, a cancelled reminder's partial state): back-to-back reminders keep the
+  interpretation entry only because they share one system message; the 2-thread daytime window
+  was enforced by the tool but every run was at night. The GPU path (Qwen3.5-9B, host-to-device copy) is pending
+  until the fan can be read as manual.
+
 ## Prompt cache, grammar cost, reply length and VRAM (ASSIST-L47, ASSIST-L52, 2026-11-16)
 
 Prototype tier. (a) and (b) re-read the 2026-11-06 ledgers of the 2b screen on b12110 (GPU,
