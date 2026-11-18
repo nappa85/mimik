@@ -138,6 +138,19 @@ subagent, 2026-11-18): sound with caveats, applied below.
   interpretation entry only because they share one system message; the 2-thread daytime window
   was enforced by the tool but every run was at night. The GPU path has its own entry below.
 
+## Prompt cache through Mimik's client, CPU path (3c-1b, 2026-11-18)
+
+Live inference, one run. Conclusion: llama-server b12110 reports the reused prompt through the
+completion usage that Mimik's client (rig adapter over the bounded transport) reads as
+`cached_tokens`, so the check after a reminder works: an interpretation, a reminder with its
+own system message, then the interpretation again: `cached_tokens` 0 of 1,979 (171.6 s), the
+reminder 16 of 1,410 (120.6 s), the second interpretation 1,978 of 1,979 (4.0 s). Setup: the
+ignored test `live_cpu_cache_restores_the_interpretation_prefix_after_a_reminder`
+(`MIMIK_LIVE_CACHE_RUNTIME`, `MIMIK_LIVE_CACHE_MODEL`), run in the `mimik-ci` container with
+the pinned CPU build and Granite 4.2 3B mounted read-only, the launcher's own flags
+(`--cache-ram 1280 --ctx-checkpoints 4`, 2 threads), real prompts (the pinned interpretation and
+reminder prefixes), greedy. Limits: one run, one host, short replies, the GPU path not run.
+
 ## Prompt cache across prompts, GPU path (3c-0, 2026-11-18)
 
 Prototype tier, live inference; reviewed (fresh Opus subagent, 2026-11-18: sound with caveats,

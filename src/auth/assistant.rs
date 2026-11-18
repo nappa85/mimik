@@ -433,12 +433,12 @@ pub(super) fn reminder_view(
         Reminders::Available(budgets) => {
             view.estimate = Some(format!("{:.0} s", budgets.estimate_s.ceil()));
             view.extra_wait = Some(format!(
-                "{} s (the whole prompt of a cancelled reminder, without the chat template's tokens, plus restoring the interpretation prefix{})",
+                "{} s (the whole prompt of a cancelled reminder, without the chat template's tokens, plus restoring the interpretation prefix from the prompt cache{})",
                 budgets.extra_wait.as_secs(),
                 if budgets.restore.dev_host_constant {
                     "; the restore is a figure measured on the development host, not on this machine"
                 } else {
-                    ", measured by priming"
+                    ""
                 }
             ));
         }
@@ -1137,6 +1137,7 @@ mod tests {
                 seconds: 0.3,
                 dev_host_constant: dev_host,
             },
+            reprime: Duration::from_secs(9),
             reply_tokens: 600,
             prefix_tokens: 1500,
             extra_wait: Duration::from_secs(81),
@@ -1188,10 +1189,13 @@ mod tests {
         assert!(wait.contains("without the chat template's tokens"));
         assert!(wait.contains("development host"));
         assert!(view.names_only && view.unavailable.is_none());
-        // The GPU path measures the restore by priming, and sends catalogue text later.
-        let gpu = reminder_view(None, Some((Path::Gpu, budgets(false))), "qwen", None);
+        // The GPU path restores from the cache too, and sends catalogue text later.
+        let gpu = reminder_view(None, Some((Path::Gpu, budgets(true))), "qwen", None);
         assert!(!gpu.names_only);
-        assert!(gpu.extra_wait.unwrap().contains("measured by priming"));
+        let wait = gpu.extra_wait.unwrap();
+        assert!(wait.contains("from the prompt cache"), "{wait}");
+        assert!(wait.contains("development host"), "{wait}");
+        assert!(!wait.contains("measured by priming"), "{wait}");
     }
 
     #[test]

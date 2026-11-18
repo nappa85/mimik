@@ -4,7 +4,7 @@
 use super::Path;
 use super::budgets::Measured;
 use super::calibration::Calibration;
-use super::launch::entry_kib_per_token;
+use super::launch::entry_mib;
 use super::reminder_budgets::{self, Inputs};
 use super::server::Server;
 use crate::assistant::contract::{REMINDER_PREFIX, largest_reminder_reply};
@@ -14,14 +14,14 @@ use std::time::Duration;
 /// How long the two `/tokenize` calls may take.
 pub(crate) const TOKENIZE_WITHIN: Duration = Duration::from_secs(30);
 
-/// The reminders of a generation measured as `calibration` says on `path`. `model_size` is the
-/// model file's size (0 when unknown), which bounds the cache entry's size.
+/// The reminders of a generation measured as `calibration` says on `path`. `model_sha256` and
+/// `model_size` (0 when unknown) are the model file's, which size the cache entry.
 pub(crate) async fn plan(
     server: &dyn Server,
     calibration: &Calibration,
     max_tokens: u32,
     path: Path,
-    model_size: u64,
+    (model_sha256, model_size): (&str, u64),
 ) -> Reminders {
     let Ok(derived) = &calibration.derived else {
         return Reminders::Unavailable("the generation has no budgets".to_owned());
@@ -41,7 +41,7 @@ pub(crate) async fn plan(
     )]
     let (system_tokens, entry_mib) = (
         system as f64,
-        calibration.prefix_tokens * entry_kib_per_token(model_size) as f64 / 1024.0,
+        entry_mib(model_sha256, model_size, calibration.prefix_tokens),
     );
     let inputs = Inputs {
         measured: Measured {
@@ -58,7 +58,7 @@ pub(crate) async fn plan(
     };
     match reminder_budgets::derive(&inputs) {
         Ok(budgets) => Reminders::Available(budgets),
-        Err(why) => Reminders::Unavailable(why.describe()),
+        Err(why) => Reminders::Unavailable(why.describe(path)),
     }
 }
 

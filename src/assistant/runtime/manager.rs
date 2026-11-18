@@ -1775,7 +1775,7 @@ impl Manager {
             calibration,
             max_tokens,
             path,
-            self.active.size.unwrap_or(0),
+            (&self.active.sha256, self.active.size.unwrap_or(0)),
         )
         .await;
         log(&match &reminders {

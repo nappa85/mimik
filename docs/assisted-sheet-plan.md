@@ -650,20 +650,22 @@ detection of a failed CPU restore is implemented but not exercised against a rea
 
 ##### 3c-1b The prompt cache on the GPU path
 
-3c-0's GPU result (2026-11-18, `docs/results.md`): `--cache-ram` with room for two entries
-restores the interpretation prefix after a reminder on Qwen3.5-9B through a context checkpoint
-(0.48-0.65 s against a 9.2 s re-prime). Adopting it changes: `cache_ram_mib` per model as
-`2 × (ctx × KV per token + (1 + checkpoint cap) × recurrent-state size)` (sizes from the GGUF
-metadata or measured constants for the shipped models; the cache's token estimate at or above
-the two entries' tokens), with `--ctx-checkpoints` set to a cap and re-measured so the
-user-boundary checkpoint survives (a variable-length envelope sequence recording the checkpoint
-count); `enough_memory` counts the cache and the slot's checkpoints on the GPU path too, with
-the headroom checked on the documented minimum host; the cache check after a reminder applies on
-the GPU path, where a failed check falls back to the re-prime instead of switching reminders off;
-the pending re-prime is dropped while the cache works; the GPU restore cost (about 0.53 ms per
-MiB of entry plus 10 ms) replaces the priming time in R and the page's estimate, with the
-`BeyondMargin` check on the GPU path; recalibration with the flag and the flag-vector text and
-test. The tool also writes the thermal guard's minimum and maximum into its JSON.
+Landed (reference: `docs/model-runtime.md`, "Prompt cache and reminders"): `--cache-ram` per model
+on both paths with `--ctx-checkpoints 4`, the memory check counting the cache and the slot's
+checkpoints, the cache check after a reminder on both paths (a failed one switches reminders off
+on the CPU path and falls back to the re-prime on the GPU path), no re-prime while the cache
+works, and the GPU restore cost (0.53 ms per MiB of entry plus 10 ms) in the extra wait, the
+margin check and the page (the fallback re-prime counts in Q and the extra wait), with the `BeyondMargin` check on both paths.
+
+Remaining (pending live runs):
+
+- Re-measure on the GPU (Qwen3.5-9B, `--ctx-checkpoints 4`) that the user-boundary checkpoint
+  survives the cap with variable-length envelope sequences, recording the checkpoint count, and
+  that the cache's token estimate stays at or above the two entries' tokens.
+- RAM headroom on the documented minimum host for the GPU path (Qwen about 5.3 GiB model +
+  1,015 MiB cache + 251 MiB slot + 1 GiB margin).
+- Recalibrate the restore constants with the flag (no live run in this slice).
+- The tool also writes the thermal guard's minimum and maximum into its JSON.
 
 ##### 3c-2 Catalogue entry text and provenance (GPU path)
 

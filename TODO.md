@@ -156,14 +156,17 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   context-level list) and add the probe to the LAN gate.
 - Gates must use `--all-features` (the auth-feature suites hid a stale `<nav>` assertion until
   2026-11-17).
-- Reminders (3c-1 review, Minor): the "unavailable" reason should say reminders are off for this
-  generation and what helps (more threads, the GPU path); the `cache_ram_mib` comment in
-  `launch.rs` still says the token limit is "not settled"; document that an unrelated expiry of
-  the first interpretation after a CPU reminder also turns reminders off; the GPU branch of
-  `an_interpretation_after_a_reminder_does_not_expire_on_either_path` passes without the re-prime.
-  With the dev host's CPU figures, reminders are unavailable on the CPU path (643 s needed, Q 365 s).
-  Before release: one live CPU reminder -> interpretation run to confirm `cached_tokens` arrives
-  through rig from b12110 (else CPU reminders switch off after the first one).
+- Reminders (3c-1 review): with the dev host's CPU figures, reminders are unavailable on the CPU
+  path (643 s needed, Q 365 s).
+- Prompt cache on the GPU path (3c-1b review, Minor): a GPU interpretation that completes with no
+  `cached_tokens` triggers an immediate re-prime it does not need (the prefix is already in the
+  slot; restrict to expiry and transport failure); no test asserts the immediate re-prime for
+  expiry/transport and its absence for a low figure; the page text should say the GPU estimate
+  includes re-priming when the cache fails; the comment of the ctx-0 assertion in
+  `the_memory_check_counts_the_cache_and_the_slots_checkpoints` is wrong; the live test's second
+  readiness loop does not notice a server that died. Pending live: the GPU re-measurement that
+  the user-boundary checkpoint survives `--ctx-checkpoints 4`, recalibration with the flags, RAM
+  headroom on the minimum host.
 - Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled
   Undo offer runs `changed_members` (about 32,000 `locate` calls on the worst page); compute once
   per bundle if slow. The module's multi-unit redraw (`settleApplied`: drafted, held and in-flight

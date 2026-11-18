@@ -51,10 +51,21 @@ fn thinking_is_off_for_every_model_including_the_qwen_default() {
             "{args:?}"
         );
     }
-    // Only the alias differs from the Granite vector: no per-model flag exists.
+    // Only the alias and the model-sized cache differ from the Granite vector: no per-model
+    // flag exists.
     let qwen = vector(&real, Some("Vulkan0"));
-    let differing = granite.iter().zip(&qwen).filter(|(a, b)| a != b).count();
-    assert_eq!(differing, 1, "{granite:?} {qwen:?}");
+    let differing: Vec<_> = granite
+        .iter()
+        .zip(&qwen)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .map(|(at, _)| granite[at - 1].as_str())
+        .collect();
+    assert_eq!(
+        differing,
+        ["--alias", "--cache-ram"],
+        "{granite:?} {qwen:?}"
+    );
 }
 
 #[test]
@@ -386,25 +397,70 @@ fn a_listing_whose_error_output_stays_open_is_not_over_at_the_deadline() {
     assert!(error.contains("error output did not end"), "{error}");
 }
 
+/// Both paths get `--cache-ram` for two entries of a whole context, sized per model, and
+/// `--ctx-checkpoints` with the cap.
 #[test]
-fn the_cpu_path_gets_a_prompt_cache_for_two_whole_contexts_and_the_gpu_path_none() {
+fn both_paths_get_a_sized_prompt_cache_and_a_checkpoint_cap() {
+    use crate::assistant::model::{DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL_SHA256};
     let dir = tempfile::tempdir().unwrap();
     let real = Real::new(settings(dir.path(), Choice::Auto, Roots::default()));
-    // Granite 4.2 3B Q4_K_M is about 2.0 GB: 81 KiB of entry per token (80 at least), two entries of the
-    // whole context (the test settings' 256 tokens).
-    real.set_model_size(2_000_000_000);
-    let value = |device| {
+    let value = |flag: &str, device| {
         let args = real.server_args("/m.gguf", "/s.sock", None, "/token", device);
-        let at = args.iter().position(|a| a == "--cache-ram").unwrap();
+        let at = args.iter().position(|a| a == flag).unwrap();
         args[at + 1].clone()
     };
-    assert_eq!(value(None), "41");
-    assert_eq!(value(Some("Vulkan0")), "0");
-    // A bigger file gets a bigger bound (never less than the measured 80 KiB per token).
-    real.set_model_size(5_000_000_000);
-    assert!(value(None).parse::<u32>().unwrap() > 41);
-    real.set_model_size(0);
-    assert_eq!(value(None), "40");
-    assert_eq!(cache_ram_mib(8192, 2_000_000_000), 1296);
-    assert_eq!(cache_ram_mib(8192, 0), 1280);
+    // An unmeasured file (the test settings' 256-token context): the conservative fallback,
+    // 80 KiB per token at least plus 5 states of 1/64 of the file.
+    real.set_model_size(2_000_000_000);
+    let unmeasured = value("--cache-ram", None);
+    assert!(unmeasured.parse::<u32>().unwrap() > 41);
+    assert_eq!(value("--cache-ram", Some("Vulkan0")), unmeasured);
+    for device in [None, Some("Vulkan0")] {
+        assert_eq!(value("--ctx-checkpoints", device), "4");
+    }
+    // The shipped models by their pinned SHA-256: Granite has no recurrent state, Qwen 5 x 50.25.
+    let choose = |sha: &str| {
+        let mut chosen = real.chosen.lock().unwrap();
+        chosen.sha256 = sha.to_owned();
+    };
+    choose(DEFAULT_MODEL_SHA256);
+    real.set_model_size(2_244_011_552);
+    // 2 x 256 tokens x 80 KiB = 40 MiB.
+    assert_eq!(value("--cache-ram", None), "40");
+    choose(GPU_DEFAULT_MODEL_SHA256);
+    real.set_model_size(5_680_522_464);
+    // 2 x (256 x 32 KiB + 5 x 51,456 KiB) = 2 x (8 + 251.25) MiB = 518.5, rounded up.
+    assert_eq!(value("--cache-ram", None), "519");
+    assert_eq!(value("--cache-ram", Some("Vulkan0")), "519");
+    // For the real context size the formula gives the measured shipped figures.
+    assert_eq!(
+        cache_ram_mib(8192, DEFAULT_MODEL_SHA256, 2_244_011_552),
+        1280
+    );
+    assert_eq!(
+        cache_ram_mib(8192, GPU_DEFAULT_MODEL_SHA256, 5_680_522_464),
+        1015
+    );
+    // Another file is unmeasured: never below the measured minimum, growing with the file.
+    assert!(cache_ram_mib(8192, "", 0) >= 1280);
+    assert!(cache_ram_mib(8192, "", 9_000_000_000) > cache_ram_mib(8192, "", 2_000_000_000));
+    assert!(cache_ram_mib(8192, "", 9_000_000_000) > 1015);
+}
+
+/// The memory check counts the cache and the slot's checkpoints on both paths.
+#[test]
+fn the_memory_check_counts_the_cache_and_the_slots_checkpoints() {
+    use crate::assistant::model::GPU_DEFAULT_MODEL_SHA256 as QWEN;
+    let size = 5_680_522_464_u64;
+    // Model 5,417 MiB + cache 1,015 MiB + slot 251 MiB + margin 1,024 MiB.
+    let slot = 5 * 51_456 * 1024_u64;
+    let exact = size + (1015_u64 << 20) + slot + MEMORY_MARGIN;
+    assert!(enough_memory_with(Some(exact), 8192, QWEN, size).is_ok());
+    let error = enough_memory_with(Some(exact - 1), 8192, QWEN, size).unwrap_err();
+    assert!(error.contains("1015 MiB of prompt cache"), "{error}");
+    assert!(error.contains("251 MiB of slot checkpoints"), "{error}");
+    // The slot alone counts, without a cache; a tiny host underflows nothing.
+    assert!(enough_memory_with(Some(exact - (1015 << 20)), 0, QWEN, size).is_err());
+    assert!(enough_memory_with(Some(10), 8192, QWEN, size).is_err());
+    assert!(enough_memory_with(None, 8192, QWEN, size).is_ok());
 }

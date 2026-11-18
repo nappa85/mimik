@@ -334,7 +334,7 @@ const TRANSPORT_GRACE: Duration = Duration::from_secs(1);
 struct Reprime {
     generation: u64,
     interpreter: Arc<dyn Interpreter>,
-    /// The restore time priming measured: how long the server is busy with it.
+    /// How long the server is busy with it (the time priming measured).
     wait: Duration,
 }
 
@@ -353,14 +353,19 @@ pub(crate) struct Assistant {
     /// Until when the presumed busy time is a reminder's (its dropped prompt or its re-prime):
     /// the interpretation queued behind it does not count toward D.
     reminder_busy: Mutex<Option<Instant>>,
-    /// Set after a CPU-path reminder reached the server: the next interpretation's completion
-    /// must show the prefix read back from the cache (plan 3c-0, "runtime detection").
+    /// Set after a reminder reached the server: the next interpretation's completion must show
+    /// the prefix read back from the cache (plan 3c-0, "runtime detection"; 3c-1b, both paths).
     cache_check: std::sync::atomic::AtomicBool,
+    /// GPU path: the cache check failed, so every started reminder is followed by a re-prime
+    /// of the interpretation prefix (reminders stay available). On the CPU path a failed check
+    /// sets [`Self::cache_off`] instead.
+    cache_failed: std::sync::atomic::AtomicBool,
     /// Why reminders were switched off for the generation after the cache check failed.
     cache_off: Mutex<Option<String>>,
     signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
-    /// A started reminder on the GPU path leaves the interpretation prefix evicted: the worker
-    /// re-primes it before the next job (plan 3c-0, choice (a)).
+    /// After the cache check failed on the GPU path, a started reminder leaves the
+    /// interpretation prefix evicted: the worker re-primes it before the next job (plan 3c-0,
+    /// choice (a), the fallback of 3c-1b). Not installed while the cache restores it.
     reprime: Mutex<Option<Reprime>>,
     /// The owner's reminder setting as stored (`None` until chosen), kept here so the save
     /// answer and the route read the effective value without a database read.
@@ -382,6 +387,7 @@ impl Assistant {
             busy_until: Mutex::new(None),
             reminder_busy: Mutex::new(None),
             cache_check: std::sync::atomic::AtomicBool::new(false),
+            cache_failed: std::sync::atomic::AtomicBool::new(false),
             cache_off: Mutex::new(None),
             reprime: Mutex::new(None),
             signals: Mutex::new(None),
@@ -511,6 +517,8 @@ impl Assistant {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.cache_check
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.cache_failed
             .store(false, std::sync::atomic::Ordering::SeqCst);
         *self.cache_off() = None;
     }
@@ -1022,9 +1030,10 @@ impl Assistant {
                     // reminder runs.
                     let sent = Arc::clone(&run.sent);
                     let reminder = run.work.is_reminder();
-                    let cpu_reminder = matches!(run.work, Work::Reminder { gpu: false, .. });
                     let generation = run.generation;
-                    if let Some(after) = run.reprime() {
+                    let cache_failed = self.cache_failed.load(std::sync::atomic::Ordering::SeqCst);
+                    // While the cache restores the prefix there is nothing to re-prime.
+                    if let Some(after) = run.reprime().filter(|_| cache_failed) {
                         *self
                             .reprime
                             .lock()
@@ -1041,7 +1050,7 @@ impl Assistant {
                         if pending.as_ref().is_some_and(|p| p.generation == generation) {
                             *pending = None;
                         }
-                    } else if cpu_reminder {
+                    } else if reminder && !cache_failed {
                         self.cache_check
                             .store(true, std::sync::atomic::Ordering::SeqCst);
                     }
@@ -1161,7 +1170,7 @@ impl Assistant {
                     request: draft.request,
                     reply_tokens: allowed.reply_tokens,
                     gpu: path == Path::Gpu,
-                    restore: Duration::from_secs_f64(allowed.restore.seconds.max(0.0)),
+                    reprime: allowed.reprime,
                 },
                 deadline: allowed.run,
                 busy: allowed.busy,
@@ -1313,10 +1322,11 @@ impl Assistant {
         self.breaker().record(run.ticket, outcome, now.into_std());
     }
 
-    /// After a CPU-path reminder, the first interpretation that reached the server must have read
-    /// at least 75 % of the prefix from the prompt cache (the calibration rule); otherwise the
-    /// host-RAM cache does not restore it and reminders are unavailable for the rest of the
-    /// generation, with the reason. An expiry or a transport or HTTP failure of that request
+    /// After a reminder, the first interpretation that reached the server must have read at
+    /// least 75 % of the prefix from the prompt cache (the calibration rule); otherwise the
+    /// host-RAM cache does not restore it: on the CPU path reminders are unavailable for the rest
+    /// of the generation, with the reason; on the GPU path they stay available and every later
+    /// reminder is followed by a re-prime. An expiry or a transport or HTTP failure of that request
     /// counts as a failed check, and so does a completion without the figure (unverified). A
     /// request that never reached the server (too long, tokenizer) settles nothing.
     fn check_restored_prefix(&self, run: &Run, result: Option<&Result<Answer, Attempt>>) {
@@ -1328,12 +1338,13 @@ impl Assistant {
             .cached
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prefix = match &*self.runtime() {
+        let (path, prefix, reprime) = match &*self.runtime() {
             Runtime::Ready {
                 generation,
+                path,
                 reminders: Reminders::Available(budgets),
                 ..
-            } if *generation == run.generation => budgets.prefix_tokens,
+            } if *generation == run.generation => (*path, budgets.prefix_tokens, budgets.reprime),
             _ => return,
         };
         let failed = match result {
@@ -1360,10 +1371,31 @@ impl Assistant {
         self.cache_check
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(why) = failed {
-            *self.cache_off() = Some(format!(
-                "the prompt cache did not restore the interpretation prefix after a reminder ({why})"
-            ));
-            self.changed.notify_waiters();
+            match path {
+                Path::Gpu => {
+                    self.cache_failed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    // Without a completed interpretation (no figure, an expiry, a failure) the
+                    // slot may be cold: re-prime once now, so the next one is not.
+                    if !matches!(result, Some(Ok(_))) || cached.is_none() {
+                        *self
+                            .reprime
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Reprime {
+                            generation: run.generation,
+                            interpreter: Arc::clone(&run.interpreter),
+                            wait: reprime,
+                        });
+                        self.wake.notify_one();
+                    }
+                }
+                Path::Cpu => {
+                    *self.cache_off() = Some(format!(
+                        "reminders are off for this generation: the prompt cache did not restore the interpretation prefix after a reminder ({why}); more threads or the GPU path could make them available"
+                    ));
+                    self.changed.notify_waiters();
+                }
+            }
         }
     }
 
@@ -1424,6 +1456,13 @@ impl Assistant {
             .map_or(Duration::ZERO, |until| {
                 until.saturating_duration_since(Instant::now())
             })
+    }
+
+    /// Makes the GPU path fall back to re-priming, as a failed cache check does (tests).
+    #[cfg(test)]
+    pub(crate) fn fail_cache_for_tests(&self) {
+        self.cache_failed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Whether a re-prime is pending (tests).
@@ -1647,7 +1686,7 @@ enum Work {
         reply_tokens: u32,
         /// The GPU path re-primes the interpretation prefix after the reminder.
         gpu: bool,
-        restore: Duration,
+        reprime: Duration,
     },
 }
 
@@ -1681,11 +1720,11 @@ impl Run {
     fn reprime(&self) -> Option<Reprime> {
         match self.work {
             Work::Reminder {
-                gpu: true, restore, ..
+                gpu: true, reprime, ..
             } => Some(Reprime {
                 generation: self.generation,
                 interpreter: Arc::clone(&self.interpreter),
-                wait: restore,
+                wait: reprime,
             }),
             _ => None,
         }

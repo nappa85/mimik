@@ -31,31 +31,85 @@ use tokio::sync::watch;
 
 /// `--ctx-size` (plan §1.4a, "Flag vector"; measurement-relevant).
 pub(crate) const CTX_SIZE: u32 = 8192;
-/// The measured size of one prompt-cache entry per token, in KiB (Granite 4.2 3B, 3c-0:
-/// 145.8-150 MiB for 1,855-1,915 tokens, as large as the KV cache).
-const ENTRY_KIB_PER_TOKEN: u64 = 80;
-/// The model file's bytes per KiB of entry per token (Granite 4.2 3B: about 2.0 GB for 80 KiB),
-/// the bound for a model whose layers are not known: bigger files get bigger entries.
-const FILE_BYTES_PER_ENTRY_KIB: u64 = 24_000 * 1024;
+/// `--ctx-checkpoints`: the most context checkpoints the server keeps per slot (and so per
+/// cache entry). 4 is one slack checkpoint over the 3 per prompt that b12110 made in 3c-0. b12110 takes the user-message boundary checkpoint that restores the
+/// interpretation prefix after a reminder along with others (n-516 and n-4 of the prompt); the
+/// cap bounds a slot's and an entry's recurrent-state copies at `1 + CHECKPOINT_CAP`. That the
+/// boundary checkpoint survives this cap is pending a GPU re-measurement
+/// (`docs/assisted-sheet-plan.md`, 3c-1b).
+pub(crate) const CHECKPOINT_CAP: u32 = 4;
 
-/// The bound of one prompt-cache entry's size per token, in KiB, for a model file of
-/// `model_size` bytes (0: unknown, the measured minimum).
-pub(crate) fn entry_kib_per_token(model_size: u64) -> u64 {
-    (model_size / FILE_BYTES_PER_ENTRY_KIB).max(ENTRY_KIB_PER_TOKEN)
+/// What one prompt-cache entry costs for a model: the KV part per token and one recurrent-state
+/// copy (the live state and each checkpoint), both in KiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EntrySize {
+    pub kv_kib_per_token: u64,
+    pub state_kib: u64,
 }
 
-/// `--cache-ram` in MiB on the CPU path (plan 3c-0): room for two entries of a whole context
-/// (the interpretation's and a reminder's, each prompt plus reply at most the context), at
-/// the entry size per token bounded from the model file's size. Reuse after a reminder needs
-/// both entries to fit (one entry thrashes). b12110 bounds the SUM of the entries' tokens by the
-/// context size but raises that to this memory limit over the entries' average bytes per token
-/// (`docs/results.md`), so two contexts fit only while [`entry_kib_per_token`] is at or above the
-/// model's real per-token entry size; a model beyond that bound evicts the interpretation entry,
+/// Granite 4.2 3B (3c-0: 145.8-150 MiB for 1,855-1,915 tokens, as large as the KV cache, no
+/// recurrent state): measured.
+const GRANITE: EntrySize = EntrySize {
+    kv_kib_per_token: 80,
+    state_kib: 0,
+};
+/// Qwen3.5-9B (3c-0, GPU: 32 KiB of KV per token, 8 attention layers; 50.25 MiB per recurrent
+/// state, live and each checkpoint): measured.
+const QWEN: EntrySize = EntrySize {
+    kv_kib_per_token: 32,
+    state_kib: 51_456,
+};
+/// The model file's bytes per KiB of KV entry per token (Granite 4.2 3B: about 2.0 GB for 80
+/// KiB), the bound for a model whose layers are not known: bigger files get bigger entries.
+const FILE_BYTES_PER_ENTRY_KIB: u64 = 24_000 * 1024;
+/// The fallback's recurrent state per file byte: one state is taken as 1/64 of the file (Qwen3.5-9B
+/// measured 1/110: 50.25 MiB in 5.4 GiB), so a hybrid model is not undersized, and a pure
+/// attention model is oversized, never undersized.
+const FILE_BYTES_PER_STATE_BYTE: u64 = 64;
+
+/// The entry size for the model file with `sha256` and `model_size` bytes (0: unknown). The two
+/// shipped default files, recognised by their pinned SHA-256, use measured constants; any other
+/// file is unmeasured and gets the conservative bound above (there is no GGUF parser).
+pub(crate) fn entry_size(sha256: &str, model_size: u64) -> EntrySize {
+    use crate::assistant::model::{DEFAULT_MODEL_SHA256, GPU_DEFAULT_MODEL_SHA256};
+    if sha256.eq_ignore_ascii_case(DEFAULT_MODEL_SHA256) {
+        GRANITE
+    } else if sha256.eq_ignore_ascii_case(GPU_DEFAULT_MODEL_SHA256) {
+        QWEN
+    } else {
+        EntrySize {
+            kv_kib_per_token: (model_size / FILE_BYTES_PER_ENTRY_KIB).max(GRANITE.kv_kib_per_token),
+            state_kib: model_size / FILE_BYTES_PER_STATE_BYTE / 1024,
+        }
+    }
+}
+
+/// The recurrent-state copies of one slot or entry, in KiB: the live state and the checkpoints.
+fn states_kib(size: EntrySize) -> u64 {
+    (1 + u64::from(CHECKPOINT_CAP)) * size.state_kib
+}
+
+/// One cache entry's size in MiB for a prefix of `tokens` tokens.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "KiB counts far below 2^52, exact in f64"
+)]
+pub(crate) fn entry_mib(sha256: &str, model_size: u64, tokens: f64) -> f64 {
+    let size = entry_size(sha256, model_size);
+    (tokens * size.kv_kib_per_token as f64 + states_kib(size) as f64) / 1024.0
+}
+
+/// `--cache-ram` in MiB on both paths (plan 3c-0, 3c-1b): room for two entries, the
+/// interpretation's and a reminder's, each `ctx x KV per token + (1 + cap) x state`. Reuse after
+/// a reminder needs both entries to fit (one entry thrashes). b12110 bounds the SUM of the
+/// entries' tokens by the context size but raises that to this memory limit over the entries'
+/// average bytes per token (`docs/results.md`), so two contexts fit only while [`entry_size`]
+/// is at or above the model's real size; a model beyond that evicts the interpretation entry,
 /// which the run-time check of the first interpretation after a reminder catches.
-pub(crate) fn cache_ram_mib(ctx_size: u32, model_size: u64) -> u32 {
-    let kib = entry_kib_per_token(model_size);
-    let mib = (2 * u64::from(ctx_size) * kib).div_ceil(1024);
-    u32::try_from(mib).unwrap_or(u32::MAX)
+pub(crate) fn cache_ram_mib(ctx_size: u32, sha256: &str, model_size: u64) -> u32 {
+    let size = entry_size(sha256, model_size);
+    let kib = 2 * (u64::from(ctx_size) * size.kv_kib_per_token + states_kib(size));
+    u32::try_from(kib.div_ceil(1024)).unwrap_or(u32::MAX)
 }
 
 /// How long the runner may take to report the sandbox's PID.
@@ -732,35 +786,46 @@ impl Real {
             ]
             .map(String::from),
         );
-        // The CPU path keeps two prompts' caches in host RAM (plan 3c-0, choice (c)); the GPU
-        // path has none until its restore is measured (it re-primes instead, choice (a)).
-        let cache = if device.is_some() {
-            0
-        } else {
-            cache_ram_mib(
-                self.settings.ctx_size,
-                self.model_size.load(Ordering::Relaxed),
-            )
-        };
-        args.extend(["--cache-ram".into(), cache.to_string()]);
+        // Both paths keep two prompts' caches in host RAM (plan 3c-0 and 3c-1b), with a cap on
+        // the checkpoints that sizes them.
+        let cache = cache_ram_mib(
+            self.settings.ctx_size,
+            &self.chosen().sha256,
+            self.model_size.load(Ordering::Relaxed),
+        );
+        args.extend([
+            "--cache-ram".into(),
+            cache.to_string(),
+            "--ctx-checkpoints".into(),
+            CHECKPOINT_CAP.to_string(),
+        ]);
         args
     }
 }
 
-/// The model and, on the CPU path, its prompt cache (up to its bound) must fit in the memory
-/// available, less [`MEMORY_MARGIN`].
-fn enough_memory(path: Path, ctx_size: u32, size: u64) -> Result<(), String> {
-    let cache = if path == Path::Cpu {
-        u64::from(cache_ram_mib(ctx_size, size)) << 20
-    } else {
-        0
-    };
-    let need = size.saturating_add(cache);
-    match mem_available() {
+/// The model, its prompt cache (up to its bound) and the slot's own checkpoints (the live
+/// state and the cap's worth of copies) must fit in the memory available, less
+/// [`MEMORY_MARGIN`], on both paths (the cache and the checkpoints live in host RAM).
+fn enough_memory(ctx_size: u32, sha256: &str, size: u64) -> Result<(), String> {
+    enough_memory_with(mem_available(), ctx_size, sha256, size)
+}
+
+/// [`enough_memory`] for a given `available` memory (`None`: unknown, no refusal).
+fn enough_memory_with(
+    available: Option<u64>,
+    ctx_size: u32,
+    sha256: &str,
+    size: u64,
+) -> Result<(), String> {
+    let cache = u64::from(cache_ram_mib(ctx_size, sha256, size)) << 20;
+    let slot = states_kib(entry_size(sha256, size)) << 10;
+    let need = size.saturating_add(cache).saturating_add(slot);
+    match available {
         Some(available) if need > available.saturating_sub(MEMORY_MARGIN) => Err(format!(
-            "not enough memory for this model ({} MiB, with {} MiB of prompt cache; {} MiB available)",
+            "not enough memory for this model ({} MiB, with {} MiB of prompt cache and {} MiB of slot checkpoints; {} MiB available)",
             size >> 20,
             cache >> 20,
+            slot >> 20,
             available >> 20
         )),
         _ => Ok(()),
@@ -2726,7 +2791,7 @@ impl Launcher for Launch {
             .map_err(|refusal| format!("the model: {refusal}"))?;
         let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
         real.set_model_size(size);
-        enough_memory(path, real.settings.ctx_size, size)?;
+        enough_memory(real.settings.ctx_size, &real.chosen().sha256, size)?;
         Ok(())
     }
 
@@ -3652,6 +3717,10 @@ mod tests;
 #[cfg(test)]
 #[path = "live_tests.rs"]
 mod live_tests;
+
+#[cfg(test)]
+#[path = "live_cache_tests.rs"]
+mod live_cache_tests;
 
 #[cfg(test)]
 #[path = "launch_gpu_tests.rs"]
