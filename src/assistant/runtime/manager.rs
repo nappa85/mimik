@@ -34,7 +34,9 @@ use super::progress::{Kind, Memory, Observer, Phase, Progress, Qualifier, Report
 use super::reminder_plan;
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
-use crate::assistant::jobs::{Assistant, Budgets, EndReason, Reminders, RuntimeEvent, Signal};
+use crate::assistant::jobs::{
+    Assistant, Budgets, EndReason, Prepared, Reminders, RuntimeEvent, Signal,
+};
 use crate::assistant::model::{GPU_DEFAULT_MODEL_SHA256, reply_length};
 use crate::assistant::records::{Record, Records};
 use async_trait::async_trait;
@@ -197,6 +199,9 @@ pub(crate) struct Status {
     pub landlock: Option<super::hako::Landlock>,
     /// A Restart is being carried out.
     pub restarting: bool,
+    /// The start does not prime the reminder prompt (CPU path, stored choice not on), as the
+    /// manager last saw it.
+    prime_idle: bool,
     /// The GPU path is wanted (`--assistant-device` is not `cpu`).
     pub gpu_wanted: bool,
     /// Why the GPU is not in use although it is wanted (shown with "Try the GPU again").
@@ -212,16 +217,32 @@ pub(crate) struct Status {
 }
 
 impl Status {
+    /// A CPU start whose stored reminder choice is not on does not prime the reminder prompt:
+    /// the step counts in neither the step number nor the total (plan 3c-1c), from the first
+    /// step on.
+    fn skip_idle_prime(&mut self, choice: Option<bool>) {
+        self.prime_idle = self.path == Path::Cpu && choice != Some(true);
+        if self.prime_idle
+            && let State::Starting(progress) = &mut self.state
+        {
+            progress.skip(Phase::PrimingReminders);
+        }
+    }
+
     /// A model server that is ready is being stopped for the owner's request: the page shows
     /// the stop at once, as the first step of the list the session then walks.
     fn stopping(&mut self) {
         if self.state == State::Ready {
-            self.state = State::Starting(Progress::new(
+            let mut progress = Progress::new(
                 Kind::Fresh { stopping: true },
                 Phase::Stopping,
                 None,
                 Vec::new(),
-            ));
+            );
+            if self.prime_idle {
+                progress.skip(Phase::PrimingReminders);
+            }
+            self.state = State::Starting(progress);
         }
     }
 
@@ -280,6 +301,7 @@ impl Status {
             notes: Vec::new(),
             landlock: None,
             restarting: false,
+            prime_idle: false,
         }
     }
 }
@@ -858,7 +880,9 @@ pub(crate) fn spawn_with(
     config: Config,
     models: ModelSetup,
 ) -> Handle {
-    let status = Arc::new(Mutex::new(Status::new(config.path, &models)));
+    let mut initial = Status::new(config.path, &models);
+    initial.skip_idle_prime(assistant.reminder_choice());
+    let status = Arc::new(Mutex::new(initial));
     let reporter = Reporter(Arc::clone(&status));
     let observer = reporter.clone();
     launcher.observe(Arc::new(move |event| observer.event(event)));
@@ -902,8 +926,14 @@ pub(crate) fn spawn_with(
 }
 
 /// How an attempt ended.
+/// What the reminder planning before Ready decided (plan 3c-1, 3c-1c).
+struct Planned {
+    reminders: Reminders,
+    prepared: Prepared,
+}
+
 enum Attempt {
-    Ready(Arc<dyn Child>, Box<Calibration>, Budgets),
+    Ready(Arc<dyn Child>, Box<Calibration>, Budgets, Box<Planned>),
     Failed(Fail),
     /// Too slow for the path's caps in a way the reply length does not change (a calibration
     /// sample timed out).
@@ -1027,12 +1057,33 @@ struct Manager {
 
 impl Manager {
     fn update(&self, change: impl FnOnce(&mut Status)) {
-        change(
-            &mut self
-                .status
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        change(&mut status);
+        // Whatever progress `change` made, it knows the path and the stored choice here.
+        status.skip_idle_prime(self.assistant.reminder_choice());
+    }
+
+    /// How long each step took is kept for the same file, path and kind next time (a failed
+    /// attempt's partial times never reach here).
+    fn keep_step_times(&mut self, path: Path) {
+        let finished = {
+            let status = self.status();
+            match &status.state {
+                State::Starting(progress)
+                    if matches!(progress.kind, Kind::Fresh { .. } | Kind::Retry) =>
+                {
+                    Some((progress.kind, progress.finished()))
+                }
+                _ => None,
+            }
+        };
+        if let Some((kind, steps)) = finished {
+            let sha256 = self.active.sha256.clone();
+            self.memory.keep(&sha256, path, kind, steps);
+        }
     }
 
     /// Waits for the owner, at most `timeout` when given.
@@ -1488,8 +1539,10 @@ impl Manager {
                 Err(next) => return PathEnd::Next(next),
             };
             match attempt {
-                Attempt::Ready(child, calibration, budgets) => {
-                    let ended = self.ready(generation, &child, *calibration, budgets).await;
+                Attempt::Ready(child, calibration, budgets, planned) => {
+                    let ended = self
+                        .ready(generation, &child, *calibration, budgets, *planned)
+                        .await;
                     child.stop().await;
                     if let Some(end) = self.after_ready(generation, ended, gpu) {
                         return end;
@@ -1750,44 +1803,41 @@ impl Manager {
             child.stop().await;
             return Attempt::Failed(Fail::Other("the runtime manager lost its owner".into()));
         };
-        match measured {
-            Ok((calibration, budgets)) => Attempt::Ready(child, Box::new(calibration), budgets),
+        let (calibration, budgets) = match measured {
+            Ok(measured) => measured,
             Err(outcome) => {
                 child.stop().await;
-                outcome
+                return outcome;
             }
-        }
-    }
-
-    /// What the generation's measurements allow for reminders (plan 3c-1), logged.
-    async fn plan_reminders(
-        &self,
-        child: &Arc<dyn Child>,
-        calibration: &Calibration,
-        max_tokens: u32,
-        path: Path,
-    ) -> Reminders {
-        // The `/tokenize` calls are a step of the start's live progress (plan 3c-1).
-        self.reporter
-            .phase_within(Phase::Reminders, reminder_plan::TOKENIZE_WITHIN);
-        let reminders = reminder_plan::plan(
-            child.server().as_ref(),
-            calibration,
-            max_tokens,
-            path,
-            (&self.active.sha256, self.active.size.unwrap_or(0)),
-        )
-        .await;
-        log(&match &reminders {
-            Reminders::Available(b) => format!(
-                "reminders: run {} s, busy {} s, restore {:.2} s",
-                b.run.as_secs(),
-                b.busy.as_secs(),
-                b.restore.seconds
-            ),
-            Reminders::Unavailable(why) => format!("reminders unavailable: {why}"),
-        });
-        reminders
+        };
+        // The reminder planning and its prime are interruptible like the measurement.
+        let planned = {
+            let plan = plan_reminders(
+                &child,
+                &calibration,
+                (budgets.max_tokens, path),
+                &self.reporter,
+                (&self.active.sha256, self.active.size.unwrap_or(0)),
+                self.assistant.reminder_choice(),
+            );
+            tokio::select! {
+                planned = plan => Some(planned),
+                fail = child.exited() => return Attempt::Failed(fail),
+                command = self.commands.recv() => match command {
+                    Some(command) => {
+                        self.mark_stopping();
+                        child.stop().await;
+                        return Attempt::Interrupted(command);
+                    }
+                    None => None,
+                },
+            }
+        };
+        let Some(planned) = planned else {
+            child.stop().await;
+            return Attempt::Failed(Fail::Other("the runtime manager lost its owner".into()));
+        };
+        Attempt::Ready(child, Box::new(calibration), budgets, Box::new(planned))
     }
 
     /// The ready phase: until the child exits, is stopped as hung, or the owner acts.
@@ -1797,6 +1847,7 @@ impl Manager {
         child: &Arc<dyn Child>,
         calibration: Calibration,
         budgets: Budgets,
+        planned: Planned,
     ) -> Ended {
         let interpreter = child.server().interpreter();
         let notes = child.notes();
@@ -1804,15 +1855,17 @@ impl Manager {
         // Signals from an earlier generation are stale.
         while self.signals.try_recv().is_ok() {}
         let path = self.status().path;
-        let reminders = self
-            .plan_reminders(child, &calibration, budgets.max_tokens, path)
-            .await;
+        let Planned {
+            reminders,
+            prepared,
+        } = planned;
         self.assistant.event(RuntimeEvent::Ready {
             generation,
             budgets,
             interpreter,
             path,
             reminders,
+            prepared,
         });
         let level = self.status().level.map_or(0, Level::number);
         log(&format!(
@@ -1823,23 +1876,7 @@ impl Manager {
             )),
             measured(&calibration, Some(&budgets))
         ));
-        // How long each step took is kept for the same file, path and kind next time (a
-        // failed attempt's partial times never reach here).
-        let finished = {
-            let status = self.status();
-            match &status.state {
-                State::Starting(progress)
-                    if matches!(progress.kind, Kind::Fresh { .. } | Kind::Retry) =>
-                {
-                    Some((progress.kind, progress.finished()))
-                }
-                _ => None,
-            }
-        };
-        if let Some((kind, steps)) = finished {
-            let sha256 = self.active.sha256.clone();
-            self.memory.keep(&sha256, path, kind, steps);
-        }
+        self.keep_step_times(path);
         // An owner command already waiting ends this generation at once: the state stays
         // as it is (the stop or the trial it shows) rather than flip to ready and back.
         let command_waiting = !self.commands.is_empty();
@@ -2109,6 +2146,68 @@ async fn measure(
             Err(Attempt::LengthLimit { why, too_large })
         }
         Err(NotCalibrated::Failed(why)) => Err(Attempt::Failed(Fail::Other(why))),
+    }
+}
+
+/// What the generation's measurements allow for reminders (plan 3c-1), then the prime of the
+/// reminder prompt (3c-1c, step 1): on the GPU path always, on the CPU path only when the
+/// owner's stored choice has reminders on at the start, else they are
+/// [`Reminders::NotPrepared`]. Logged.
+async fn plan_reminders(
+    child: &Arc<dyn Child>,
+    calibration: &Calibration,
+    (max_tokens, path): (u32, Path),
+    reporter: &Reporter,
+    model: (&str, u64),
+    choice: Option<bool>,
+) -> Planned {
+    // The `/tokenize` calls are a step of the start's live progress (plan 3c-1).
+    reporter.phase_within(Phase::Reminders, reminder_plan::TOKENIZE_WITHIN);
+    // A CPU start with reminders off does not prime the reminder prompt: that step counts in
+    // neither the step number nor the total from here on.
+    if path == Path::Cpu && choice != Some(true) {
+        reporter.skip(Phase::PrimingReminders);
+    }
+    let server = child.server();
+    let reminders =
+        reminder_plan::plan(server.as_ref(), calibration, max_tokens, path, model).await;
+    let mut prepared = Prepared::default();
+    let reminders = match reminders {
+        Reminders::Available(budgets) if path == Path::Gpu || choice == Some(true) => {
+            reporter.phase_within(Phase::PrimingReminders, budgets.run);
+            match reminder_plan::prime(server.interpreter().as_ref(), budgets.run).await {
+                Ok(()) => {
+                    prepared.primed = true;
+                    Reminders::Available(budgets)
+                }
+                Err(failure) => {
+                    if failure == reminder_plan::PrimeFailure::TimedOut {
+                        prepared.busy = budgets.run;
+                    }
+                    Reminders::Unavailable("the reminder prompt could not be prepared".to_owned())
+                }
+            }
+        }
+        Reminders::Available(_) => Reminders::NotPrepared,
+        other => {
+            reporter.skip(Phase::PrimingReminders);
+            other
+        }
+    };
+    log(&match &reminders {
+        Reminders::Available(b) => format!(
+            "reminders: run {} s, extra wait {} s verified, {} s until then, restore {:.2} s",
+            b.run.as_secs(),
+            b.busy_verified.as_secs(),
+            b.busy_unverified.as_secs(),
+            b.restore.seconds
+        ),
+        Reminders::NotPrepared => "reminders not prepared: off at the start".to_owned(),
+        Reminders::Unavailable(why) => format!("reminders unavailable: {why}"),
+    });
+    Planned {
+        reminders,
+        prepared,
     }
 }
 

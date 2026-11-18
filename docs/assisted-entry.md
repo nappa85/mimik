@@ -625,8 +625,9 @@ After a save that commits a decrease, the assistant may add a reminder: a hint, 
 a list row by name, and an optional change set of one to four changes. Never blocking, nothing
 stored beyond the job record; the owner switches reminders on or off on `/admin/assistant`
 (ASSIST-60: unset means on for the GPU path and off for the CPU path, and the page states the
-generation's path, the estimated reminder time and the worst extra wait of a scribble reading
-right after one).
+generation's path, the estimated reminder time and how much longer a scribble reading may wait
+while a reminder runs, as Q plus X seconds, or Q plus Y until a reminder has shown its prompt is
+cached; the length panel's worst wait includes Y while reminders are on).
 
 - **Trigger.** A save that commits, on a top-level integer field, a note of op `literal`,
   `sum`, `sign_literal`, `switched` or `confirmed` (never `reverted` or `reminded`) with a known
@@ -634,8 +635,9 @@ right after one).
   `<revision>:field:<id>`) on the qualifying unit (per-unit routes and the `units` of an apply);
   with reminders off, unavailable for the generation or not ready it carries none.
 - **Route.** `POST /private-sheets/{id}/reminders` with exactly `csrf` and `note`; 202 `{job,
-  poll}`, polled through the interpretation poll route. Off, unavailable (on the CPU path also for the rest of
-  a generation after the cache check below failed) or not ready: 404 after the parse and the CSRF
+  poll}`, polled through the interpretation poll route. Off, unavailable (on both paths also for the rest of
+  a generation after a cache check below failed; on the CPU path also for a generation started
+  with reminders off) or not ready: 404 after the parse and the CSRF
   check, before rights; the breaker not closed: 503 (transient, the module keeps trying on later
   decreases). The route re-derives the trigger from the stored
   note: the field's current note with that revision, an allowed op, `before` > `after`, the field
@@ -646,18 +648,24 @@ right after one).
   superseding the older; 32 records), outside the interpretations' one-live-job rule, repeat
   detection, D, Q and records. The worker takes a reminder only when no interpretation is
   queued, with the reminder's own run deadline; an admitted interpretation cancels a running
-  reminder, and admission counts the reminder's busy term (its whole prompt) while one runs; the
-  restore from the cache happens inside the next interpretation's request, within R's margin. A reminder never takes the half-open probe; its expiries and
+  reminder, and admission counts the reminder's busy term while one runs and while a dropped
+  one's prompt may still be evaluated: the whole prompt (Y) until a reminder of the generation has
+  completed with at least 75 % of its system message read from the cache, and again after a
+  cancelled one, else the verified term (X). Q does not bound a reminder: a scribble reading
+  admitted while a reminder's busy time is counted and reminders are effective gets an allowance
+  of Q plus that term, waits within it and expires against it (it keeps the allowance when
+  reminders are switched off later; without a reminder counted nothing changes). The restore from
+  the cache happens inside the next interpretation's request, within R's margin. A reminder never
+  takes the half-open probe; its expiries and
   cancellations are neutral and never feed the hung detector; HTTP and transport failures count,
   an invalid reply is nothing and counts for nothing, a completed exchange signals Completed. On
   both paths the server's host-RAM prompt cache restores the interpretation prefix, and the first
-  interpretation after a reminder must report at least 75 % of the prefix read from the cache
-  (`cached_tokens`); otherwise, on the CPU path, reminders are unavailable for the rest of the
-  generation, with the reason on the page, and on the GPU path they stay available and the worker
-  re-primes the prefix after every later started reminder before the next job (`busy_until` ends
-  when that request completes; installed when the reminder starts, dropped when it never reached
-  the server). While the cache works the GPU path has no re-prime. An unrelated expiry or failure of
-  that first interpretation counts as a failed check too. Generation changes and a note write on the field
+  interpretation after a reminder (or after the prime) must report at least 75 % of the prefix read
+  from the cache (`cached_tokens`); otherwise reminders are unavailable for the rest of the
+  generation, on both paths, with the reason on the page; there is no re-prime. A completed
+  reminder that read under 75 % of its own system message from the cache switches them off the
+  same way. An unrelated expiry or failure of that first interpretation counts as a failed check
+  too. Generation changes and a note write on the field
   end reminders silently. Options live 10 minutes.
 - **Context** (`campaigns::remind`, `assistant::reminder`). `{"decrease": {id, label, before,
   after, phrase}, "fields": [{id, label, type, value}], "rows": [{id: "r<n>", list, name}]}`:

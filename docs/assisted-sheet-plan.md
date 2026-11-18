@@ -644,18 +644,18 @@ counts the cache against `MemAvailable`, but no process memory figure was measur
 prompt kind live (a cancelled reminder mid-prompt then an interpretation, reminders of two
 accounts, calibration or a trial then a reminder then an interpretation; only the stub-level
 schedule is tested) and compare an interpretation's reply after a restore with a fresh one; the
-GPU part of 3c-0 (measure the re-prime against the host-RAM cache and decide; the GPU path stays
-on the re-prime until then, and Qwen3.5's linear-attention layers are unmeasured). Run time
+GPU part of 3c-0 (measured: the host-RAM cache restores the prefix on the GPU path; Qwen3.5's
+linear-attention layers were measured live in 3c-1b). Run time
 detection of a failed CPU restore is implemented but not exercised against a real server.
 
 ##### 3c-1b The prompt cache on the GPU path
 
 Landed (reference: `docs/model-runtime.md`, "Prompt cache and reminders"): `--cache-ram` per model
 on both paths with `--ctx-checkpoints 4`, the memory check counting the cache and the slot's
-checkpoints, the cache check after a reminder on both paths (a failed one switches reminders off
-on the CPU path and falls back to the re-prime on the GPU path), no re-prime while the cache
-works, and the GPU restore cost (0.53 ms per MiB of entry plus 10 ms) in the extra wait, the
-margin check and the page (the fallback re-prime counts in Q and the extra wait), with the `BeyondMargin` check on both paths.
+checkpoints, the cache check after a reminder on both paths (a failed one switches reminders off; the
+GPU re-prime fallback was dropped in 3c-1c), and the GPU restore cost (0.53 ms per MiB of entry
+plus 10 ms) in the extra wait, the margin check and the page, with the `BeyondMargin` check on
+both paths.
 
 Remaining:
 
@@ -664,95 +664,21 @@ Remaining:
   1,015 MiB cache + 251 MiB slot + 1 GiB margin).
 - The tool also writes the thermal guard's minimum and maximum into its JSON.
 
-##### 3c-1c Reminders that fit: the real cost, shown as an extra wait (owner decision C, 2026-11-18)
+##### 3c-1c Reminders that fit (owner decision C, 2026-11-18)
 
-Why: on the dev host reminders are unavailable on both paths (`docs/results.md`, 3c-1b GPU
-entry). The `BeyondQueue` rule lets a reminder cost at most Q - D x R (6 s on the GPU), and it
-counts the reminder's whole prompt (about 16 s on the GPU) plus the GPU fallback re-prime (10.5
-s), while a reminder whose system message is cached costs about 1 s. The owner chose both: count
-the real cost (A) and let a reminder lengthen a scribble reading's wait by that cost, shown on
-the page (B). Plan reviewed (fresh Opus, 2026-11-18: rework; B1, M1-M4 and the minors are
-folded in below; re-review: approve with changes, folded in).
+Landed (reference: `docs/model-runtime.md`, "Prompt cache and reminders"; `docs/decisions.md`):
+the reminder prompt is primed before Ready (GPU always, CPU when on at the start), a reminder
+counts its whole prompt until a completed one shows its system message cached and its variable
+part afterwards, a scribble reading admitted behind a reminder may wait Q plus that term, and a
+failed cache check switches reminders off on both paths (the GPU re-prime is gone).
 
-1. **Prime the reminder prefix before Ready, after the samples.** Calibration and trials stay as
-   they are (no budget depends on the reminder setting). In the reminder planning step
-   (`manager.rs`, where `reminder_plan::plan` runs), before Ready: one reminder request through
-   the same request builder as real reminders (`Interpreter::complete`, `RequestKind::Reminder`,
-   a fixed synthetic envelope with no sheet data, `max_tokens` 1, its own timeout of the
-   reminder's run deadline), so the template start and system message match token for token.
-   It runs on the GPU path always, and on the CPU path only when reminders are on at the start
-   (the stored choice, passed to the manager before it starts: no race with
-   `set_reminder_choice`). Order: `/tokenize`, derive the reminder budgets, then the prime; when
-   the derive gives Unavailable there is no prime. Its own progress step; start-up step times are kept apart for starts
-   with and without it. A failure or timeout leaves the generation Ready with reminders
-   unavailable ("the reminder prompt could not be prepared"); after a timeout the server is
-   presumed busy for the prime's bound (`--parallel 1` keeps evaluating): the Ready transition
-   carries that time and `Assistant` sets its `busy_until` from it for this generation, so the
-   first admission counts it. After the prime, arm
-   the existing interpretation cache check, so the first interpretation verifies the
-   interpretation entry's restore (a miss switches reminders off, as today).
-2. **Not prepared.** A CPU generation started with reminders off gets `Reminders::NotPrepared`:
-   admission, the remind route, `unit_web` and `interpret_web` treat it as off, and the page
-   says "turned on after the start: Restart to prepare them". Turning reminders off still takes
-   effect at once.
-3. **Count the real cost, conservatively until verified.** Two busy terms per generation:
-   - unverified: the whole reminder prompt, `p x (system + N(B))` plus the restore (as today);
-   - verified: `restore(reminder entry) + p x (N(B) + TEMPLATE_MARGIN_TOKENS)`, the variable
-     part and the user turn's template tail.
-   The unverified term applies until a reminder of this generation has completed with
-   `cached_tokens` at least 75 % of the reminder system tokens, and again after any cancelled
-   reminder until a later one completes and verifies (a cancelled reminder shows no figure, so
-   an entry evicted after verification is never assumed cached). The restore of the interpretation entry after a reminder stays counted in X too (on
-   purpose, conservative: it also falls in the next interpretation's run, under
-   `BeyondMargin`). Entry sizes count the whole saved entry: the reminder's from system + N(B) +
-   reply bound, the interpretation's from prefix + N(B) + `max_tokens` (`entry_mib`). The
-   run deadline keeps the whole prompt.
-4. **Reminder self-check.** A completed reminder with fewer than 75 % of the reminder system
-   tokens cached (or no figure) switches reminders off for the generation with the reason on
-   the page. It must not clear the armed interpretation check; if both fail, the first reason
-   is kept in `cache_off`. `attempt_reminder` records `cached_tokens` for this.
-5. **Drop the GPU re-prime fallback.** On both paths a failed cache check switches reminders off
-   (the CPU behaviour). `Reprime`, `cache_failed`, the pending re-prime in admission,
-   `Interpreter::reprime`, the GPU `reprime` budget and their tests go (also settles the 3c-1b
-   minor about the needless re-prime and REMIND-REPRIME). After a failed check whose
-   interpretation expired, the next interpretation evaluates the whole prefix (GPU about 10.5 s,
-   within R's margin; CPU outside it, as today): state it in `docs/limitations.md`.
-6. **Per-job wait allowance.** `BeyondQueue` goes. At admission each scribble reading gets an
-   allowance: Q, or Q + the reminder busy term counted at that moment when admission counted a
-   reminder's busy time (a reminder running, or `reminder_busy` in the future, `jobs.rs`
-   `admissible`). Admission compares the worst wait against that allowance; `next()` expires
-   each job against its own allowance (no global `budgets.queue_wait` there). A job keeps its
-   allowance if reminders are later switched off. Without a reminder counted, nothing changes.
-   Gate on `reminders_effective()` (setting on, `cache_off` empty, Available). The remaining
-   availability rules stay: context fit, the 600 s ceiling, the restore within the run
-   deadline's margin, and `WorseThanInterpretation` checked against the unverified busy term.
-7. **Page.** The Reminders panel states: about how long a reminder takes; "a scribble reading may
-   wait up to X s longer while a reminder runs (Y s until a reminder has shown its prompt is
-   cached)", with Q + X and Q + Y in all, for this generation and path; the first-miss rule. The
-   length panel's worst wait includes Y when reminders are effective. Remove the re-prime text.
-8. **Tests** (each failing before the change where it is a behaviour change): budgets from
-   samples that reproduce the current R (with the slowdown factor) and the stated
-   `REMINDER_PREFIX` token count: the dev host's GPU (p 5.17 ms, N(B) 1,128, D 1) gives reminders
-   available with verified X at most 7 s and the unverified Y (about 13-16 s) within
-   `WorseThanInterpretation`; the CPU (p about 40-43 ms, N(B) 280) gives them available with Y
-   about 68 s; a reading admitted behind a reminder at the boundary (X + R + busy = Q + X) is
-   neither refused nor expired, and a reading admitted with no reminder keeps Q; the unverified
-   term applies before the first verifying reminder and after a cancelled one; a low or missing
-   reminder `cached_tokens` switches reminders off without clearing the interpretation check; a
-   failed check on the GPU switches them off (no re-prime); the prime's failure or timeout
-   leaves the generation Ready with reminders off and the server presumed busy; a CPU start with
-   reminders off gives `NotPrepared` and the restart note, turning off is immediate.
-9. **Docs:** `docs/model-runtime.md` ("Prompt cache and reminders"), `docs/assisted-entry.md`
-   (reminders' timing), `docs/decisions.md` (a line for C beside ASSIST-60),
-   `docs/limitations.md` (remove REMIND-REPRIME, update REMIND-RESTORE, add: an evicted reminder
-   entry after verification makes the next completed reminder cost its whole prompt before it
-   switches reminders off; a reading queued behind it may wait past its allowance once), `TODO.md`.
-10. **Live** (GPU outside the weekday window with the fan on manual; CPU at 2 threads allowed in
-   the window): `calibrate` on both paths shows reminders available; the cache tool with a
-   sequence of priming, samples, three or more interpretations with long replies, then a
-   reminder (its `cache_n` covers the system message; 3c-0 and 3c-1b saw the cache hold one
-   entry at a time, loading takes an entry out, so eviction is not expected); the
-   `assist_model_browser.py` reminder scenario on the GPU.
+Remaining (live; GPU outside the weekday window with the fan on manual, CPU at 2 threads allowed
+in the window):
+
+- `calibrate` on both paths shows reminders available with the extra wait.
+- The cache tool with priming, samples, three or more interpretations with long replies, then a
+  reminder: its `cache_n` covers the system message.
+- `assist_model_browser.py` reminder scenario on the GPU.
 
 ##### 3c-2 Catalogue entry text and provenance (GPU path)
 

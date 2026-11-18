@@ -36,6 +36,17 @@ pub(crate) struct Behaviour {
     pub(crate) prime_delay: Duration,
     /// How long each `/tokenize` call takes.
     pub(crate) tokenize_delay: Duration,
+    /// How the reminder prime (a reminder request through the interpreter) goes.
+    pub(crate) reminder_prime: Prime,
+}
+
+/// How a fake server answers the reminder prime.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Prime {
+    Answers,
+    Fails,
+    /// Takes far longer than any run deadline.
+    Hangs,
 }
 
 /// What a fake server gets wrong.
@@ -70,6 +81,7 @@ impl Default for Behaviour {
             prefix_tokens: 1460.0,
             prime_delay: Duration::ZERO,
             tokenize_delay: Duration::ZERO,
+            reminder_prime: Prime::Answers,
         }
     }
 }
@@ -482,13 +494,38 @@ impl Launcher for FakeLauncher {
             Start::Other(why) => return Err(Fail::Other(why.into())),
         };
         self.alive.fetch_add(1, Ordering::SeqCst);
+        let interpreter = StubInterpreter::default();
+        match behaviour.reminder_prime {
+            Prime::Answers => interpreter
+                .answers
+                .lock()
+                .unwrap()
+                .push_back(Ok("{}".into())),
+            Prime::Fails => interpreter
+                .answers
+                .lock()
+                .unwrap()
+                .push_back(Err(Failure::Status(500))),
+            Prime::Hangs => {
+                interpreter
+                    .answers
+                    .lock()
+                    .unwrap()
+                    .push_back(Ok("{}".into()));
+                interpreter
+                    .delays
+                    .lock()
+                    .unwrap()
+                    .push_back(Duration::from_secs(100_000));
+            }
+        }
         let child = Arc::new(FakeChild {
             server: Arc::new(FakeServer {
                 behaviour,
                 phrases: AtomicUsize::new(0),
                 health_calls: AtomicUsize::new(0),
                 primed: Arc::clone(&self.primed),
-                interpreter: Arc::new(StubInterpreter::default()),
+                interpreter: Arc::new(interpreter),
             }),
             exit: watch::channel(None).0,
             stopped: AtomicBool::new(false),
@@ -1508,4 +1545,120 @@ async fn the_preflight_is_for_the_path_that_starts_and_the_fallback_checks_the_c
         [Path::Gpu, Path::Cpu]
     );
     drop(assistant);
+}
+
+// --- The reminder prime before Ready (plan 3c-1c, step 1) ------------------------------------
+
+/// The reminder requests the fake server's interpreter got (system message kind, `max_tokens`).
+fn reminder_requests(launcher: &Arc<FakeLauncher>) -> Vec<(bool, u32)> {
+    let child = Arc::clone(&launcher.children.lock().unwrap()[0]);
+    let requests = child.server.interpreter.requests.lock().unwrap();
+    requests
+        .iter()
+        .map(|request| {
+            (
+                matches!(
+                    request.kind,
+                    crate::assistant::interpreter::RequestKind::Reminder { .. }
+                ),
+                request.max_tokens,
+            )
+        })
+        .collect()
+}
+
+/// A manager over `launcher` for `path` whose assistant has the stored reminder choice `choice`
+/// from the start.
+fn manager_with_choice(
+    launcher: &Arc<FakeLauncher>,
+    path: Path,
+    choice: Option<bool>,
+) -> (Arc<Assistant>, Handle) {
+    let assistant = Assistant::new();
+    assistant.set_reminder_choice(choice);
+    let handle = spawn(
+        Arc::clone(&assistant),
+        Arc::clone(launcher) as Arc<dyn Launcher>,
+        Config {
+            path,
+            levels: USED_LEVELS,
+        },
+    );
+    (assistant, handle)
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_gpu_path_always_primes_the_reminder_prompt_and_the_cpu_path_only_with_reminders_on() {
+    for (path, choice, primes) in [
+        (Path::Cpu, Some(true), true),
+        (Path::Cpu, Some(false), false),
+        (Path::Cpu, None, false),
+        (Path::Gpu, Some(false), true),
+        (Path::Gpu, None, true),
+    ] {
+        let launcher = FakeLauncher::scripted([]);
+        *launcher.device.lock().unwrap() = Some(rx6650());
+        let (assistant, handle) = manager_with_choice(&launcher, path, choice);
+        ready(&assistant).await;
+        let requests = reminder_requests(&launcher);
+        if primes {
+            // One reminder request with one token, before Ready.
+            assert_eq!(requests, [(true, 1)], "{path:?} {choice:?}");
+            assert!(matches!(
+                assistant.reminder_generation(),
+                Some((_, Reminders::Available(_)))
+            ));
+            assert!(assistant.cache_check_armed_for_tests());
+        } else {
+            assert!(requests.is_empty(), "{path:?} {choice:?}: {requests:?}");
+            // Not prepared: off whatever the setting says now, until a Restart.
+            assert!(matches!(
+                assistant.reminder_generation(),
+                Some((Path::Cpu, Reminders::NotPrepared))
+            ));
+            assistant.set_reminder_choice(Some(true));
+            assert!(!assistant.reminders_effective());
+            assert!(!assistant.cache_check_armed_for_tests());
+        }
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_reminder_prime_leaves_the_generation_ready_with_reminders_unavailable() {
+    let launcher = FakeLauncher::scripted([Start::Ok(Behaviour {
+        reminder_prime: Prime::Fails,
+        ..Behaviour::default()
+    })]);
+    let (assistant, handle) = manager_with_choice(&launcher, Path::Cpu, Some(true));
+    ready(&assistant).await;
+    let Some((_, Reminders::Unavailable(why))) = assistant.reminder_generation() else {
+        panic!("{:?}", assistant.reminder_generation())
+    };
+    assert!(why.contains("could not be prepared"), "{why}");
+    assert!(!assistant.reminders_effective());
+    // A failure is not a busy server, and no cache check is armed.
+    assert_eq!(assistant.busy_for_tests(), Duration::ZERO);
+    assert!(!assistant.cache_check_armed_for_tests());
+    assert_eq!(handle.status().state, State::Ready);
+    handle.shutdown().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reminder_prime_that_times_out_presumes_the_server_busy_for_its_bound() {
+    let launcher = FakeLauncher::scripted([Start::Ok(Behaviour {
+        reminder_prime: Prime::Hangs,
+        ..Behaviour::default()
+    })]);
+    let (assistant, handle) = manager_with_choice(&launcher, Path::Cpu, Some(true));
+    ready(&assistant).await;
+    let Some((_, Reminders::Unavailable(why))) = assistant.reminder_generation() else {
+        panic!("{:?}", assistant.reminder_generation())
+    };
+    assert!(why.contains("could not be prepared"), "{why}");
+    // The bound is the reminder's run deadline, counted from Ready (a little of it passed).
+    let busy = assistant.busy_for_tests();
+    assert!(busy > Duration::from_secs(10), "{busy:?}");
+    assert_eq!(handle.status().state, State::Ready);
+    handle.shutdown().await;
 }

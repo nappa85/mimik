@@ -593,29 +593,61 @@ token and 50.25 MiB per state. Any other file is unmeasured (there is no GGUF pa
 conservative bound: 80 KiB per token at least, more for a bigger file (file size / 24,000 KiB), and a
 state of 1/64 of the file size. The start's memory check counts the cache and the slot's own
 checkpoints ((1 + cap) states) beside the model, on both paths. That the user-boundary checkpoint
-that restores the prefix survives the cap of 4 is not yet measured on the GPU (pending). Priming's
-`prompt_n` and `prompt_ms` are kept in `Calibration::primed`. At Ready, `reminder_plan::plan`
-tokenizes the reminder system message and the largest valid reminder reply (outside the breaker)
-and `reminder_budgets::derive` gives the reminder's own run deadline, busy term and extra wait, or
-the reason reminders are off for the generation, with what helps on the CPU path (more threads, the
-GPU path): prompt and reply not fitting the context, deadline over the 600 s ceiling, busy term plus
-restore plus R for the readings that may wait ahead (one on the CPU path, D on the GPU path) over
-Q, the busy term plus restore over R plus an interpretation's busy term, or restore beyond R's
-margin (both paths). b12110's cache token limit bounds the sum of all entries but is raised to the
+that restores the prefix survives the cap of 4 was measured on the GPU (`docs/results.md`, 3c-1b).
+Priming's `prompt_n` and `prompt_ms` are kept in `Calibration::primed`. At Ready,
+`reminder_plan::plan` tokenizes the reminder system message and the largest valid reminder reply
+(outside the breaker) and `reminder_budgets::derive` gives the reminder's own run deadline and its
+two busy terms, or the reason reminders are off for the generation, with what helps on the CPU path
+(more threads, the GPU path): prompt and reply not fitting the context, deadline over the 600 s
+ceiling, the unverified busy term over R plus an interpretation's busy term, or restore beyond R's
+margin (both paths). The queue wait Q does not bound a reminder: its cost is an extra wait (below).
+The busy terms are the extra wait X that a scribble reading admitted behind a running or dropped
+reminder may have beyond Q, in whole seconds. Unverified (Y): the whole reminder prompt,
+`p x (system message + N(B))`, plus restoring the interpretation's entry. Verified (X): restoring
+the reminder's entry, the variable part and the user turn's template tail,
+`p x (N(B) + TEMPLATE_MARGIN_TOKENS)`, plus the interpretation's restore (the restore of the
+interpretation entry stays counted in X on purpose: it also falls in the next interpretation's run,
+under the margin check). Y applies until a reminder of the generation has completed with at least
+75 % of the reminder system tokens read from the cache (`Completed::cached_tokens`), and again after
+any reminder cancelled after reaching the server or ending without a figure, until a later one
+completes and verifies. Entry sizes count the whole saved entry: the interpretation's from prefix,
+N(B) and `max_tokens`, the reminder's from system message, N(B) and the reply bound
+(`launch::entry_mib`). b12110's cache token limit bounds the sum of all entries but is raised to the
 memory limit divided by the average bytes per token (`docs/results.md`), so two whole contexts fit
 while the size bound is at or above the model's real one. The restore cost is the development
 host's measurement scaled by the entry's size (not measured on the running host): CPU
-`RESTORE_S_PER_MIB`, GPU 0.53 ms per MiB of entry plus 10 ms; the GPU re-prime's measured time is
-only the fallback's. After a reminder that reached the server the first interpretation must report at
-least 75 % of the prefix read from the cache. A failed check (too little, no figure, or that
-request expiring or failing, whatever the cause) switches reminders off for the rest of the
-generation on the CPU path, and a reminder already queued then does not run; on the GPU path
-reminders stay available and the worker re-primes the interpretation prefix after every later
-started reminder (`Interpreter::reprime`, one token of the priming request; the server counts as
-busy until it completes) for the rest of the generation. While the cache works there is no re-prime. The
-cached-token figure is `Completed::cached_tokens`, the stream's usage, which llama.cpp fills from
-the same count as `timings.cache_n`. `/tokenize` of the reminder prompt is the last step of a
-start's live progress ("measuring the reminder prompt", outside the breaker). Scheduling is in
+`RESTORE_S_PER_MIB`, GPU 0.53 ms per MiB of entry plus 10 ms.
+
+**Reminder prime.** After the samples and the `/tokenize` step, a generation primes the reminder
+prefix before Ready (`reminder_plan::prime`, its own progress step "preparing the reminder
+prompt"): one reminder request through the same client path as real reminders
+(`Interpreter::complete`, `RequestKind::Reminder`, a fixed synthetic envelope with no sheet data,
+`max_tokens` 1), bounded by the reminder's run deadline, so the template start and the system
+message match token for token. It runs on the GPU path always and on the CPU path only when the
+owner's stored choice has reminders on at the start (the choice reaches the manager before it
+starts; the development endpoint reads it after, so there an unset choice at the first start counts
+as off). A CPU generation started with reminders off is `Reminders::NotPrepared`: the page says
+"Restart to prepare them", and reminders count as off whatever the setting says until the next
+start; turning them off takes effect at once. A failed or timed-out prime leaves the generation
+Ready with reminders unavailable ("the reminder prompt could not be prepared"); after a timeout the
+server is presumed busy for the bound (`--parallel 1` keeps evaluating), carried by the Ready event
+into `busy_until` so the first admission counts it. After a prime the interpretation cache check is
+armed, so the first interpretation verifies the interpretation entry's restore.
+
+**Checks at run time.** After a reminder that reached the server (or the prime) the first
+interpretation must report at least 75 % of the prefix read from the cache. A failed check (too
+little, no figure, or that request expiring or failing, whatever the cause) switches reminders off
+for the rest of the generation on both paths, with the reason, and a reminder already queued then
+does not run; there is no re-prime fallback. A completed reminder with fewer than 75 % of the
+reminder system tokens cached (or no figure) switches reminders off the same way without clearing
+an armed interpretation check; when both fail the first reason is kept. The cached-token figure is
+`Completed::cached_tokens`, the stream's usage, which llama.cpp fills from the same count as
+`timings.cache_n`. `/tokenize` of the reminder prompt and the prime are the last steps of a
+start's live progress (outside the breaker). Admission gives each scribble reading an allowance
+of Q, or of Q and the reminder busy term counted at that moment (a reminder running, or its dropped
+prompt still presumed busy) when reminders are effective; the job keeps its allowance and expires
+against it, and the first job queued behind a reminder's busy time does not count toward D.
+Scheduling is in
 [assisted-entry.md](assisted-entry.md#reminders).
 
 ## Owner model setting

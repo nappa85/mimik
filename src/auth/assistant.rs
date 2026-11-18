@@ -357,13 +357,14 @@ fn per_token(status: &Status) -> Option<String> {
     slowest.is_finite().then(|| format!("{slowest:.1} ms"))
 }
 
-fn length_view(status: &Status) -> LengthView {
+fn length_view(status: &Status, extra_wait_s: u64) -> LengthView {
     use crate::assistant::model::reply_length;
     let run = status.budgets.as_ref().map(|b| b.run.as_secs());
+    // With reminders effective a reading may wait the reminder's extra wait too (Y).
     let worst = status
         .budgets
         .as_ref()
-        .map(|b| (b.queue_wait + b.run).as_secs());
+        .map(|b| (b.queue_wait + b.run).as_secs() + extra_wait_s);
     LengthView {
         min: reply_length::MIN,
         max: reply_length::MAX,
@@ -380,8 +381,8 @@ fn length_view(status: &Status) -> LengthView {
 }
 
 /// The "Reminders" setting (ASSIST-60) and, for the current generation, what its measurements
-/// say: path, threads, model, the estimated time of a reminder, the worst extra wait of a
-/// scribble reading right after one, and why reminders are unavailable when they are.
+/// say: path, threads, model, the estimated time of a reminder, how much longer a scribble
+/// reading may wait while one runs, and why reminders are unavailable when they are.
 pub(super) struct ReminderView {
     /// The checkbox: the stored choice, else the path's default.
     pub on: bool,
@@ -391,8 +392,13 @@ pub(super) struct ReminderView {
     pub generation: Option<String>,
     /// About how long a reminder takes (the estimate before the 1.25 margin).
     pub estimate: Option<String>,
-    /// The worst extra wait of a scribble reading right after a reminder.
+    /// What a running reminder adds to a scribble reading's wait (X verified, Y until a
+    /// reminder has shown its prompt is cached), as a sentence.
     pub extra_wait: Option<String>,
+    /// Y in seconds, when reminders are effective: the length panel's worst wait includes it.
+    pub worst_extra_s: Option<u64>,
+    /// A CPU generation started with reminders off: what to do to have them.
+    pub restart_note: Option<&'static str>,
     /// Why they are unavailable for this generation.
     pub unavailable: Option<String>,
     /// On the CPU path: the catalogue text does not fit.
@@ -403,7 +409,7 @@ pub(super) fn reminder_view(
     choice: Option<bool>,
     generation: Option<(Path, Reminders)>,
     model: &str,
-    threads: Option<u32>,
+    (threads, queue_wait_s): (Option<u32>, Option<u64>),
 ) -> ReminderView {
     let path_name = |path: Path| match path {
         Path::Cpu => "CPU",
@@ -416,6 +422,8 @@ pub(super) fn reminder_view(
         generation: None,
         estimate: None,
         extra_wait: None,
+        worst_extra_s: None,
+        restart_note: None,
         unavailable: None,
         names_only: false,
     };
@@ -430,17 +438,35 @@ pub(super) fn reminder_view(
     view.names_only = path == Path::Cpu;
     match reminders {
         Reminders::Unavailable(why) => view.unavailable = Some(why),
+        Reminders::NotPrepared => {
+            view.restart_note = Some(if view.on {
+                "Reminders were turned on after the start, so their prompt was not prepared: Restart to prepare them. Turning them off takes effect at once."
+            } else {
+                "Turning reminders on takes a Restart: their prompt is prepared at the start."
+            });
+        }
         Reminders::Available(budgets) => {
             view.estimate = Some(format!("{:.0} s", budgets.estimate_s.ceil()));
+            let (x, y) = (
+                budgets.busy_verified.as_secs(),
+                budgets.busy_unverified.as_secs(),
+            );
+            let in_all = |extra: u64| {
+                queue_wait_s.map_or_else(String::new, |q| format!(", {} s in all", q + extra))
+            };
             view.extra_wait = Some(format!(
-                "{} s (the whole prompt of a cancelled reminder, without the chat template's tokens, plus restoring the interpretation prefix from the prompt cache{})",
-                budgets.extra_wait.as_secs(),
+                "A scribble reading may wait up to {x} s longer while a reminder runs{}; until a reminder has shown its prompt is cached (and after a cancelled one), {y} s longer{}. A completed reminder must read its system message from the prompt cache, and the first interpretation after the reminder prompt was prepared or after a reminder must read its prefix back from it: otherwise reminders switch off for the generation{}.",
+                in_all(x),
+                in_all(y),
                 if budgets.restore.dev_host_constant {
-                    "; the restore is a figure measured on the development host, not on this machine"
+                    "; the restore time is a figure measured on the development host, not on this machine"
                 } else {
                     ""
                 }
             ));
+            if view.on {
+                view.worst_extra_s = Some(y);
+            }
         }
     }
     view
@@ -638,7 +664,7 @@ fn view(
     error: Option<String>,
     reminders: ReminderView,
 ) -> View {
-    let length = length_view(&status);
+    let length = length_view(&status, reminders.worst_extra_s.unwrap_or(0));
     let retry_note = status.gpu_retry_note().map(str::to_owned);
     let (gpu_note, gpu_default_note) = if status.path == Path::Cpu {
         (retry_note, None)
@@ -773,7 +799,10 @@ async fn render(
                 handle.assistant.reminder_choice(),
                 handle.assistant.reminder_generation(),
                 &status.model.active.spec,
-                handle.threads,
+                (
+                    handle.threads,
+                    status.budgets.as_ref().map(|b| b.queue_wait.as_secs()),
+                ),
             );
             view(
                 status,
@@ -1132,15 +1161,15 @@ mod tests {
         Reminders::Available(ReminderBudgets {
             run: Duration::from_secs(150),
             estimate_s: 118.2,
-            busy: Duration::from_secs(80),
+            busy_verified: Duration::from_secs(9),
+            busy_unverified: Duration::from_secs(80),
             restore: Restore {
                 seconds: 0.3,
                 dev_host_constant: dev_host,
             },
-            reprime: Duration::from_secs(9),
             reply_tokens: 600,
             prefix_tokens: 1500,
-            extra_wait: Duration::from_secs(81),
+            system_tokens: 1800,
         })
     }
 
@@ -1151,51 +1180,140 @@ mod tests {
     #[test]
     fn the_reminder_setting_defaults_per_path_and_a_stored_choice_wins() {
         // No generation yet: off until the path is known; a stored choice shows as stored.
-        assert_eq!(named(&reminder_view(None, None, "m", None)), (false, false));
         assert_eq!(
-            named(&reminder_view(Some(true), None, "m", None)),
+            named(&reminder_view(None, None, "m", (None, None))),
+            (false, false)
+        );
+        assert_eq!(
+            named(&reminder_view(Some(true), None, "m", (None, None))),
             (true, true)
         );
         let cpu = Some((Path::Cpu, budgets(true)));
         let gpu = Some((Path::Gpu, budgets(true)));
         assert_eq!(
-            named(&reminder_view(None, cpu.clone(), "m", None)),
+            named(&reminder_view(None, cpu.clone(), "m", (None, None))),
             (false, false)
         );
         assert_eq!(
-            named(&reminder_view(None, gpu.clone(), "m", None)),
+            named(&reminder_view(None, gpu.clone(), "m", (None, None))),
             (true, false)
         );
         assert_eq!(
-            named(&reminder_view(Some(false), gpu, "m", None)),
+            named(&reminder_view(Some(false), gpu, "m", (None, None))),
             (false, true)
         );
         assert_eq!(
-            named(&reminder_view(Some(true), cpu, "m", None)),
+            named(&reminder_view(Some(true), cpu, "m", (None, None))),
             (true, true)
         );
     }
 
     #[test]
     fn the_estimates_come_from_the_measurements_and_the_cpu_says_names_only() {
-        let view = reminder_view(None, Some((Path::Cpu, budgets(true))), "granite", Some(2));
+        let view = reminder_view(
+            None,
+            Some((Path::Cpu, budgets(true))),
+            "granite",
+            (Some(2), Some(100)),
+        );
         assert_eq!(
             view.generation.as_deref(),
             Some("CPU path, 2 threads, granite")
         );
         assert_eq!(view.estimate.as_deref(), Some("119 s"));
+        // The extra wait a reminder adds (X), with the unverified one (Y) and the allowance.
         let wait = view.extra_wait.unwrap();
-        assert!(wait.starts_with("81 s"), "{wait}");
-        assert!(wait.contains("without the chat template's tokens"));
+        assert!(
+            wait.starts_with(
+                "A scribble reading may wait up to 9 s longer while a reminder runs, 109 s in all;"
+            ),
+            "{wait}"
+        );
+        assert!(
+            wait.contains("until a reminder has shown its prompt is cached (and after a cancelled one), 80 s longer, 180 s in all"),
+            "{wait}"
+        );
         assert!(wait.contains("development host"));
+        assert!(
+            !wait.contains("re-prime") && !wait.contains("reprime"),
+            "{wait}"
+        );
         assert!(view.names_only && view.unavailable.is_none());
-        // The GPU path restores from the cache too, and sends catalogue text later.
-        let gpu = reminder_view(None, Some((Path::Gpu, budgets(true))), "qwen", None);
+        // CPU path, reminders off by default: the length panel adds nothing.
+        assert_eq!(view.worst_extra_s, None);
+        // The GPU path restores from the cache too, and sends catalogue text later; on by
+        // default, so the length panel's worst wait includes Y.
+        let gpu = reminder_view(None, Some((Path::Gpu, budgets(true))), "qwen", (None, None));
         assert!(!gpu.names_only);
+        assert_eq!(gpu.worst_extra_s, Some(80));
         let wait = gpu.extra_wait.unwrap();
         assert!(wait.contains("from the prompt cache"), "{wait}");
         assert!(wait.contains("development host"), "{wait}");
-        assert!(!wait.contains("measured by priming"), "{wait}");
+        // Switched off: nothing to add to the worst wait.
+        let off = reminder_view(
+            Some(false),
+            Some((Path::Gpu, budgets(true))),
+            "qwen",
+            (None, None),
+        );
+        assert_eq!(off.worst_extra_s, None);
+    }
+
+    /// A CPU generation started with reminders off: the note depends on the setting now.
+    #[test]
+    fn a_generation_started_with_reminders_off_says_what_a_restart_does() {
+        let note = |choice| {
+            let view = reminder_view(
+                choice,
+                Some((Path::Cpu, Reminders::NotPrepared)),
+                "granite",
+                (None, None),
+            );
+            assert!(
+                view.estimate.is_none() && view.extra_wait.is_none() && view.unavailable.is_none()
+            );
+            assert_eq!(view.worst_extra_s, None);
+            view.restart_note.unwrap()
+        };
+        // Off by default and off by choice: the neutral note, not "turned on after the start".
+        for choice in [None, Some(false)] {
+            let note = note(choice);
+            assert!(
+                note.starts_with("Turning reminders on takes a Restart"),
+                "{note}"
+            );
+        }
+        let note = note(Some(true));
+        assert!(
+            note.contains("turned on after the start") && note.contains("Restart to prepare them")
+        );
+        let other = reminder_view(
+            Some(true),
+            Some((Path::Cpu, budgets(true))),
+            "m",
+            (None, None),
+        );
+        assert!(other.restart_note.is_none());
+    }
+
+    /// Reminders switched off for the generation (a failed cache check) show the reason, no
+    /// estimate and nothing added to the length panel's worst wait.
+    #[test]
+    fn switched_off_reminders_add_nothing_to_the_worst_wait() {
+        let view = reminder_view(
+            Some(true),
+            Some((
+                Path::Gpu,
+                Reminders::Unavailable("the prompt cache did not hold it".into()),
+            )),
+            "m",
+            (None, Some(100)),
+        );
+        assert_eq!(view.worst_extra_s, None);
+        assert_eq!(
+            view.unavailable.as_deref(),
+            Some("the prompt cache did not hold it")
+        );
     }
 
     #[test]
@@ -1209,7 +1327,7 @@ mod tests {
                 ),
             )),
             "m",
-            None,
+            (None, None),
         );
         assert!(view.unavailable.unwrap().contains("600 s ceiling"));
         assert!(view.estimate.is_none() && view.extra_wait.is_none());

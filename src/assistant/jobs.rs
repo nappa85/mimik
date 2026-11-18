@@ -82,7 +82,19 @@ pub(crate) enum RuntimeEvent {
         path: Path,
         /// What the generation's measurements allow for reminders (plan 3c-1).
         reminders: Reminders,
+        /// What the reminder prime left behind (3c-1c).
+        prepared: Prepared,
     },
+}
+
+/// What the reminder prime before Ready left behind (plan 3c-1c, step 1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Prepared {
+    /// The reminder prefix was primed: the first interpretation verifies the interpretation
+    /// entry's restore.
+    pub primed: bool,
+    /// How long the server is presumed busy at Ready (a prime that timed out keeps evaluating).
+    pub busy: Duration,
 }
 
 /// Whether reminders can run in a generation, from its measurements.
@@ -90,6 +102,9 @@ pub(crate) enum RuntimeEvent {
 pub(crate) enum Reminders {
     /// Not possible, with the reason the page states.
     Unavailable(String),
+    /// Possible, but the generation started with them off on the CPU path, so the reminder
+    /// prompt was not prepared: they count as off until a Restart (3c-1c).
+    NotPrepared,
     Available(ReminderBudgets),
 }
 
@@ -234,6 +249,10 @@ struct Job {
     account: i64,
     origin: Origin,
     enqueued: Instant,
+    /// How long it may wait in the queue: Q, or Q and the reminder busy term counted when it
+    /// was admitted behind a reminder (3c-1c, step 6). A reminder's own wait is
+    /// [`REMINDER_QUEUE_WAIT`].
+    allowance: Duration,
     started: Option<Instant>,
     state: State,
     draft: Option<Draft>,
@@ -330,14 +349,6 @@ pub(crate) enum Poll {
 /// How long a transport error waits for its generation's end to be published.
 const TRANSPORT_GRACE: Duration = Duration::from_secs(1);
 
-/// A pending re-prime of the interpretation prefix after a started reminder.
-struct Reprime {
-    generation: u64,
-    interpreter: Arc<dyn Interpreter>,
-    /// How long the server is busy with it (the time priming measured).
-    wait: Duration,
-}
-
 /// The assistant: the job table, the worker's wake-up, the runtime state and the breaker.
 pub(crate) struct Assistant {
     table: Mutex<Table>,
@@ -350,23 +361,20 @@ pub(crate) struct Assistant {
     grace: Mutex<Duration>,
     /// Until when the server is presumed busy with a request cancelled at its deadline.
     busy_until: Mutex<Option<Instant>>,
-    /// Until when the presumed busy time is a reminder's (its dropped prompt or its re-prime):
+    /// Until when the presumed busy time is a reminder's (its dropped prompt):
     /// the interpretation queued behind it does not count toward D.
     reminder_busy: Mutex<Option<Instant>>,
     /// Set after a reminder reached the server: the next interpretation's completion must show
     /// the prefix read back from the cache (plan 3c-0, "runtime detection"; 3c-1b, both paths).
     cache_check: std::sync::atomic::AtomicBool,
-    /// GPU path: the cache check failed, so every started reminder is followed by a re-prime
-    /// of the interpretation prefix (reminders stay available). On the CPU path a failed check
-    /// sets [`Self::cache_off`] instead.
-    cache_failed: std::sync::atomic::AtomicBool,
-    /// Why reminders were switched off for the generation after the cache check failed.
+    /// A reminder of this generation has completed with its system message read from the
+    /// cache (at least 75 %): the reminder busy term is the verified one until a reminder is
+    /// cancelled (3c-1c, step 3).
+    reminder_verified: std::sync::atomic::AtomicBool,
+    /// Why reminders were switched off for the generation after a cache check failed (the
+    /// first reason is kept).
     cache_off: Mutex<Option<String>>,
     signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
-    /// After the cache check failed on the GPU path, a started reminder leaves the
-    /// interpretation prefix evicted: the worker re-primes it before the next job (plan 3c-0,
-    /// choice (a), the fallback of 3c-1b). Not installed while the cache restores it.
-    reprime: Mutex<Option<Reprime>>,
     /// The owner's reminder setting as stored (`None` until chosen), kept here so the save
     /// answer and the route read the effective value without a database read.
     reminder_choice: Mutex<Option<bool>>,
@@ -387,9 +395,8 @@ impl Assistant {
             busy_until: Mutex::new(None),
             reminder_busy: Mutex::new(None),
             cache_check: std::sync::atomic::AtomicBool::new(false),
-            cache_failed: std::sync::atomic::AtomicBool::new(false),
+            reminder_verified: std::sync::atomic::AtomicBool::new(false),
             cache_off: Mutex::new(None),
-            reprime: Mutex::new(None),
             signals: Mutex::new(None),
             reminder_choice: Mutex::new(None),
             #[cfg(test)]
@@ -456,6 +463,7 @@ impl Assistant {
                 interpreter,
                 path,
                 reminders,
+                prepared,
             } => {
                 let current = match &*self.runtime() {
                     Runtime::Starting { generation } => *generation,
@@ -469,6 +477,13 @@ impl Assistant {
                         path,
                         reminders,
                     };
+                    if prepared.primed {
+                        self.cache_check
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    if !prepared.busy.is_zero() {
+                        self.presume_busy_until(now + prepared.busy, false);
+                    }
                     self.wake.notify_one();
                 }
             }
@@ -490,10 +505,6 @@ impl Assistant {
                     .busy_until
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                *self
-                    .reprime
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 self.forget_reminder_state();
                 let mut table = self.table();
                 table.queue.clear();
@@ -510,7 +521,7 @@ impl Assistant {
     }
 
     /// What a generation's reminders leave behind ends with it: the reminder busy time, the
-    /// pending cache check and its verdict.
+    /// pending cache check, the verification of the reminder entry and the verdict.
     fn forget_reminder_state(&self) {
         *self
             .reminder_busy
@@ -518,7 +529,7 @@ impl Assistant {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.cache_check
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        self.cache_failed
+        self.reminder_verified
             .store(false, std::sync::atomic::Ordering::SeqCst);
         *self.cache_off() = None;
     }
@@ -670,7 +681,7 @@ impl Assistant {
         };
         let ticket = table.next_ticket;
         // Without side effects, so a refused start changes nothing.
-        self.admissible(&table, budgets, superseded, now)?;
+        let allowance = self.admissible(&table, budgets, superseded, now)?;
         if self
             .breaker()
             .admit(ticket, now.into_std(), superseded.map(|(_, t)| t))
@@ -729,6 +740,7 @@ impl Assistant {
             account,
             origin,
             enqueued: now,
+            allowance,
             started: None,
             state: State::Queued,
             draft: Some(draft),
@@ -824,6 +836,7 @@ impl Assistant {
             account,
             origin,
             enqueued: now,
+            allowance: REMINDER_QUEUE_WAIT,
             started: None,
             state: State::Queued,
             draft: None,
@@ -989,6 +1002,7 @@ impl Assistant {
             account,
             origin,
             enqueued: now,
+            allowance: Duration::ZERO,
             started: Some(now),
             state: State::Done { answer, at: now },
             draft: None,
@@ -1021,36 +1035,15 @@ impl Assistant {
                 }
                 continue;
             }
-            if self.reprime().await {
-                continue;
-            }
             match self.next() {
                 Some(run) => {
-                    // Installed as the reminder starts, so admission counts it while the
-                    // reminder runs.
                     let sent = Arc::clone(&run.sent);
                     let reminder = run.work.is_reminder();
-                    let generation = run.generation;
-                    let cache_failed = self.cache_failed.load(std::sync::atomic::Ordering::SeqCst);
-                    // While the cache restores the prefix there is nothing to re-prime.
-                    if let Some(after) = run.reprime().filter(|_| cache_failed) {
-                        *self
-                            .reprime
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(after);
-                    }
                     self.run(run).await;
-                    if reminder && !sent.load(std::sync::atomic::Ordering::SeqCst) {
-                        // The reminder never reached the server (too long, the tokenizer
-                        // failed, cancelled first): the slot's cache is untouched.
-                        let mut pending = self
-                            .reprime
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if pending.as_ref().is_some_and(|p| p.generation == generation) {
-                            *pending = None;
-                        }
-                    } else if reminder && !cache_failed {
+                    // A reminder that reached the server replaced the slot's cache entry: the
+                    // next interpretation must show its prefix restored. One that never did
+                    // (too long, the tokenizer failed, cancelled first) left the cache alone.
+                    if reminder && sent.load(std::sync::atomic::Ordering::SeqCst) {
                         self.cache_check
                             .store(true, std::sync::atomic::Ordering::SeqCst);
                     }
@@ -1102,7 +1095,7 @@ impl Assistant {
             let Some(job) = table.jobs.iter_mut().find(|job| job.id == id) else {
                 continue;
             };
-            if now > job.enqueued + budgets.queue_wait {
+            if now > job.enqueued + job.allowance {
                 self.end(job, Answer::AskAgain, now);
                 continue;
             }
@@ -1135,10 +1128,8 @@ impl Assistant {
             });
         }
         // A reminder only when no interpretation is queued (the loop above emptied the queue).
-        let (path, reminders) = match &*self.runtime() {
-            Runtime::Ready {
-                path, reminders, ..
-            } => (*path, reminders.clone()),
+        let reminders = match &*self.runtime() {
+            Runtime::Ready { reminders, .. } => reminders.clone(),
             _ => return None,
         };
         while let Some(id) = table.reminder_queue.pop_front() {
@@ -1169,11 +1160,11 @@ impl Assistant {
                 work: Work::Reminder {
                     request: draft.request,
                     reply_tokens: allowed.reply_tokens,
-                    gpu: path == Path::Gpu,
-                    reprime: allowed.reprime,
                 },
                 deadline: allowed.run,
-                busy: allowed.busy,
+                // Its busy term depends on whether the cache is verified when it ends, so
+                // `presume_busy` takes it from `reminder_busy_term`; this is never read.
+                busy: Duration::ZERO,
                 budgets,
                 generation,
                 interpreter,
@@ -1196,42 +1187,6 @@ impl Assistant {
         } else {
             None
         }
-    }
-
-    /// Re-primes the interpretation prefix after a started reminder on the GPU path, before any
-    /// next job; `busy_until` covers it and ends when the request completes. Returns whether
-    /// one ran.
-    async fn reprime(&self) -> bool {
-        let Some(pending) = self
-            .reprime
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        else {
-            return false;
-        };
-        if self.generation_over(pending.generation) {
-            return false;
-        }
-        let bound = pending.wait * 2 + Duration::from_secs(10);
-        // Presumed busy for the restore time the Ready rules count; the worker awaits the request
-        // (within its bound) before it starts any job, so a slower one delays the next job, not
-        // the admission arithmetic.
-        self.presume_busy_until(Instant::now() + pending.wait, true);
-        // A failure or a timeout changes nothing: the next interpretation evaluates its own
-        // prefix, which its run deadline's margin covers.
-        let _ = tokio::time::timeout(bound, pending.interpreter.reprime()).await;
-        if !self.generation_over(pending.generation) {
-            *self
-                .busy_until
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            *self
-                .reminder_busy
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        }
-        true
     }
 
     async fn run(&self, run: Run) {
@@ -1286,7 +1241,9 @@ impl Assistant {
             }
             return self.neutral(&run);
         };
-        if !run.work.is_reminder() {
+        if run.work.is_reminder() {
+            self.check_reminder_cache(&run, result.as_ref());
+        } else {
             self.check_restored_prefix(&run, result.as_ref());
         }
         match &result {
@@ -1322,13 +1279,13 @@ impl Assistant {
         self.breaker().record(run.ticket, outcome, now.into_std());
     }
 
-    /// After a reminder, the first interpretation that reached the server must have read at
-    /// least 75 % of the prefix from the prompt cache (the calibration rule); otherwise the
-    /// host-RAM cache does not restore it: on the CPU path reminders are unavailable for the rest
-    /// of the generation, with the reason; on the GPU path they stay available and every later
-    /// reminder is followed by a re-prime. An expiry or a transport or HTTP failure of that request
-    /// counts as a failed check, and so does a completion without the figure (unverified). A
-    /// request that never reached the server (too long, tokenizer) settles nothing.
+    /// After a reminder (or the prime), the first interpretation that reached the server must
+    /// have read at least 75 % of the prefix from the prompt cache (the calibration rule);
+    /// otherwise the host-RAM cache does not restore it and reminders are switched off for the
+    /// rest of the generation, with the reason, on both paths. An expiry or a transport or HTTP
+    /// failure of that request counts as a failed check, and so does a completion without the
+    /// figure (unverified). A request that never reached the server (too long, tokenizer)
+    /// settles nothing.
     fn check_restored_prefix(&self, run: &Run, result: Option<&Result<Answer, Attempt>>) {
         if !self.cache_check.load(std::sync::atomic::Ordering::SeqCst) {
             return;
@@ -1338,13 +1295,12 @@ impl Assistant {
             .cached
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (path, prefix, reprime) = match &*self.runtime() {
+        let prefix = match &*self.runtime() {
             Runtime::Ready {
                 generation,
-                path,
                 reminders: Reminders::Available(budgets),
                 ..
-            } if *generation == run.generation => (*path, budgets.prefix_tokens, budgets.reprime),
+            } if *generation == run.generation => budgets.prefix_tokens,
             _ => return,
         };
         let failed = match result {
@@ -1371,32 +1327,68 @@ impl Assistant {
         self.cache_check
             .store(false, std::sync::atomic::Ordering::SeqCst);
         if let Some(why) = failed {
-            match path {
-                Path::Gpu => {
-                    self.cache_failed
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
-                    // Without a completed interpretation (no figure, an expiry, a failure) the
-                    // slot may be cold: re-prime once now, so the next one is not.
-                    if !matches!(result, Some(Ok(_))) || cached.is_none() {
-                        *self
-                            .reprime
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Reprime {
-                            generation: run.generation,
-                            interpreter: Arc::clone(&run.interpreter),
-                            wait: reprime,
-                        });
-                        self.wake.notify_one();
-                    }
-                }
-                Path::Cpu => {
-                    *self.cache_off() = Some(format!(
-                        "reminders are off for this generation: the prompt cache did not restore the interpretation prefix after a reminder ({why}); more threads or the GPU path could make them available"
-                    ));
-                    self.changed.notify_waiters();
-                }
-            }
+            self.switch_reminders_off(&format!(
+                "the prompt cache did not restore the interpretation prefix after the reminder prompt was prepared or after a reminder ({why})"
+            ));
         }
+    }
+
+    /// A completed reminder must have read at least 75 % of its system message from the prompt
+    /// cache (3c-1c, step 4): then the reminder busy term is the verified one; otherwise
+    /// reminders are switched off for the generation, with the reason, without touching the
+    /// armed interpretation check. A reminder that failed after reaching the server shows no
+    /// figure, so the verification is dropped (an expiry or a cancel drops it in
+    /// [`Self::presume_busy`]).
+    fn check_reminder_cache(&self, run: &Run, result: Option<&Result<Answer, Attempt>>) {
+        let verified = &self.reminder_verified;
+        let sent = run.sent.load(std::sync::atomic::Ordering::SeqCst);
+        match result {
+            Some(Ok(_) | Err(Attempt::Invalid)) => {}
+            Some(Err(Attempt::Failed | Attempt::Transport)) if sent => {
+                verified.store(false, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+            _ => return,
+        }
+        let cached = *run
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let system = match &*self.runtime() {
+            Runtime::Ready {
+                generation,
+                reminders: Reminders::Available(budgets),
+                ..
+            } if *generation == run.generation => budgets.system_tokens,
+            _ => return,
+        };
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "token counts of a few thousand, exact in f64"
+        )]
+        let read = cached.filter(|cached| (*cached as f64) >= 0.75 * system as f64);
+        if read.is_some() {
+            verified.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
+        verified.store(false, std::sync::atomic::Ordering::SeqCst);
+        let figure = cached.map_or_else(
+            || "the server reported no cached-token figure".to_owned(),
+            |cached| format!("{cached} of {system} system-message tokens were read from the cache"),
+        );
+        self.switch_reminders_off(&format!(
+            "the prompt cache did not hold the reminder prompt ({figure})"
+        ));
+    }
+
+    /// Switches reminders off for the generation with `why` (the first reason is kept).
+    fn switch_reminders_off(&self, why: &str) {
+        let mut off = self.cache_off();
+        if off.is_none() {
+            *off = Some(why.to_owned());
+        }
+        drop(off);
+        self.changed.notify_waiters();
     }
 
     /// Whether `generation` is no longer the ready one.
@@ -1426,8 +1418,21 @@ impl Assistant {
     /// presumed busy for the calibrated prompt term, while it is still this generation's.
     fn presume_busy(&self, run: &Run) {
         let current = matches!(&*self.runtime(), Runtime::Ready { generation, .. } if *generation == run.generation);
-        if current {
-            self.presume_busy_until(Instant::now() + run.busy, run.work.is_reminder());
+        if !current {
+            return;
+        }
+        if run.work.is_reminder() {
+            // Its term is the verified one only while a reminder has shown the cache works; a
+            // dropped reminder that reached the server shows no figure, so the next one counts
+            // its whole prompt again.
+            let busy = self.reminder_busy_term();
+            if run.sent.load(std::sync::atomic::Ordering::SeqCst) {
+                self.reminder_verified
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.presume_busy_until(Instant::now() + busy, true);
+        } else {
+            self.presume_busy_until(Instant::now() + run.busy, false);
         }
     }
 
@@ -1458,20 +1463,33 @@ impl Assistant {
             })
     }
 
-    /// Makes the GPU path fall back to re-priming, as a failed cache check does (tests).
+    /// The queue allowance job `id` was admitted with (tests).
     #[cfg(test)]
-    pub(crate) fn fail_cache_for_tests(&self) {
-        self.cache_failed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    pub(crate) fn allowance_for_tests(&self, id: JobId) -> Option<Duration> {
+        self.table()
+            .jobs
+            .iter()
+            .find(|job| job.id == id)
+            .map(|job| job.allowance)
     }
 
-    /// Whether a re-prime is pending (tests).
+    /// Whether the reminder busy term is the verified one (tests).
     #[cfg(test)]
-    pub(crate) fn reprime_pending_for_tests(&self) -> bool {
-        self.reprime
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
+    pub(crate) fn reminder_verified_for_tests(&self) -> bool {
+        self.reminder_verified
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Why reminders were switched off after a cache check failed (tests).
+    #[cfg(test)]
+    pub(crate) fn cache_off_for_tests(&self) -> Option<String> {
+        self.cache_off().clone()
+    }
+
+    /// Whether the interpretation cache check is armed (tests).
+    #[cfg(test)]
+    pub(crate) fn cache_check_armed_for_tests(&self) -> bool {
+        self.cache_check.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn neutral(&self, run: &Run) {
@@ -1541,14 +1559,23 @@ impl Assistant {
 }
 
 impl Assistant {
-    /// How long the server stays busy after a reminder is dropped: its whole prompt. The
-    /// GPU path's re-priming that follows is the pending [`Reprime`], counted on its own.
+    /// How long the server stays busy after a reminder is dropped: the verified term once a
+    /// reminder has shown its system message cached, else the whole prompt (3c-1c, step 3).
     fn reminder_busy_term(&self) -> Duration {
         match &*self.runtime() {
             Runtime::Ready {
                 reminders: Reminders::Available(budgets),
                 ..
-            } => budgets.busy,
+            } => {
+                if self
+                    .reminder_verified
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    budgets.busy_verified
+                } else {
+                    budgets.busy_unverified
+                }
+            }
             _ => Duration::ZERO,
         }
     }
@@ -1557,7 +1584,10 @@ impl Assistant {
 /// The breaker (503) then capacity (429) of a start, computed as if `superseded` were
 /// already gone (plan §1.4, "Jobs"): at most D waiting, the worst-case wait (the running
 /// job's remaining run deadline, or the rest of the busy time after a deadline cancel, plus
-/// R per waiting job) within Q, fewer than 64 live jobs.
+/// R per waiting job) within the job's allowance, fewer than 64 live jobs. The allowance is Q,
+/// or Q and the reminder busy term when a reminder's busy time is counted (a reminder running
+/// or its dropped prompt still presumed busy) and reminders are effective (3c-1c, step 6);
+/// the job keeps it. Returns the allowance.
 impl Assistant {
     fn admissible(
         &self,
@@ -1565,7 +1595,7 @@ impl Assistant {
         budgets: Budgets,
         superseded: Option<(JobId, breaker::Ticket)>,
         now: Instant,
-    ) -> Result<(), Refusal> {
+    ) -> Result<Duration, Refusal> {
         let gone = superseded.map(|(id, _)| id);
         let waiting = table.queue.iter().filter(|id| Some(**id) != gone).count();
         let running_left = table
@@ -1579,35 +1609,42 @@ impl Assistant {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
         // A running reminder is cancelled by the admission, but the server may still be
-        // evaluating its whole prompt (a cancel can come before the first token); on the GPU
-        // path the re-priming follows. A re-priming still pending counts the same.
-        let reminder_busy = if table
+        // evaluating its prompt (a cancel can come before the first token): its busy term
+        // counts, as does the presumed busy time of one already dropped.
+        let reminder_running = table
             .reminders
             .iter()
-            .any(|job| matches!(job.state, State::Running { .. }))
-        {
-            self.reminder_busy_term()
-        } else {
-            Duration::ZERO
-        };
-        let pending_reprime = self
-            .reprime
+            .any(|job| matches!(job.state, State::Running { .. }));
+        let reminder_dropped = self
+            .reminder_busy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map_or(Duration::ZERO, |pending| pending.wait);
-        let busy_left = busy_left.max(reminder_busy) + pending_reprime;
+            .is_some_and(|until| until > now);
+        let term = self.reminder_busy_term();
+        let busy_left = busy_left.max(if reminder_running {
+            term
+        } else {
+            Duration::ZERO
+        });
         // The first job queued behind a reminder's busy time waits for that time, not for a
         // running job, so it takes no place among the D that may wait: a scribble reading is
         // never refused because of a reminder, as it is not because of a running reading.
-        let behind_reminder = waiting > 0
-            && running_left.is_zero()
-            && self
-                .reminder_busy
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some_and(|until| until > now);
+        let behind_reminder = waiting > 0 && running_left.is_zero() && reminder_dropped;
         let counted = waiting - usize::from(behind_reminder);
+        // The busy time of a running or dropped reminder is real whatever the setting is now:
+        // the allowance counts it while this generation has reminder budgets.
+        let has_budgets = matches!(
+            &*self.runtime(),
+            Runtime::Ready {
+                reminders: Reminders::Available(_),
+                ..
+            }
+        );
+        let allowance = if (reminder_running || reminder_dropped) && has_budgets {
+            budgets.queue_wait + term
+        } else {
+            budgets.queue_wait
+        };
         let worst =
             running_left.max(busy_left) + budgets.run * u32::try_from(waiting).unwrap_or(u32::MAX);
         let live_records = table
@@ -1623,10 +1660,10 @@ impl Assistant {
         if breaker_refuses {
             return Err(Refusal::Unavailable);
         }
-        if counted >= budgets.depth || worst > budgets.queue_wait || live_records >= MAX_RECORDS {
+        if counted >= budgets.depth || worst > allowance || live_records >= MAX_RECORDS {
             return Err(Refusal::Busy);
         }
-        Ok(())
+        Ok(allowance)
     }
 }
 
@@ -1684,9 +1721,6 @@ enum Work {
     Reminder {
         request: ReminderRequest,
         reply_tokens: u32,
-        /// The GPU path re-primes the interpretation prefix after the reminder.
-        gpu: bool,
-        reprime: Duration,
     },
 }
 
@@ -1703,7 +1737,8 @@ struct Run {
     work: Work,
     /// The run deadline: R for an interpretation, the reminder's own for a reminder.
     deadline: Duration,
-    /// How long the server is presumed busy after the request is dropped.
+    /// How long the server is presumed busy after the request is dropped (an interpretation's;
+    /// a reminder's term is [`Assistant::reminder_busy_term`]).
     busy: Duration,
     budgets: Budgets,
     generation: u64,
@@ -1713,22 +1748,6 @@ struct Run {
     sent: Arc<std::sync::atomic::AtomicBool>,
     /// The prompt tokens the server read from its cache for this run's completion, once known.
     cached: Arc<Mutex<Option<u64>>>,
-}
-
-impl Run {
-    /// The re-prime a started reminder leaves to do (GPU path), whatever way it ends.
-    fn reprime(&self) -> Option<Reprime> {
-        match self.work {
-            Work::Reminder {
-                gpu: true, reprime, ..
-            } => Some(Reprime {
-                generation: self.generation,
-                interpreter: Arc::clone(&self.interpreter),
-                wait: reprime,
-            }),
-            _ => None,
-        }
-    }
 }
 
 enum Attempt {
@@ -1863,6 +1882,9 @@ async fn attempt_reminder(
             Failure::Transport => Attempt::Transport,
             Failure::Status(_) => Attempt::Failed,
         })?;
+    *run.cached
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = completed.cached_tokens;
     Ok(match reminder::read(&completed.text, &rendered.kept) {
         Err(_) => return Err(Attempt::Invalid),
         Ok(reminder::Reading::Nothing) => Answer::Nothing,

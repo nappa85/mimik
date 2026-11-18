@@ -67,6 +67,9 @@ async fn assisted_with(
     let stub = Arc::new(StubInterpreter::answering(
         answers.iter().map(|answer| Ok((*answer).to_owned())),
     ));
+    // The server reads the reminder system message (1,800 tokens in the helper's budgets) from
+    // its cache, as the reminder self-check requires.
+    *stub.cached_tokens.lock().unwrap() = Some(1800);
     let handle =
         AssistantHandle::ready_for_tests_with(Arc::clone(&stub) as _, budgets_at(bytes), reminders);
     setup.app = crate::auth::app_with_options(
@@ -1990,6 +1993,7 @@ async fn an_unavailable_or_unready_runtime_answers_the_reminder_route_with_404_a
         interpreter: Arc::new(StubInterpreter::default()),
         path: crate::assistant::runtime::Path::Cpu,
         reminders: Reminders::Unavailable("test".into()),
+        prepared: crate::assistant::jobs::Prepared::default(),
     });
     assert_eq!(csrf_then_404(&on.setup, &key).await, StatusCode::NOT_FOUND);
     // Not ready.

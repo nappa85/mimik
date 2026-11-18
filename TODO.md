@@ -156,20 +156,16 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   context-level list) and add the probe to the LAN gate.
 - Gates must use `--all-features` (the auth-feature suites hid a stale `<nav>` assertion until
   2026-11-17).
-- Reminders (3c-1 review): with the dev host's CPU figures, reminders are unavailable on the CPU
-  path (643 s needed, Q 365 s).
-- Prompt cache on the GPU path (3c-1b review, Minor): a GPU interpretation that completes with no
-  `cached_tokens` triggers an immediate re-prime it does not need (the prefix is already in the
-  slot; restrict to expiry and transport failure); no test asserts the immediate re-prime for
-  expiry/transport and its absence for a low figure; the page text should say the GPU estimate
-  includes re-priming when the cache fails; the comment of the ctx-0 assertion in
+- Prompt cache on the GPU path (3c-1b review, Minor): the comment of the ctx-0 assertion in
   `the_memory_check_counts_the_cache_and_the_slots_checkpoints` is wrong; the live test's second
   readiness loop does not notice a server that died. Pending live: RAM headroom on the minimum
   host.
-- **Reminders unavailable on the dev host, both paths (decision owed, 2026-11-18):** the queue
-  rule lets a reminder cost at most Q minus D x R (6 s on the GPU, R 105 s, Q 111 s), and counts
-  its whole prompt plus the GPU fallback re-prime (129 s needed); measured reminders cost about
-  1 s once cached (`docs/results.md`, 3c-1b GPU entry).
+- **Reminders that fit (3c-1c, steps 1-9 implemented, owner decision C, 2026-11-18):** the live
+  checks (plan step 10) are owed: `calibrate` on both paths shows reminders available; the cache
+  tool sequence with a reminder after interpretations with long replies; the browser reminder
+  scenario on the GPU. Review Minor: the progress skip of the reminder prime is never cleared
+  by a later update (a CPU-to-GPU retry or reminders turned on during a CPU start show a total
+  one too low until the prime step); add `Progress::unskip` in `skip_idle_prime`.
 - Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled
   Undo offer runs `changed_members` (about 32,000 `locate` calls on the worst page); compute once
   per bundle if slow. The module's multi-unit redraw (`settleApplied`: drafted, held and in-flight

@@ -31,6 +31,9 @@ pub(crate) enum Phase {
     Sample(u8),
     /// The reminder prompt's `/tokenize` at the start of a generation (plan 3c-1).
     Reminders,
+    /// One reminder request evaluates the reminder prompt before Ready (plan 3c-1c); the step
+    /// is skipped when reminders are not prepared.
+    PrimingReminders,
     WaitingRetry,
     /// A trial waits for the running model server to stop.
     WaitingStop,
@@ -52,6 +55,7 @@ impl Phase {
             Self::Priming => "priming".to_owned(),
             Self::Sample(n) => format!("calibration sample {n} of 2"),
             Self::Reminders => "measuring the reminder prompt".to_owned(),
+            Self::PrimingReminders => "preparing the reminder prompt".to_owned(),
             Self::WaitingRetry => "waiting to retry".to_owned(),
             Self::WaitingStop => "waiting for the model server to stop".to_owned(),
             Self::Hashing => "hashing the model file".to_owned(),
@@ -76,8 +80,8 @@ impl Phase {
 }
 
 use Phase::{
-    Checking, Hashing, Loading, Phrase, Priming, Reminders, Sample, StartingServer, Stopping,
-    Verifying, WaitingRetry, WaitingStop,
+    Checking, Hashing, Loading, Phrase, Priming, PrimingReminders, Reminders, Sample,
+    StartingServer, Stopping, Verifying, WaitingRetry, WaitingStop,
 };
 
 const FRESH_STOPPING: &[Phase] = &[
@@ -90,6 +94,7 @@ const FRESH_STOPPING: &[Phase] = &[
     Sample(1),
     Sample(2),
     Reminders,
+    PrimingReminders,
 ];
 const FRESH: &[Phase] = &[
     Checking,
@@ -100,6 +105,7 @@ const FRESH: &[Phase] = &[
     Sample(1),
     Sample(2),
     Reminders,
+    PrimingReminders,
 ];
 const RETRY: &[Phase] = &[
     StartingServer,
@@ -109,6 +115,7 @@ const RETRY: &[Phase] = &[
     Sample(1),
     Sample(2),
     Reminders,
+    PrimingReminders,
 ];
 const WAITING: &[Phase] = &[WaitingRetry];
 const TRIAL: &[Phase] = &[
@@ -198,6 +205,9 @@ pub(crate) struct Progress {
     limit: Option<(Duration, bool)>,
     /// The whole work's deadline (a trial's).
     overall: Option<Instant>,
+    /// The step of the list this run does not take (the reminder prime when reminders are not
+    /// prepared): it counts in neither the step number nor the total.
+    skipped: Option<Phase>,
     /// Steps already finished in this run.
     done: Steps,
     /// The last successful run's steps (same file, path and kind).
@@ -224,6 +234,7 @@ impl Progress {
             step_started: now,
             limit: None,
             overall: None,
+            skipped: None,
             done: Vec::new(),
             reference,
             last_time: None,
@@ -237,17 +248,28 @@ impl Progress {
         self.started = earlier.started;
     }
 
+    /// This run does not take `phase` of its list: the list counts one step fewer.
+    pub(crate) fn skip(&mut self, phase: Phase) {
+        if self.kind.phases().contains(&phase) {
+            self.skipped = Some(phase);
+        }
+    }
+
     /// This step, counted from 1, in its list.
     pub(crate) fn step(&self) -> usize {
-        self.kind
-            .phases()
+        let phases = self.kind.phases();
+        let at = phases
             .iter()
             .position(|phase| *phase == self.phase)
-            .map_or(1, |at| at + 1)
+            .unwrap_or(0);
+        let skipped_before = self
+            .skipped
+            .is_some_and(|skipped| phases[..at].contains(&skipped));
+        at - usize::from(skipped_before) + 1
     }
 
     pub(crate) fn steps(&self) -> usize {
-        self.kind.phases().len()
+        self.kind.phases().len() - usize::from(self.skipped.is_some())
     }
 
     fn arrive(&mut self) {
@@ -276,6 +298,9 @@ impl Progress {
             return false;
         }
         let now = Instant::now();
+        if self.skipped == Some(phase) {
+            self.skipped = None;
+        }
         self.done.push((self.phase, now - self.step_started));
         self.phase = phase;
         self.step_started = now;
@@ -438,6 +463,16 @@ impl Reporter {
         });
     }
 
+    /// The work does not take `phase` of its list (the reminder prime when reminders are not
+    /// prepared).
+    pub(crate) fn skip(&self, phase: Phase) {
+        self.with(|status| {
+            if let State::Starting(progress) = &mut status.state {
+                progress.skip(phase);
+            }
+        });
+    }
+
     /// [`Reporter::phase`], the step bounded by `bound`.
     pub(crate) fn phase_within(&self, phase: Phase, bound: Duration) {
         self.phase(phase);
@@ -502,8 +537,19 @@ impl Memory {
             .unwrap_or_default()
     }
 
-    pub(crate) fn keep(&mut self, sha256: &str, path: Path, kind: Kind, steps: Steps) {
-        self.0.insert((sha256.to_owned(), path, entry(kind)), steps);
+    /// Keeps this run's step times. A step this run did not take (the reminder prime, skipped
+    /// when reminders are off) keeps the time of the last run that took it, so starts with and
+    /// without it each recall their own.
+    pub(crate) fn keep(&mut self, sha256: &str, path: Path, kind: Kind, mut steps: Steps) {
+        let key = (sha256.to_owned(), path, entry(kind));
+        if let Some(earlier) = self.0.get(&key) {
+            for (phase, took) in earlier {
+                if !steps.iter().any(|(done, _)| done == phase) {
+                    steps.push((*phase, *took));
+                }
+            }
+        }
+        self.0.insert(key, steps);
     }
 }
 
@@ -515,10 +561,45 @@ mod tests {
     fn the_lists_have_their_steps_in_order() {
         assert_eq!(FRESH_STOPPING.len(), FRESH.len() + 1);
         assert_eq!(&FRESH_STOPPING[1..], FRESH);
-        assert_eq!(RETRY.len(), 7);
+        assert_eq!(RETRY.len(), 8);
         assert_eq!(TRIAL.len(), 13);
         assert_eq!(TRIAL.first(), Some(&WaitingStop));
         assert_eq!(TRIAL.last(), Some(&Phrase(5)));
+    }
+
+    #[test]
+    fn a_skipped_reminder_prime_counts_in_neither_the_number_nor_the_total() {
+        let mut progress = Progress::new(Kind::Retry, Reminders, None, vec![]);
+        assert_eq!((progress.step(), progress.steps()), (7, 8));
+        progress.skip(PrimingReminders);
+        assert_eq!((progress.step(), progress.steps()), (7, 7));
+        // A step the list does not have is not skipped.
+        progress.skip(Phase::Phrase(1));
+        assert_eq!(progress.steps(), 7);
+        // Entering it after all (the owner turned reminders on meanwhile) counts it again.
+        assert!(progress.enter(PrimingReminders));
+        assert_eq!((progress.step(), progress.steps()), (8, 8));
+    }
+
+    #[test]
+    fn a_start_without_the_reminder_prime_keeps_the_time_of_the_last_start_with_it() {
+        let kind = Kind::Fresh { stopping: false };
+        let mut memory = Memory::default();
+        let with = vec![
+            (Loading, Duration::from_secs(9)),
+            (PrimingReminders, Duration::from_secs(7)),
+        ];
+        memory.keep("sha", Path::Gpu, kind, with);
+        memory.keep(
+            "sha",
+            Path::Gpu,
+            kind,
+            vec![(Loading, Duration::from_secs(3))],
+        );
+        let recalled = memory.recall("sha", Path::Gpu, kind);
+        let took = |phase| recalled.iter().find(|(p, _)| *p == phase).map(|(_, d)| *d);
+        assert_eq!(took(Loading), Some(Duration::from_secs(3)));
+        assert_eq!(took(PrimingReminders), Some(Duration::from_secs(7)));
     }
 
     #[test]
@@ -543,7 +624,7 @@ mod tests {
         assert_eq!(progress.phase, StartingServer);
         assert_eq!(
             progress.describe(),
-            "step 1 of 7, starting the model server (attempt 2 of up to 4)"
+            "step 1 of 8, starting the model server (attempt 2 of up to 4)"
         );
         assert!(progress.enter(Loading));
         progress.within(Duration::from_secs(65));

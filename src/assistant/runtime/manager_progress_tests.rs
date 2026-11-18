@@ -80,6 +80,7 @@ fn fresh(steps: usize, from: usize, qualifier: Option<Qualifier>) -> Vec<Seen> {
         Phase::Reminders,
     ];
     let phases = &phases[phases.len() - steps..];
+    // A CPU start with reminders off does not take the reminder prime, from its first step.
     phases
         .iter()
         .enumerate()

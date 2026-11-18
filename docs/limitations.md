@@ -11,11 +11,6 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   decrease note may be asked for a new reminder, and two decreases of one save typed alike are not
   told apart (the note holds no decrease address). Close with a stored link (address) if that
   proves confusing.
-- **REMIND-REPRIME** [GPU path] The fallback re-prime after a failed cache check
-  (`Interpreter::reprime`) is tested with stubs only, and its time counts in the generation's availability
-  checks (the longer of the restore and the re-prime, for Q and for a running interpretation's wait). The checkpoint cap and the
-  restore constant were measured live on the dev host (`docs/results.md`, 3c-1b GPU entry); the
-  re-prime path itself was not exercised live.
 - **MEMORY-ENTRY** [prompt cache] Only the two shipped default files have measured entry sizes;
   any other file gets a conservative size bound from its file size (no GGUF parser), so
   `--cache-ram` and the memory check may be larger than needed, or, for an unusual architecture,
@@ -26,10 +21,22 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   on the running host. The token limit of b12110's cache bounds the sum of the entries but rises
   with `--cache-ram` (`docs/results.md`, 3c-0), so two whole contexts fit. A restore that does not
   happen is detected at run time (the first interpretation after a reminder reading under 75 % of
-  the prefix from the cache switches reminders off for the generation on the CPU path, back to the
-  re-prime on the GPU path, and so does an unrelated expiry of that interpretation). The GPU restore
+  the prefix from the cache switches reminders off for the generation on both paths, and so does
+  an unrelated expiry of that interpretation). The GPU restore
   cost (0.53 ms per MiB plus 10 ms) is the development host's. Close with the live checks of
   `docs/assisted-sheet-plan.md`, 3c-1.
+- **REMIND-EVICT** [prompt cache] A reminder entry evicted after the cache was verified makes
+  the next completed reminder cost its whole prompt before the self-check switches reminders off
+  (the verified busy term counted only the variable part), and a scribble reading queued behind it
+  may wait past its allowance once. A cancelled reminder drops the verification, which narrows but
+  does not close this.
+- **REMIND-COLD** [prompt cache] After a failed interpretation check whose interpretation
+  expired or failed, and after a reminder prime that failed or timed out after reaching the
+  server (it may have replaced the slot's prefix), the next interpretation evaluates the whole
+  prefix: about 10.5 s on the GPU (within R's margin), outside the margin on the CPU path.
+- **REMIND-DEV-CHOICE** [development endpoint] The development endpoint reads the stored reminder
+  choice after its manager starts, so an unset choice at its first start counts as off for the
+  CPU prime (a Restart applies it); the runtime path sets it before.
 - **REMIND-REPLY-BOUND** [reply bound] The reminder reply bound is the `/tokenize` count of the
   largest valid reply built with 64-character IDs (`contract::largest_reminder_reply`); it is
   not a measured model reply.

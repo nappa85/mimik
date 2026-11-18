@@ -54,8 +54,9 @@
 <label><input type="radio" name="reminders" value="off"{% if !view.reminders.on %} checked{% endif %}> Off</label>
 <button>Set</button></fieldset></form>
 <p>After a player lowers a number field, the model may add a short reminder below it, with an optional change to confirm, from the items of the sheet's lists and the other number and choice fields. It never writes on its own and never blocks entry. Until you choose, reminders are on for the GPU path and off for the CPU path{% if view.reminders.chosen %}; you have chosen{% endif %}.</p>
-{% if let Some(generation) = view.reminders.generation %}<p>This generation: {{ generation }}.{% if let Some(estimate) = view.reminders.estimate %} A reminder takes about {{ estimate }}.{% endif %}{% if let Some(wait) = view.reminders.extra_wait %} A scribble reading right after one can wait up to {{ wait }}.{% endif %}</p>
-{% if let Some(why) = view.reminders.unavailable %}<p class="form-error" role="alert">Reminders are unavailable for this generation: {{ why }}.</p>{% endif %}
+{% if let Some(generation) = view.reminders.generation %}<p>This generation: {{ generation }}.{% if let Some(estimate) = view.reminders.estimate %} A reminder takes about {{ estimate }}.{% endif %}{% if let Some(wait) = view.reminders.extra_wait %} {{ wait }}{% endif %}</p>
+{% if let Some(note) = view.reminders.restart_note %}<p>{{ note }}</p>{% endif %}
+{% if let Some(why) = view.reminders.unavailable %}<p class="form-error" role="alert">Reminders are off for this generation: {{ why }}.</p>{% endif %}
 {% if view.reminders.names_only %}<p>Item names only: catalogue text does not fit.</p>{% endif %}
 {% else %}<p>The numbers appear once the model is measured.</p>{% endif %}</section>
 {% if let Some(d) = downloads %}
