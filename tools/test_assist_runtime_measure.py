@@ -180,6 +180,47 @@ class CacheMeasureTests(unittest.TestCase):
         self.assertEqual(timings, {"prompt_n": 5, "cache_n": 1900})
         self.assertEqual(measure.stream_result([b"data: [DONE]\n"], 0.0), (None, None))
 
+    def test_stream_result_collects_the_reply_text(self):
+        text = []
+        lines = [
+            b'data: {"choices":[{"delta":{"content":"a"}}]}\n',
+            b'data: {"choices":[{"delta":{"content":"b"}}]}\n',
+        ]
+        measure.stream_result(lines, 0.0, clock=lambda: 1.0, text=text)
+        self.assertEqual("".join(text), "ab")
+
+    def test_judge_applies_the_pass_rule_to_warm_interpretations_only(self):
+        steps = [
+            {"step": "I1 cold", "cache_n": 0},
+            {"step": "R1", "cache_n": 0},
+            {"step": "I2 after R1", "cache_n": 1500},
+            {"step": "I3 after R2", "cache_n": None},
+        ]
+        out = measure.judge(steps, 1946)
+        self.assertNotIn("pass", out[0])
+        self.assertNotIn("pass", out[1])
+        self.assertTrue(out[2]["pass"])
+        self.assertEqual(out[2]["reuse"], 0.771)
+        self.assertFalse(out[3]["pass"])
+        again = measure.judge(
+            [
+                {"step": "I1 cold", "reply": "x"},
+                {"step": "I1r repeat after R2", "reply": "x", "cache_n": 1800},
+            ],
+            1805,
+        )
+        self.assertTrue(again[1]["same_reply_as_cold"])
+        self.assertTrue(again[1]["pass"])
+
+    def test_the_gpu_cutoff_is_0855_on_weekdays_only(self):
+        from datetime import datetime
+
+        self.assertFalse(measure.gpu_cutoff_passed(datetime(2026, 11, 18, 8, 54)))
+        self.assertTrue(measure.gpu_cutoff_passed(datetime(2026, 11, 18, 8, 55)))
+        self.assertTrue(measure.gpu_cutoff_passed(datetime(2026, 11, 18, 12, 0)))
+        self.assertFalse(measure.gpu_cutoff_passed(datetime(2026, 11, 18, 18, 0)))
+        self.assertFalse(measure.gpu_cutoff_passed(datetime(2026, 11, 21, 8, 56)))
+
     def test_reminder_prompt_has_its_size_and_shares_no_prefix(self):
         system = measure.reminder_system(7000)
         self.assertEqual(len(system), 7000)
