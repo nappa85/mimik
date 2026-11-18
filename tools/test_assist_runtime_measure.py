@@ -97,6 +97,13 @@ def args_for(folder, gpu="Vulkan0"):
 
 
 class GpuGuardTests(unittest.TestCase):
+    def setUp(self):
+        # These tests are about the fan and thermal guard, not the clock: the 08:55 weekday
+        # cutoff (tested on its own) must not refuse them when the suite runs in the day.
+        cutoff = mock.patch.object(measure, "gpu_cutoff_passed", return_value=False)
+        cutoff.start()
+        self.addCleanup(cutoff.stop)
+
     def patched(self, folder, fan, readings):
         calls = iter(readings)
         last = readings[-1]
