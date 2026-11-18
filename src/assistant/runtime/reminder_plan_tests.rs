@@ -80,7 +80,7 @@ async fn the_system_message_and_the_largest_reply_are_tokenized_and_give_budgets
         &calibration(Path::Cpu),
         1024,
         Path::Cpu,
-        2_244_011_552,
+        ("", 2_244_011_552),
     )
     .await;
     let Reminders::Available(budgets) = reminders else {
@@ -102,7 +102,7 @@ async fn a_failed_tokenize_makes_reminders_unavailable_not_the_generation() {
         vec![Ok(1800), Err(Failure::Transport)],
     ] {
         let server = tokenizer(counts);
-        let reminders = plan(&server, &calibration(Path::Cpu), 1024, Path::Cpu, 0).await;
+        let reminders = plan(&server, &calibration(Path::Cpu), 1024, Path::Cpu, ("", 0)).await;
         assert!(
             matches!(&reminders, Reminders::Unavailable(why) if why.contains("could not be measured")),
             "{reminders:?}"
@@ -114,7 +114,7 @@ async fn a_failed_tokenize_makes_reminders_unavailable_not_the_generation() {
 async fn a_deadline_over_the_ceiling_gives_the_reason_for_the_page() {
     // A reply bound of 2,560 tokens at 213 ms and the slowdown cannot fit 600 s.
     let server = tokenizer(vec![Ok(1800), Ok(2560)]);
-    let reminders = plan(&server, &calibration(Path::Cpu), 1024, Path::Cpu, 0).await;
+    let reminders = plan(&server, &calibration(Path::Cpu), 1024, Path::Cpu, ("", 0)).await;
     assert!(
         matches!(&reminders, Reminders::Unavailable(why) if why.contains("600 s ceiling")),
         "{reminders:?}"
@@ -126,7 +126,34 @@ async fn a_generation_without_budgets_has_no_reminders() {
     let mut bare = calibration(Path::Cpu);
     bare.derived = Err(super::super::budgets::NoBudgets::ReplyTooLarge);
     let server = tokenizer(vec![]);
-    let reminders = plan(&server, &bare, 1024, Path::Cpu, 0).await;
+    let reminders = plan(&server, &bare, 1024, Path::Cpu, ("", 0)).await;
     assert!(matches!(reminders, Reminders::Unavailable(_)));
     assert!(server.seen.lock().unwrap().is_empty());
+}
+
+/// The GPU restore is sized from the shipped model's measured entry (Qwen3.5-9B: 32 KiB per token
+/// and five 50.25 MiB states), recognised by its pinned SHA-256.
+#[tokio::test]
+async fn the_gpu_restore_is_sized_from_the_measured_entry_of_the_shipped_model() {
+    use crate::assistant::model::GPU_DEFAULT_MODEL_SHA256;
+    let server = tokenizer(vec![Ok(1800), Ok(900)]);
+    let calibration = calibration(Path::Gpu);
+    let reminders = plan(
+        &server,
+        &calibration,
+        1024,
+        Path::Gpu,
+        (GPU_DEFAULT_MODEL_SHA256, 5_680_522_464),
+    )
+    .await;
+    let Reminders::Available(budgets) = reminders else {
+        panic!("{reminders:?}");
+    };
+    let entry = calibration.prefix_tokens * 32.0 / 1024.0 + 5.0 * 50.25;
+    let expected = entry * 0.00053 + 0.010;
+    assert!(
+        (budgets.restore.seconds - expected).abs() < 1e-9,
+        "{} against {expected}",
+        budgets.restore.seconds
+    );
 }

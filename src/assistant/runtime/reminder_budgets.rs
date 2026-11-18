@@ -11,41 +11,44 @@ use super::calibration::Primed;
 use super::launch::CTX_SIZE;
 use std::time::Duration;
 
-/// The largest the cache entry load time per MiB of entry, in seconds, as measured on the
-/// development host (3c-0, `docs/results.md`: about 20-55 ms for a 150 MiB entry, so 0.37
-/// ms/MiB; the figure scales with the entry's size and the host's memory bandwidth, and a
-/// slower host is slower). Used for the CPU path's host-RAM prompt cache (choice (c)).
+/// The cache entry load time per MiB of entry on the CPU path, in seconds, as measured on the
+/// development host (3c-0, `docs/results.md`: about 20-55 ms for a 150 MiB entry; the figure
+/// scales with the entry's size and the host's memory bandwidth, and a slower host is slower).
 pub(crate) const RESTORE_S_PER_MIB: f64 = 0.055 / 150.0;
+/// The same on the GPU path (3c-0: save plus load of a 263 MiB entry took up to 276 ms, about
+/// 0.53 ms per MiB at worst), and the fixed cost of restoring the checkpoint (about 10 ms).
+pub(crate) const GPU_RESTORE_S_PER_MIB: f64 = 0.00053;
+pub(crate) const GPU_RESTORE_FIXED_S: f64 = 0.010;
 
 /// The restore cost of the interpretation prefix after a reminder.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Restore {
     pub seconds: f64,
-    /// The cost is the dev host's constant [`RESTORE_S_PER_MIB`] (CPU, choice (c)), not
-    /// measured on this host; false for the GPU path's re-priming, which priming measured.
+    /// The cost is a constant measured on the development host, not on this host.
     pub dev_host_constant: bool,
 }
 
-/// The restore after a reminder: on the CPU path loading the interpretation's cache entry
-/// (`entry_mib`: its size, from the prefix's tokens), on the GPU path re-priming the prefix
-/// (the time priming measured; without that time, the measured prompt rate times the prefix).
-pub(crate) fn restore(path: Path, primed: &Primed, entry_mib: f64, prompt_rate_s: f64) -> Restore {
-    match path {
-        Path::Cpu => Restore {
-            seconds: entry_mib * RESTORE_S_PER_MIB,
-            dev_host_constant: true,
+/// The restore after a reminder: loading the interpretation's cache entry (`entry_mib`: its
+/// size, from the prefix's tokens), on both paths, from the constants measured on the
+/// development host.
+pub(crate) fn restore(path: Path, entry_mib: f64) -> Restore {
+    Restore {
+        seconds: match path {
+            Path::Cpu => entry_mib * RESTORE_S_PER_MIB,
+            Path::Gpu => entry_mib * GPU_RESTORE_S_PER_MIB + GPU_RESTORE_FIXED_S,
         },
-        Path::Gpu => {
-            let measured = primed.prompt_ms / 1000.0;
-            Restore {
-                seconds: if measured.is_finite() && measured > 0.0 {
-                    measured
-                } else {
-                    prompt_rate_s * primed.prefix_tokens
-                },
-                dev_host_constant: false,
-            }
-        }
+        dev_host_constant: true,
+    }
+}
+
+/// The GPU path's fallback after a failed cache check: re-priming the prefix, the time priming
+/// measured (without that time, the measured prompt rate times the prefix).
+pub(crate) fn reprime_seconds(primed: &Primed, prompt_rate_s: f64) -> f64 {
+    let measured = primed.prompt_ms / 1000.0;
+    if measured.is_finite() && measured > 0.0 {
+        measured
+    } else {
+        prompt_rate_s * primed.prefix_tokens
     }
 }
 
@@ -59,7 +62,7 @@ pub(crate) struct Inputs {
     pub system_tokens: f64,
     /// The reminder reply bound in tokens.
     pub reply_tokens: u32,
-    /// The size of the interpretation prefix's cache entry, MiB (CPU path).
+    /// The size of the interpretation prefix's cache entry, MiB.
     pub entry_mib: f64,
 }
 
@@ -74,9 +77,11 @@ pub(crate) struct ReminderBudgets {
     /// before the first token), counted by `presume_busy` and by admission while one runs.
     pub busy: Duration,
     pub restore: Restore,
+    /// How long re-priming the prefix takes (GPU path, after a failed cache check).
+    pub reprime: Duration,
     pub reply_tokens: u32,
     /// The interpretation prefix's tokens (priming's): the next interpretation after a reminder
-    /// must read at least 75 % of them from the cache (CPU path, checked at run time).
+    /// must read at least 75 % of them from the cache (checked at run time).
     pub prefix_tokens: u64,
     /// The worst extra wait of a scribble reading right after a cancelled reminder: its whole
     /// prompt plus the restore.
@@ -93,7 +98,7 @@ pub(crate) enum Unavailable {
     /// The busy term, the restore and the readings ahead (R each) are more than Q: a reminder
     /// could make a scribble reading refused.
     BeyondQueue { needed_s: u64, queue_s: u64 },
-    /// The CPU restore does not fit the margin of an interpretation's run deadline.
+    /// The restore does not fit the margin of an interpretation's run deadline.
     BeyondMargin,
     /// The system message, N(B), the reply bound and the template's margin exceed the
     /// context.
@@ -108,7 +113,18 @@ pub(crate) enum Unavailable {
 
 impl Unavailable {
     /// The reason as the page states it.
-    pub(crate) fn describe(&self) -> String {
+    pub(crate) fn describe(&self, path: Path) -> String {
+        let help = match path {
+            Path::Cpu => "; more threads or the GPU path could make them available",
+            Path::Gpu => "",
+        };
+        format!(
+            "reminders are off for this generation: {}{help}",
+            self.reason()
+        )
+    }
+
+    fn reason(&self) -> String {
         match self {
             Self::Unmeasured => "the generation's measurements are incomplete".to_owned(),
             Self::OverCeiling { needed_s } => format!(
@@ -201,10 +217,17 @@ pub(crate) fn derive(inputs: &Inputs) -> Result<ReminderBudgets, Unavailable> {
     if run > RUN_CEILING_S {
         return Err(Unavailable::OverCeiling { needed_s: run });
     }
-    let restore = restore(path, &inputs.primed, inputs.entry_mib, p);
-    if !restore.seconds.is_finite() {
+    let restore = restore(path, inputs.entry_mib);
+    let reprime = reprime_seconds(&inputs.primed, p);
+    if !restore.seconds.is_finite() || !reprime.is_finite() {
         return Err(Unavailable::Unmeasured);
     }
+    // What follows the reminder's prompt: the restore, and on the GPU path, after a failed cache
+    // check, the re-prime that admission adds as its own wait (the longer of the two counts).
+    let wait_after = match path {
+        Path::Cpu => restore.seconds,
+        Path::Gpu => restore.seconds.max(reprime),
+    };
     let busy = Duration::from_secs_f64(prompt_s.ceil());
     // Rounded up to whole seconds, as Q is.
     #[expect(
@@ -212,7 +235,7 @@ pub(crate) fn derive(inputs: &Inputs) -> Result<ReminderBudgets, Unavailable> {
         clippy::cast_sign_loss,
         reason = "a non-negative number of seconds, far below u64"
     )]
-    let needed_s = (prompt_s + restore.seconds).ceil() as u64;
+    let needed_s = (prompt_s + wait_after).ceil() as u64;
     // A reading may wait behind the reminder's busy time and the restore, and behind the readings
     // admitted ahead of it: one on the CPU path (D is 1 and the first reading does not count
     // toward it), D on the GPU path; each takes R. All within Q.
@@ -228,14 +251,14 @@ pub(crate) fn derive(inputs: &Inputs) -> Result<ReminderBudgets, Unavailable> {
             queue_s,
         });
     }
-    // With the host-RAM cache the restore happens inside the next interpretation's request,
-    // so it must fit the margin R leaves over the estimate.
+    // The restore from the host-RAM cache happens inside the next interpretation's request, so
+    // it must fit the margin R leaves over the estimate, on both paths.
     #[expect(
         clippy::cast_precision_loss,
         reason = "a run deadline of at most 600 s"
     )]
     let margin = inputs.derived.budgets.run.as_secs() as f64 - inputs.derived.estimate_s;
-    if path == Path::Cpu && restore.seconds > margin {
+    if restore.seconds > margin {
         return Err(Unavailable::BeyondMargin);
     }
     // Never worse for a scribble reading than a running interpretation: R plus its busy term.
@@ -252,6 +275,7 @@ pub(crate) fn derive(inputs: &Inputs) -> Result<ReminderBudgets, Unavailable> {
         estimate_s,
         busy,
         restore,
+        reprime: Duration::from_secs_f64(reprime.max(0.0)),
         reply_tokens: inputs.reply_tokens,
         prefix_tokens: prefix_tokens(inputs.primed.prefix_tokens),
         extra_wait: Duration::from_secs(needed_s),

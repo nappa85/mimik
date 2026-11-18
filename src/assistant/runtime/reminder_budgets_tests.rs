@@ -57,16 +57,21 @@ fn a_reminder_has_its_own_deadline_busy_term_and_extra_wait() {
 }
 
 #[test]
-fn the_gpu_path_re_primes_with_the_time_priming_measured() {
+fn the_gpu_restore_is_the_entry_load_cost_and_the_fallback_reprime_is_priming_time() {
     let mut inputs = make(Path::Gpu);
     inputs.primed = Primed::of(1460.0, 10.0);
+    inputs.entry_mib = 260.0;
     let budgets = derive(&inputs).unwrap();
-    assert!(!budgets.restore.dev_host_constant);
-    assert!((budgets.restore.seconds - 14.6).abs() < 1e-6);
+    // 0.53 ms per MiB of entry plus 10 ms, a figure from the development host.
+    assert!(budgets.restore.dev_host_constant);
+    assert!((budgets.restore.seconds - (260.0 * 0.00053 + 0.010)).abs() < 1e-9);
+    assert!(budgets.restore.seconds < 0.2);
+    // The priming time is only the fallback's.
+    assert!((budgets.reprime.as_secs_f64() - 14.6).abs() < 1e-6);
     // Without priming's time, the measured prompt rate times the prefix.
     inputs.primed.prompt_ms = f64::NAN;
     let budgets = derive(&inputs).unwrap();
-    assert!((budgets.restore.seconds - 0.088 * 1460.0).abs() < 1e-6);
+    assert!((budgets.reprime.as_secs_f64() - 0.088 * 1460.0).abs() < 1e-6);
 }
 
 #[test]
@@ -80,7 +85,7 @@ fn a_deadline_over_the_ceiling_makes_reminders_unavailable_with_the_reason() {
         matches!(error, Unavailable::OverCeiling { .. }),
         "{error:?}"
     );
-    assert!(error.describe().contains("600 s ceiling"));
+    assert!(error.describe(Path::Cpu).contains("600 s ceiling"));
 }
 
 #[test]
@@ -112,11 +117,33 @@ fn a_reminder_that_could_make_a_scribble_reading_refused_is_unavailable() {
 }
 
 #[test]
-fn a_cpu_restore_beyond_the_interpretations_margin_is_unavailable() {
-    let mut inputs = make(Path::Cpu);
-    inputs.entry_mib = 10_000_000.0;
-    inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
-    assert_eq!(derive(&inputs), Err(Unavailable::BeyondMargin));
+fn a_restore_beyond_the_interpretations_margin_is_unavailable_on_both_paths() {
+    for path in [Path::Cpu, Path::Gpu] {
+        let mut inputs = make(path);
+        inputs.entry_mib = 10_000_000.0;
+        inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
+        assert_eq!(derive(&inputs), Err(Unavailable::BeyondMargin), "{path:?}");
+    }
+}
+
+#[test]
+fn an_unavailable_reason_says_reminders_are_off_and_what_helps() {
+    let error = Unavailable::OverCeiling { needed_s: 700 };
+    let cpu = error.describe(Path::Cpu);
+    assert!(
+        cpu.starts_with("reminders are off for this generation"),
+        "{cpu}"
+    );
+    assert!(
+        cpu.contains("more threads") && cpu.contains("GPU path"),
+        "{cpu}"
+    );
+    let gpu = error.describe(Path::Gpu);
+    assert!(
+        gpu.starts_with("reminders are off for this generation"),
+        "{gpu}"
+    );
+    assert!(!gpu.contains("more threads"), "{gpu}");
 }
 
 #[test]
@@ -144,7 +171,7 @@ fn a_reminder_that_does_not_fit_the_context_is_unavailable_with_the_reason() {
         matches!(error, Unavailable::BeyondContext { .. }),
         "{error:?}"
     );
-    assert!(error.describe().contains("context"));
+    assert!(error.describe(Path::Gpu).contains("context"));
 }
 
 #[test]
@@ -155,6 +182,8 @@ fn a_reminder_worse_than_a_running_interpretation_is_unavailable() {
     inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
     let needed = derive(&inputs).unwrap().extra_wait.as_secs();
     inputs.derived.budgets.busy_after_expiry = Duration::ZERO;
+    // R's margin over the estimate is not what this is about.
+    inputs.derived.estimate_s = 0.0;
     inputs.derived.budgets.run = Duration::from_secs(needed);
     assert!(derive(&inputs).is_ok());
     inputs.derived.budgets.run = Duration::from_secs(needed - 1);
@@ -195,4 +224,31 @@ fn a_reading_behind_a_reminder_must_still_fit_q_after_the_reading_ahead_of_it() 
         derive(&inputs),
         Err(Unavailable::BeyondQueue { .. })
     ));
+}
+
+/// On the GPU path the fallback re-prime follows a reminder after a failed cache check, and
+/// admission adds its time to the wait, so the availability checks count the longer of the
+/// restore and the re-prime.
+#[test]
+fn the_gpu_availability_checks_count_the_fallback_reprime() {
+    let mut inputs = make(Path::Gpu);
+    inputs.primed = Primed::of(1460.0, 88.0);
+    inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
+    let open = derive(&inputs).unwrap();
+    assert!(
+        open.extra_wait.as_secs_f64() >= open.busy.as_secs_f64() + open.reprime.as_secs_f64() - 1.0
+    );
+    let ahead =
+        inputs.derived.budgets.run.as_secs() * u64::try_from(inputs.derived.budgets.depth).unwrap();
+    inputs.derived.budgets.queue_wait = Duration::from_secs(ahead + open.busy.as_secs() + 1);
+    assert!(matches!(
+        derive(&inputs),
+        Err(Unavailable::BeyondQueue { .. })
+    ));
+    // The CPU path has no re-prime.
+    let mut cpu = make(Path::Cpu);
+    cpu.primed = Primed::of(1460.0, 88.0);
+    cpu.derived.budgets.queue_wait = Duration::from_secs(10_000);
+    let open = derive(&cpu).unwrap();
+    assert!(open.extra_wait.as_secs_f64() < open.busy.as_secs_f64() + 2.0);
 }

@@ -292,6 +292,7 @@ impl AssistantHandle {
                     seconds: 0.1,
                     dev_host_constant: true,
                 },
+                reprime: std::time::Duration::from_secs(9),
                 reply_tokens: 500,
                 prefix_tokens: 1500,
                 extra_wait: std::time::Duration::from_secs(21),

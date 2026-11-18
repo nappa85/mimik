@@ -11,17 +11,25 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   decrease note may be asked for a new reminder, and two decreases of one save typed alike are not
   told apart (the note holds no decrease address). Close with a stored link (address) if that
   proves confusing.
-- **REMIND-REPRIME** [GPU path] The re-priming after each reminder (`Interpreter::reprime`) is
-  tested with stubs only; the GPU's measured restore decides whether the host-RAM cache replaces
-  it (3c-0, live).
+- **REMIND-REPRIME** [GPU path] The fallback re-prime after a failed cache check
+  (`Interpreter::reprime`) is tested with stubs only, and its time counts in the generation's availability
+  checks (the longer of the restore and the re-prime, for Q and for a running interpretation's wait). Whether the user-boundary checkpoint survives
+  `--ctx-checkpoints 4`, and the restore constants with the flag, are pending a GPU re-measurement
+  (3c-1b).
+- **MEMORY-ENTRY** [prompt cache] Only the two shipped default files have measured entry sizes;
+  any other file gets a conservative size bound from its file size (no GGUF parser), so
+  `--cache-ram` and the memory check may be larger than needed, or, for an unusual architecture,
+  too small (the cache check after a reminder catches that at run time).
 
 - **REMIND-RESTORE** [CPU prompt cache] The CPU restore cost in the reminder budgets is the
   development host's cache-entry load time scaled by entry size (`RESTORE_S_PER_MIB`), not measured
   on the running host. The token limit of b12110's cache bounds the sum of the entries but rises
   with `--cache-ram` (`docs/results.md`, 3c-0), so two whole contexts fit. A restore that does not
   happen is detected at run time (the first interpretation after a reminder reading under 75 % of
-  the prefix from the cache switches reminders off for the generation) but not measured live. Close
-  with the live checks of `docs/assisted-sheet-plan.md`, 3c-1.
+  the prefix from the cache switches reminders off for the generation on the CPU path, back to the
+  re-prime on the GPU path, and so does an unrelated expiry of that interpretation). The GPU restore
+  cost (0.53 ms per MiB plus 10 ms) is the development host's. Close with the live checks of
+  `docs/assisted-sheet-plan.md`, 3c-1.
 - **REMIND-REPLY-BOUND** [reply bound] The reminder reply bound is the `/tokenize` count of the
   largest valid reply built with 64-character IDs (`contract::largest_reminder_reply`); it is
   not a measured model reply.

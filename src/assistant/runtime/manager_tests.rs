@@ -1487,7 +1487,7 @@ fn an_older_cancel_never_replaces_a_newer_one() {
     assert_eq!(cancel.trial.load(Ordering::SeqCst), 3);
 }
 
-/// The memory preflight counts the CPU path's prompt cache only for a CPU start: a GPU session
+/// The memory preflight is for the path that starts: a GPU session
 /// checks the GPU path, and the GPU-to-CPU fallback checks the CPU path again, so a host that
 /// cannot hold the cache says why instead of starting.
 #[tokio::test(start_paused = true)]
