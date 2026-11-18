@@ -648,6 +648,23 @@ GPU part of 3c-0 (measure the re-prime against the host-RAM cache and decide; th
 on the re-prime until then, and Qwen3.5's linear-attention layers are unmeasured). Run time
 detection of a failed CPU restore is implemented but not exercised against a real server.
 
+##### 3c-1b The prompt cache on the GPU path
+
+3c-0's GPU result (2026-11-18, `docs/results.md`): `--cache-ram` with room for two entries
+restores the interpretation prefix after a reminder on Qwen3.5-9B through a context checkpoint
+(0.48-0.65 s against a 9.2 s re-prime). Adopting it changes: `cache_ram_mib` per model as
+`2 × (ctx × KV per token + (1 + checkpoint cap) × recurrent-state size)` (sizes from the GGUF
+metadata or measured constants for the shipped models; the cache's token estimate at or above
+the two entries' tokens), with `--ctx-checkpoints` set to a cap and re-measured so the
+user-boundary checkpoint survives (a variable-length envelope sequence recording the checkpoint
+count); `enough_memory` counts the cache and the slot's checkpoints on the GPU path too, with
+the headroom checked on the documented minimum host; the cache check after a reminder applies on
+the GPU path, where a failed check falls back to the re-prime instead of switching reminders off;
+the pending re-prime is dropped while the cache works; the GPU restore cost (about 0.53 ms per
+MiB of entry plus 10 ms) replaces the priming time in R and the page's estimate, with the
+`BeyondMargin` check on the GPU path; recalibration with the flag and the flag-vector text and
+test. The tool also writes the thermal guard's minimum and maximum into its JSON.
+
 ##### 3c-2 Catalogue entry text and provenance (GPU path)
 
 - **Context.** Rows gain `entry` when 3a links them: the catalogue page's text rule, plain

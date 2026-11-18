@@ -70,8 +70,7 @@ prompt (99 % of the prefix reused, 1.1 s to first token at 5 threads, 2.5 s at 2
 where `--cache-ram 0` as shipped re-evaluates it whole (64 s, 150 s). The cache needs room for
 two entries: one entry fits and thrashes. Choice (c) passes the 75 % rule; (a) costs the full
 prompt time on every reminder. Scope of the decision: the CPU path with Granite 4.2 (dense
-attention) on this host; the GPU path (Qwen3.5-9B, linear-attention layers, where a restored
-entry may not roll back to the prefix's end) stays on (a) until measured. Reviewed (fresh Opus
+attention) on this host; the GPU path (Qwen3.5-9B, linear-attention layers) has its own entry below. Reviewed (fresh Opus
 subagent, 2026-11-18): sound with caveats, applied below.
 
 - **Setup:** the pinned llama-server b12110 CPU build, native (ASSIST-40), host AMD Ryzen 5
@@ -137,8 +136,96 @@ subagent, 2026-11-18): sound with caveats, applied below.
   tool did not record reply text); no third prompt kind between (a different reminder prompt, a
   calibration or trial, a cancelled reminder's partial state): back-to-back reminders keep the
   interpretation entry only because they share one system message; the 2-thread daytime window
-  was enforced by the tool but every run was at night. The GPU path (Qwen3.5-9B, host-to-device copy) is pending
-  until the fan can be read as manual.
+  was enforced by the tool but every run was at night. The GPU path has its own entry below.
+
+## Prompt cache across prompts, GPU path (3c-0, 2026-11-18)
+
+Prototype tier, live inference; reviewed (fresh Opus subagent, 2026-11-18: sound with caveats,
+applied here). Conclusion: with Qwen3.5-9B
+(linear-attention layers) on the RX 6650 XT, `--cache-ram` with room for two entries restores
+the interpretation prefix after a reminder: `cache_n` 1,810 of 1,805 prefix tokens (100 %, pass
+rule met in every interpretation after a reminder in the 600 and 2,048 MiB runs), 0.4-0.65 s to first token, against 9.2-9.4 s
+with `--cache-ram 0` (`cache_n` 0 in 6 of 6 interpretations after a reminder). Recommendation:
+choose (c), `--cache-ram` with room for two entries (at least 600 MiB measured; size it from
+the entry formula below), over (a) re-priming: (a) costs the full prefix evaluation (9.2 s,
+`prime after R3`) on every reminder, (c) costs 0.48-0.65 s. One entry of room (300 MiB) does
+not work (0/2 interpretations reused). Replies after a restore equal the fresh ones (16-token
+replies). Why the reuse lands on the prefix: b12110 checkpoints the start of the last user
+message, and Mimik puts every dynamic part in the user message after the fixed system message;
+a template change or dynamic data in the system message would lose it (the check after a
+reminder would show it). The checkpoint count is not settled (below): size the cache from a cap.
+
+- **Setup:** the pinned llama-server b12110 Vulkan build, native (ASSIST-40), `--n-gpu-layers
+  99 --device Vulkan0`, 4 threads, without `MESA_SHADER_CACHE_DISABLE` and outside the sandbox,
+  Qwen3.5-9B Q4_K_M (SHA-256 checked by hand against the pinned GPU default before the run,
+  not by the tool), the CPU entry's flag vector and
+  requests (same stand-in reminder, same interpretation prefix with the 2c reply grammar, greedy,
+  one slot, ctx 8192, thinking off, `max_tokens` 16 for reminders). Tool:
+  `tools/assist_runtime_measure.py cache --gpu-device Vulkan0 --sequence min|pair|short|full`,
+  which refuses the GPU path from 08:55 on weekdays (kills a running server then), and the
+  tool's fan and junction guard (manual fan, `pwm1` >= 230, junction < 85 C). Denominator: the
+  `/tokenize` count of the prefix (1,805); an interpretation request is 1,836 prompt tokens cold.
+  Run at about 07:43-07:50 on a weekday morning, before the window.
+- **Baseline `--cache-ram 0`** (3 variants of 1 rep: the min, pair and full sequences):
+  after a reminder `cache_n` 0, `prompt_n` 1,836, 9.2-9.4 s to first token (6 interpretations,
+  0 of 6 pass). The log says: "checking checkpoint ... forcing full prompt re-processing due to
+  lack of cache data (likely due to SWA or hybrid/recurrent memory)" and erases the three
+  checkpoints: the checkpoints exist, but a request whose prompt departs from the stored
+  one before them cannot roll the recurrent state back, and with no cache the slot is
+  overwritten by the reminder. An immediate repeat reuses the slot (`cache_n` 1,810, 0.4 s).
+- **Re-priming (a)** (full sequence, `--cache-ram 0`, 1 rep): `prime after R3` is a full
+  evaluation (`prompt_n` 1,834, 9.2 s); the next interpretation then reuses (`cache_n` 1,810,
+  0.38 s). The one rep also shows `R4b` (repeat of a reminder) reusing 1,970 of its prompt.
+- **(c) with room for two entries:** 600 MiB, 2 reps with the pair sequence (I1, R1, I2, R2, I3,
+  I1 again) plus 1 rep with the full sequence, and 2,048 MiB, 1 rep (pair, the first run): every
+  interpretation after a reminder reused `cache_n` 1,810 (`prompt_n` 26), 0.38-0.65 s to first
+  token; every later reminder (after an interpretation) restored the reminder entry from the
+  cache (`cache_n` 1,819, `prompt_n` 155, 1.03 s); in the full sequence the re-prime after R3 cost 0.48 s
+  (`prompt_n` 24). No interpretation after a reminder was evaluated afresh in any 600 or 2,048 MiB run.
+- **Is the reuse point a context checkpoint:** yes. The log shows "restored context checkpoint
+  (pos_min = 1809, ... n_tokens = 1810, n_past = 1810)", then "superseding context checkpoint at
+  n_tokens = 1810" and a prefill of only the tail. The server creates three checkpoints per
+  prompt (at 1,320, 1,810 and 1,832 tokens for the interpretation: n−516, the start of the user
+  message and n−4; the 1,810 one is the reuse point), 50.25 MiB each. Every interpretation was
+  1,836 tokens, so the n−516 checkpoint always fell at 1,320; real envelopes vary in length, so
+  their n−516 checkpoints fall at different points inside the shared prefix and may accumulate
+  towards the server's limit of 32 (up to about 1.6 GiB per entry): not measured, nor checkpoints
+  taken during replies up to 2,560 tokens.
+  Restoring the checkpoint takes about 10 ms (log timestamps).
+- **Entry size and the selection rule:** one entry is 258.7-263.2 MiB for 1,844-1,989 tokens
+  (`cache state: 1 prompts`): the KV part is 32 KiB per token (256 MiB for 8,192 cells, 8
+  attention layers), plus the live recurrent state (50.25 MiB; `prompt_save ... total state
+  size = 107.918 MiB` for 1,844 tokens), plus three checkpoints of 50.25 MiB each, so the size
+  is `tokens x 32 KiB + (1 + checkpoints) x 50.25 MiB`, not proportional
+  to the tokens (about 140 KiB per token here, 80 KiB on Granite). Two entries are about 530
+  MiB: 600 MiB worked; 300 MiB (one entry) failed (0 of 2 interpretations reused; the server
+  log shows one entry and the reminder replacing it). The cache's effective token limit
+  (`8192 est` in the line) was not binding at 600 MiB. A sizing rule per bytes-per-token as in
+  `launch.rs` must use the state and checkpoint term, sized from a checkpoint cap (b12110's
+  `--ctx-checkpoints`), not from the 3 observed.
+- **Restore cost and the first token:** `prompt cache update took` 96-97 ms (first save, one
+  entry, 259 MiB), 104-123 ms (later saves, 600 MiB), up to 276 ms for the 263 MiB entry
+  once at 600 MiB and 2,048 MiB (save plus load, about 0.53 ms per MiB at worst). Time to first
+  token after a restore from the cache is 0.48-0.65 s (0.38 s is a reuse inside the slot), the
+  26 differing tokens
+  (about 350 ms of prompt processing) plus the update.
+- **Determinism:** the same steps restored at 600 MiB and evaluated afresh at `--cache-ram 0`
+  (I2, I3, I4, I5) give identical replies; the step `I1r` (the cold request repeated after I3,
+  a reuse inside the slot, not a cache load) equals the cold reply in 4/4 runs that have it (the
+  2,048 MiB run came from an earlier tool version without the step). 16-token greedy replies,
+  cut mid-JSON; not a proof that long replies match.
+- **Limitations:** one host, one model, one GPU, one weekday morning, 9 variants, the
+  stand-in reminder prompt and one-line envelope (as the CPU entry); entries only about 1,850
+  tokens (a real interpretation entry with a long reply is larger; the 3-checkpoint term is
+  per-prompt shaped, not tested at 8,192 tokens); no RSS or VRAM figure beyond the log's buffer
+  sizes (model 4,861 MiB, KV 256 MiB, recurrent state 50 MiB, compute 120 MiB; the cache lives in
+  host RAM); no saved thermal record (the guard's readings are not written out; the guard never
+  fired; the coordinator read the junction at 34 C before and 28 C after the runs, fan manual,
+  `pwm1` 255); reminders with differing system messages would evict the interpretation entry
+  with room for two (least recently used); a third prompt kind (a cancelled reminder,
+  calibration, a trial) on the hybrid model is not tested. 2c reply grammar used for
+  interpretations only. Nothing was cut by the time limit: the whole plan fit before 08:55.
+  Raw logs: `/media/data/mimik/live-progress/cache-logs-gpu/` (outside the repository).
 
 ## Prompt cache, grammar cost, reply length and VRAM (ASSIST-L47, ASSIST-L52, 2026-11-16)
 

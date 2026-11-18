@@ -54,6 +54,20 @@ def window_allows(threads, now=None):
     return heavy_allowed(now) or threads <= 2
 
 
+GPU_CUTOFF = (8, 55)  # a weekday GPU run must have ended by 08:55 (heavy work stops at 09:00)
+
+
+def gpu_cutoff_passed(now=None, cutoff=GPU_CUTOFF):
+    """True from `cutoff` (local time) until 18:00 on a weekday: no GPU run may start or go
+    on. Weekends and evenings are free."""
+    now = now or datetime.now()
+    return now.weekday() < 5 and cutoff <= (now.hour, now.minute) < (18, 0)
+
+
+def gpu_allowed(now=None):
+    return not gpu_cutoff_passed(now)
+
+
 class RefusedError(RuntimeError):
     """The run must not start (schedule, fan or temperature)."""
 
@@ -62,6 +76,8 @@ def gpu_refusal(root, now=None):
     """Why a native GPU run must not start, or None: the schedule, the manual fan and a
     sensor reading under the junction limit."""
     now = time.time() if now is None else now
+    if gpu_cutoff_passed(datetime.fromtimestamp(now)):
+        return "the GPU cutoff has passed (no GPU run from 08:55 on weekdays)"
     why = assist_gpu_live.refusal(now, ops.read_fan(root))
     if why:
         return why
@@ -230,7 +246,7 @@ class Server:
             lambda: ops.read_sensors(root),
             lambda: ops.read_fan(root),
             ops.SystemClock(),
-            ops.heavy_allowed,
+            lambda t: ops.heavy_allowed(t) and gpu_allowed(datetime.fromtimestamp(t)),
             lambda line: print(line, file=sys.stderr),
         )
 
@@ -292,6 +308,10 @@ class Server:
         answer = self.post("/v1/chat/completions", body)
         answer["wall_ms"] = (time.monotonic() - began) * 1000
         return answer
+
+    def tokenize(self, text):
+        """The token count of `text` as the server tokenizes it (no special tokens added)."""
+        return len(self.post("/tokenize", {"content": text})["tokens"])
 
     def stream_first_token(self, user, max_tokens, drop_after=None, drop_at_token=None):
         """A streamed request. `drop_after` is an absolute deadline in seconds from the send
@@ -500,9 +520,10 @@ def passes(cache_n, prefix_n, threshold=0.75):
     return reuse_fraction(cache_n, prefix_n) >= threshold
 
 
-def stream_result(lines, began, clock=time.monotonic):
+def stream_result(lines, began, clock=time.monotonic, text=None):
     """Reads server-sent-event `lines` (bytes, from `began`): returns (seconds to the first
-    non-empty content delta or None, the last `timings` object seen or None)."""
+    non-empty content delta or None, the last `timings` object seen or None). When `text` is
+    a list, every content delta is appended to it."""
     first = None
     timings = None
     for raw in lines:
@@ -513,7 +534,10 @@ def stream_result(lines, began, clock=time.monotonic):
         if event.get("timings"):
             timings = event["timings"]
         for choice in event.get("choices") or []:
-            if first is None and (choice.get("delta") or {}).get("content"):
+            content = (choice.get("delta") or {}).get("content")
+            if content and text is not None:
+                text.append(content)
+            if first is None and content:
                 first = clock() - began
     return first, timings
 
@@ -579,10 +603,12 @@ def timed(run, system, user, max_tokens=16, schema=False):
         body=json.dumps(body),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {run.key}"},
     )
-    first, timings = stream_result(connection.getresponse(), began)
+    reply = []
+    first, timings = stream_result(connection.getresponse(), began, text=reply)
     connection.close()
     timings = timings or {}
     return {
+        "reply": "".join(reply),
         "ttft_s": None if first is None else round(first, 2),
         "wall_s": round(time.monotonic() - began, 2),
         **{
@@ -592,9 +618,23 @@ def timed(run, system, user, max_tokens=16, schema=False):
     }
 
 
+def judge(steps, prefix_n):
+    """Adds the 3c-0 pass rule to each interpretation step that follows other work (not the
+    cold one): `reuse` (share of the prefix read from the cache) and `pass`."""
+    cold = steps[0].get("reply") if steps else None
+    for step in steps:
+        if step["step"].startswith("I1r"):
+            step["same_reply_as_cold"] = step.get("reply") == cold
+        if step["step"].startswith("I") and "cold" not in step["step"]:
+            n = step.get("cache_n") or 0
+            step["reuse"] = round(reuse_fraction(n, prefix_n), 3)
+            step["pass"] = passes(n, prefix_n)
+    return steps
+
+
 def cache_log_lines(path):
     """The log lines that mention the prompt cache, checkpoints or slot reuse."""
-    keys = ("cache", "checkpoint", "similarity", "sim_best", "restor", "mib")
+    keys = ("cache", "checkpoint", "similarity", "sim_best", "restor", "mib", "n_past")
     return [
         line.rstrip()[:300]
         for line in Path(path).read_text(errors="replace").splitlines()
@@ -623,8 +663,14 @@ def cache_steps(run):
         ("R3", lambda: reminder(3)),
         ("I4 after R3", lambda: interpretation(5)),
     )
+    # I1, R1, I2, R2, I3 and I1 again (the same request as the cold one: determinism).
+    pair = (*short[:5], ("I1r repeat after R2", lambda: interpretation(1)))
     plan = (
-        short
+        short[:3]
+        if getattr(run, "sequence", "") == "min"
+        else pair
+        if getattr(run, "sequence", "") == "pair"
+        else short
         if getattr(run, "short", False)
         else (
             ("I1 cold", lambda: interpretation(1)),
@@ -650,13 +696,24 @@ def cache_variant(args, cache_ram, rep, log_path):
     args.log = log_path
     run = Server(args)
     run.short = args.short
+    run.sequence = args.sequence
     processes = [run.process]
-    guard(processes, lambda: window_allows(args.threads))
+    if args.gpu_device:
+        guard(processes, gpu_allowed)
+    else:
+        guard(processes, lambda: window_allows(args.threads))
     try:
-        steps = cache_steps(run)
+        prefix_n = run.tokenize(PREFIX)
+        steps = judge(cache_steps(run), prefix_n)
     finally:
         run.stop()
-    return {"cache_ram": cache_ram, "rep": rep, "steps": steps, "log": cache_log_lines(log_path)}
+    return {
+        "cache_ram": cache_ram,
+        "rep": rep,
+        "prefix_tokens": prefix_n,
+        "steps": steps,
+        "log": cache_log_lines(log_path),
+    }
 
 
 def cache(args):
@@ -667,7 +724,7 @@ def cache(args):
     out = {"mode": "cache", "threads": args.threads, "variants": []}
     for rep in range(args.reps):
         for cache_ram in args.cache_ram_sizes:
-            if not window_allows(args.threads):
+            if (args.gpu_device and not gpu_allowed()) or not window_allows(args.threads):
                 out["stopped"] = "the weekday window opened"
                 return out
             out["variants"].append(
@@ -707,9 +764,14 @@ def main(argv=None):
     che.add_argument("--reps", type=int, default=2)
     che.add_argument("--short", action="store_true", help="the shorter request sequence")
     che.add_argument("--verbosity", type=int, help="llama-server log verbosity (for sizes)")
+    che.add_argument("--sequence", choices=["min", "pair", "short", "full"], default="full")
+    che.add_argument("--gpu-device", help="run the Vulkan build on this device (Vulkan0)")
     che.add_argument("--log-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "cache":
+        if args.gpu_device and not gpu_allowed():
+            print(json.dumps({"refused": "GPU cutoff 08:55 on weekdays"}))
+            return 2
         if not window_allows(args.threads):
             print(json.dumps({"refused": "weekday 09:00-18:00 allows at most 2 threads"}))
             return 2
