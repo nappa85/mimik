@@ -152,7 +152,8 @@ impl NoteValue {
 }
 
 /// One change note. `before` is `None` when there was no earlier value: on create and in a
-/// new row. `target` is the revision whose note an Undo reverted (`reverted` notes only).
+/// new row. `target` is the revision whose note an Undo reverted (`reverted` notes) or the
+/// revision of the decrease note an applied reminder is bound to (`reminded` notes).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Note {
     pub address: String,

@@ -863,5 +863,68 @@ class ContractV2(unittest.TestCase):
         )
 
 
+class ReminderEvalTests(unittest.TestCase):
+    def cases(self):
+        return json.loads(ae.REMINDER_CASES_PATH.read_text())["cases"]
+
+    def test_the_reminder_prefix_and_schema_are_the_pinned_ones(self):
+        import hashlib
+
+        prefix = ae.reminder_prefix()
+        self.assertEqual(hashlib.sha256(prefix.encode()).hexdigest(), ae.REMINDER_PREFIX_SHA256)
+        raw = (ae.SCHEMAS_DIR / "reminder-v1.json").read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), ae.REMINDER_SCHEMA_SHA256)
+        # Same hashes as the Rust constants in src/assistant/contract_tests.rs.
+        rust = (ae.Path(__file__).parent.parent / "src/assistant/contract_tests.rs").read_text()
+        self.assertIn(ae.REMINDER_PREFIX_SHA256, rust)
+        self.assertIn(ae.REMINDER_SCHEMA_SHA256, rust)
+
+    def test_there_are_eight_synthetic_cases_and_each_builds_a_request(self):
+        cases = self.cases()
+        self.assertEqual(len(cases), 8)
+        for case in cases:
+            request = ae.build_reminder_request(case)
+            self.assertTrue(request["user"].startswith("<data>\n"))
+            self.assertEqual(request["user"].count("</data>"), 1)
+            self.assertLess(len(request["user"].encode()), ae.DYNAMIC_LIMIT)
+            enum = request["schema"]["$defs"]["target"]["enum"]
+            self.assertEqual(enum[0], case["decrease"]["id"])
+
+    def test_booleans_text_and_notes_never_reach_the_prompt(self):
+        case = {
+            "id": "x",
+            "decrease": {"id": "hp", "label": "HP", "before": 5, "after": 1, "phrase": "p"},
+            "fields": [
+                {"id": "flag", "label": "Flag", "type": "boolean", "value": True},
+                {"id": "bio", "label": "Bio", "type": "text", "value": "secret"},
+                {"id": "luck", "label": "Luck", "type": "integer", "value": 2},
+            ],
+            "rows": [],
+            "expect_relevant": False,
+            "expect_row": None,
+        }
+        request = ae.build_reminder_request(case)
+        self.assertNotIn("secret", request["user"])
+        self.assertNotIn("flag", request["user"])
+        self.assertIn("luck", request["user"])
+        refs = request["schema"]["$defs"]["ref"]["properties"]["ref"]["enum"]
+        self.assertEqual(refs, ["hp", "luck"])
+        self.assertEqual(request["schema"]["properties"]["row"], {"type": "null"})
+
+    def test_scoring_checks_relevance_and_the_cited_row(self):
+        case = self.cases()[0]
+        good = json.dumps({"relevant": True, "row": "r1", "hint": "x", "option": None})
+        self.assertEqual(ae.score_reminder(good, case)["relevance_ok"], True)
+        self.assertEqual(ae.score_reminder(good, case)["row_ok"], True)
+        wrong = json.dumps({"relevant": True, "row": "r2", "hint": "x", "option": None})
+        self.assertFalse(ae.score_reminder(wrong, case)["row_ok"])
+        silent = json.dumps({"relevant": False, "row": None, "hint": "-", "option": None})
+        self.assertFalse(ae.score_reminder(silent, case)["relevance_ok"])
+        self.assertFalse(ae.score_reminder("not json", case)["parsed"])
+        quiet = self.cases()[3]
+        self.assertTrue(ae.score_reminder(silent, quiet)["relevance_ok"])
+        self.assertTrue(ae.score_reminder(silent, quiet)["row_ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,15 @@ pub(crate) fn value_at(located: &Located<'_>, data: &Value) -> Option<NoteValue>
     }
 }
 
+/// [`value_at`], with a top-level key the data lacks read as unknown: how a request encodes a
+/// sent field it cannot read, so a read set holds while the key is still missing.
+pub(crate) fn value_or_unknown_at(located: &Located<'_>, data: &Value) -> Option<NoteValue> {
+    match (value_at(located, data), &located.cell) {
+        (None, Cell::Field(field)) if data.get(&field.id).is_none() => Some(NoteValue::Unknown),
+        (value, _) => value,
+    }
+}
+
 /// Writes `value` at a located address: a number, unknown (`null`), an enum ID or a
 /// boolean, or `Absent` (an optional property is removed). Schema validation of the result
 /// is the writer's (`snapshots::write`).

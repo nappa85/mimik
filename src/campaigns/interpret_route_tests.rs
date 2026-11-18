@@ -52,12 +52,23 @@ async fn assisted_over(
     answers: &[&str],
     bytes: usize,
 ) -> Assisted {
+    assisted_with(definition, extra, answers, (bytes, false)).await
+}
+
+/// [`assisted_over`] with reminders available and on when `reminders`.
+async fn assisted_with(
+    definition: &Value,
+    extra: &[(&str, &str)],
+    answers: &[&str],
+    (bytes, reminders): (usize, bool),
+) -> Assisted {
     let mut setup = setup(definition).await;
     created(&setup, extra).await;
     let stub = Arc::new(StubInterpreter::answering(
         answers.iter().map(|answer| Ok((*answer).to_owned())),
     ));
-    let handle = AssistantHandle::ready_for_tests(Arc::clone(&stub) as _, budgets_at(bytes));
+    let handle =
+        AssistantHandle::ready_for_tests_with(Arc::clone(&stub) as _, budgets_at(bytes), reminders);
     setup.app = crate::auth::app_with_options(
         setup.store.clone(),
         crate::auth::AuthOptions {
@@ -1101,6 +1112,32 @@ async fn a_four_change_proposal_applies_in_one_revision_with_one_bundle() {
     assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::CONFLICT);
 }
 
+/// The page shows every change of an option with its target's label, and an enum change by its
+/// choice labels, never the raw option IDs (plan 3c-1: the user must see what Use writes).
+#[tokio::test]
+async fn a_two_change_option_shows_both_targets_and_the_enum_labels() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let (assisted, origin) = decreased().await;
+    let setup = &assisted.setup;
+    let mut changes = four();
+    changes.truncate(2);
+    let action = offered(&assisted, &origin, changes);
+    let job = action.split('/').nth(4).unwrap().to_owned();
+    let (status, done) = poll_done(setup, &job).await;
+    assert_eq!(status, StatusCode::OK, "{done}");
+    let shown = &done["options"][0]["changes"];
+    assert_eq!(shown.as_array().unwrap().len(), 2, "{done}");
+    assert_eq!(shown[0]["target"], "Current HP");
+    assert_eq!(shown[0]["before"], "70");
+    assert_eq!(shown[0]["after"], "60");
+    assert_eq!(shown[1]["target"], "Stance");
+    assert_eq!(shown[1]["before"], "Guard");
+    assert_eq!(shown[1]["expression"], "Long");
+    assert_eq!(shown[1]["after"], "Long");
+    assert!(!done.to_string().contains(LONG), "{done}");
+}
+
 /// What the apply refuses (409 with the fixed message, nothing written): one member's value
 /// changed, an undeclared enum option, a target outside the pin, a row that disappeared.
 #[tokio::test]
@@ -1557,4 +1594,422 @@ async fn a_bundle_with_a_changed_member_offers_no_undo() {
         super::assist_tests::text(&html, "#was-0").as_deref(),
         Some("Last change: was 60")
     );
+}
+
+// --- Reminders (plan 3c-1, "Trigger", "Route", "Read set and hash") --------------------------
+
+/// Max HP 84 less 14 (the decrease's difference), the Stance guard → the long option: one
+/// expression and one enum change, citing nothing.
+fn reminder_reply(changes: &str) -> String {
+    format!(
+        r#"{{"relevant":true,"row":null,"hint":"Rest to recover","option":{{"changes":{changes},"explanation":"matching the loss"}}}}"#
+    )
+}
+
+const MAX_HP_DOWN: &str =
+    r#"[{"ref":"max_hp","expr":{"op":"sub","l":{"ref":"max_hp"},"r":{"lit":14}}}]"#;
+
+async fn reminders_on(answers: &[String]) -> Assisted {
+    let answers: Vec<&str> = answers.iter().map(String::as_str).collect();
+    assisted_with(
+        &choices(),
+        &[("value-stance", "guard"), ("value-inspired", "false")],
+        &answers,
+        (1024, true),
+    )
+    .await
+}
+
+async fn remind(setup: &Setup, note: &str) -> (StatusCode, Value) {
+    let (status, answer, _) = send(
+        setup,
+        "POST",
+        "/private-sheets/1/reminders",
+        Some(&pairs(&[("csrf", &csrf()), ("note", note)])),
+        true,
+    )
+    .await;
+    (status, answer)
+}
+
+/// Only a save that commits a decrease on a top-level integer field carries `reminder.key`:
+/// never an increase, a scribble, a row cell, an unchanged save, a boolean or an enum; and not
+/// with reminders off or unavailable.
+#[tokio::test]
+async fn only_a_committed_decrease_on_an_integer_field_carries_a_reminder_key() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let on = reminders_on(&[]).await;
+    let answer = save_field(&on.setup, "hp", "70").await;
+    let key = answer["unit"]["reminder"]["key"]
+        .as_str()
+        .expect("a decrease");
+    assert!(key.ends_with(":field:hp"), "{key}");
+    // A sign-led decrease (sign_literal) qualifies; an increase, an unchanged save and a
+    // scribble do not.
+    let answer = save_field(&on.setup, "hp", "-5").await;
+    assert!(answer["unit"]["reminder"]["key"].is_string(), "{answer}");
+    let answer = save_field(&on.setup, "hp", "80").await;
+    assert!(answer["unit"].get("reminder").is_none(), "{answer}");
+    let answer = save_field(&on.setup, "hp", "80").await;
+    assert_eq!(answer["status"], "unchanged");
+    assert!(answer["unit"].get("reminder").is_none(), "{answer}");
+    let answer = save_field(&on.setup, "hp", "took some damage").await;
+    assert!(answer["unit"].get("reminder").is_none(), "{answer}");
+    // Another integer field qualifies; an enum or a row cell does not.
+    let answer = save_field(&on.setup, "max_hp", "50").await;
+    assert!(answer["unit"]["reminder"]["key"].is_string(), "{answer}");
+    let answer = save_field(&on.setup, "stance", &long_option()).await;
+    assert!(answer["unit"].get("reminder").is_none(), "{answer}");
+    let answer = save_quantity(&on.setup, 0, "0").await;
+    assert!(answer["unit"].get("reminder").is_none(), "{answer}");
+    // Off, or unavailable for the generation: no key anywhere.
+    let off = assisted_over(
+        &choices(),
+        &[("value-stance", "guard"), ("value-inspired", "false")],
+        &[],
+        1024,
+    )
+    .await;
+    let answer = save_field(&off.setup, "hp", "70").await;
+    assert!(answer["unit"].get("reminder").is_none(), "{answer}");
+}
+
+fn long_option() -> String {
+    "a".repeat(64)
+}
+
+/// 404 after the parse and the CSRF check when reminders are off, before rights; then the
+/// trigger is re-derived from the stored note: a forged, stale, wrong-field or non-decrease
+/// key is 409, a malformed one 400, and a note whose reminder was applied starts no new one.
+#[tokio::test]
+async fn the_reminder_route_rederives_the_trigger_and_an_applied_note_starts_no_new_reminder() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let off = assisted_over(
+        &choices(),
+        &[("value-stance", "guard"), ("value-inspired", "false")],
+        &[],
+        1024,
+    )
+    .await;
+    let (status, _, _) = send(
+        &off.setup,
+        "POST",
+        "/private-sheets/1/reminders",
+        Some(&pairs(&[("csrf", "bad"), ("note", "1:field:hp")])),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "CSRF first");
+    let (status, _) = remind(&off.setup, "1:field:hp").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "off: 404 before rights and keys"
+    );
+
+    let on = reminders_on(&[reminder_reply(MAX_HP_DOWN), reminder_reply(MAX_HP_DOWN)]).await;
+    let answer = save_field(&on.setup, "hp", "70").await;
+    let key = answer["unit"]["reminder"]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let revision = answer["revision"].as_str().unwrap().to_owned();
+    // Malformed and forged keys.
+    assert_eq!(
+        remind(&on.setup, "nonsense").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        remind(&on.setup, "1:meta:name").await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        remind(&on.setup, &format!("{revision}:field:max_hp"))
+            .await
+            .0,
+        StatusCode::CONFLICT,
+        "a note that is not the field's current one"
+    );
+    assert_eq!(
+        remind(
+            &on.setup,
+            &format!("{}:field:hp", revision.parse::<i64>().unwrap() + 5)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    // An extra pair is a malformed request.
+    let (status, _, _) = send(
+        &on.setup,
+        "POST",
+        "/private-sheets/1/reminders",
+        Some(&pairs(&[("csrf", &csrf()), ("note", &key), ("extra", "1")])),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // The real key starts a job, polled through the interpretation route.
+    let (status, started) = remind(&on.setup, &key).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let job = started["job"].as_str().unwrap();
+    assert_eq!(
+        started["poll"],
+        format!("/private-sheets/1/interpretations/{job}")
+    );
+    let (_, done) = poll_done(&on.setup, job).await;
+    assert_eq!(done["state"], "reminder", "{done}");
+    assert_eq!(done["hint"], "Rest to recover");
+    assert_eq!(done["row"], Value::Null);
+    let action = done["options"][0]["action"].as_str().unwrap();
+    assert_eq!(done["options"][0]["effect"], "84 \u{2192} 70");
+    // Use applies it as `reminded` bound to the decrease note; the decrease note stays current.
+    let (status, applied) = apply(&on.setup, action, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["units"][0]["value"], "70");
+    assert_eq!(applied["unit"], Value::Null);
+    // The note whose reminder was applied starts no new one (judged from the stored notes).
+    assert_eq!(remind(&on.setup, &key).await.0, StatusCode::CONFLICT);
+    // A field that no longer holds `after` makes the trigger fail.
+    let answer = save_field(&on.setup, "hp", "60").await;
+    let newer = answer["unit"]["reminder"]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(remind(&on.setup, &key).await.0, StatusCode::CONFLICT);
+    assert_eq!(remind(&on.setup, &newer).await.0, StatusCode::ACCEPTED);
+}
+
+/// An option's apply re-reads everything the reminder sent: a sent field that changed since,
+/// with the changes' own numbers unchanged, is refused and nothing is written.
+#[tokio::test]
+async fn a_reminder_apply_is_refused_when_a_sent_field_changed() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let enum_change = format!(r#"[{{"ref":"stance","enum":"{}"}}]"#, long_option());
+    let on = reminders_on(&[reminder_reply(&enum_change)]).await;
+    let answer = save_field(&on.setup, "hp", "70").await;
+    let key = answer["unit"]["reminder"]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, started) = remind(&on.setup, &key).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let (_, done) = poll_done(&on.setup, started["job"].as_str().unwrap()).await;
+    assert_eq!(done["state"], "reminder", "{done}");
+    let action = done["options"][0]["action"].as_str().unwrap().to_owned();
+    // Max HP was sent with the request; the option does not touch it.
+    save_field(&on.setup, "max_hp", "99").await;
+    let before = saved(&on.setup, 1).await;
+    let (status, answer) = apply(&on.setup, &action, &[]).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(saved(&on.setup, 1).await, before, "nothing written");
+}
+
+/// A catalogue row's name is re-read by its list and host ID: unchanged holds; renamed or
+/// removed (or its list gone) fails, and so does a sent field that changed.
+#[test]
+fn the_read_set_rechecks_row_names_by_host_id_and_sent_fields() {
+    use crate::assistant::proposal::Read;
+    use crate::campaigns::web::interpret_web::reads_hold;
+    let definition: crate::definitions::Definition =
+        serde_json::from_value(super::catalogue_member_tests::definition(None)).unwrap();
+    let data = json!({"label": "x", "equipment": [
+        {"id": "r1-1", "name": "Rope", "quantity": 2},
+        {"id": "r1-2", "name": "Lamp", "quantity": 1}]});
+    let name = |host: &str, text: &str| Read {
+        address: format!("row:equipment/{host}"),
+        value: text.into(),
+    };
+    let quantity = Read {
+        address: "cell:equipment/r1-1/quantity".into(),
+        value: r#"{"int":"2"}"#.into(),
+    };
+    let reads = vec![name("r1-1", "Rope"), name("r1-2", "Lamp"), quantity.clone()];
+    assert!(reads_hold(&definition, &data, &reads));
+    // Renamed.
+    let mut renamed = data.clone();
+    renamed["equipment"][1]["name"] = "Lantern".into();
+    assert!(!reads_hold(&definition, &renamed, &reads));
+    // Removed: the host ID is gone, even when another row now bears the name.
+    let mut removed = data.clone();
+    removed["equipment"] = json!([{"id": "r1-3", "name": "Lamp", "quantity": 1},
+                                  {"id": "r1-1", "name": "Rope", "quantity": 2}]);
+    assert!(!reads_hold(&definition, &removed, &reads));
+    // A sent cell changed.
+    let mut changed = data.clone();
+    changed["equipment"][0]["quantity"] = 3.into();
+    assert!(!reads_hold(&definition, &changed, &reads));
+    // An unknown list or a row address that is not one.
+    assert!(!reads_hold(
+        &definition,
+        &data,
+        &[
+            name("r1-1", "Rope"),
+            Read {
+                address: "row:nolist/r1-1".into(),
+                value: "Rope".into(),
+            }
+        ]
+    ));
+}
+
+/// An applied reminder is told apart per decrease: a `reminded` note bound to a revision with
+/// another decrease's typed text does not count as this decrease's.
+#[test]
+fn an_applied_reminder_belongs_to_its_own_decrease_in_a_revision() {
+    use crate::campaigns::notes::{Op, Stored};
+    let stored = |revision: i64, address: &str, op: Op, raw: &str, target: Option<i64>| Stored {
+        revision,
+        bundle: None,
+        note: crate::campaigns::notes::Note {
+            address: address.into(),
+            op,
+            raw: raw.into(),
+            before: Some(NoteValue::Int(9)),
+            after: NoteValue::Int(5),
+            target,
+        },
+    };
+    let hp = stored(4, "field:hp", Op::Literal, "5", None);
+    let gold = stored(4, "field:gold", Op::Literal, "-3", None);
+    let reminded = stored(6, "field:max_hp", Op::Reminded, "5", Some(4));
+    let current = [hp.clone(), gold.clone(), reminded];
+    assert!(crate::campaigns::remind::applied(current.iter(), &hp));
+    assert!(!crate::campaigns::remind::applied(current.iter(), &gold));
+    // Another revision's reminder never counts.
+    let other = stored(6, "field:max_hp", Op::Reminded, "5", Some(3));
+    assert!(!crate::campaigns::remind::applied([other].iter(), &hp));
+}
+
+/// A sent field the data does not hold at all (a missing top-level key) was sent as unknown,
+/// so it still holds while the key is missing and fails once the key has a value.
+#[test]
+fn a_missing_top_level_key_reads_as_unknown_as_it_was_sent() {
+    use crate::assistant::proposal::Read;
+    use crate::campaigns::web::interpret_web::reads_hold;
+    let definition: crate::definitions::Definition = serde_json::from_value(choices()).unwrap();
+    let unknown = Read {
+        address: "field:hp".into(),
+        value: NoteValue::Unknown.encode().unwrap(),
+    };
+    assert!(reads_hold(
+        &definition,
+        &json!({}),
+        std::slice::from_ref(&unknown)
+    ));
+    assert!(reads_hold(
+        &definition,
+        &json!({"hp": null}),
+        std::slice::from_ref(&unknown)
+    ));
+    assert!(!reads_hold(&definition, &json!({"hp": 5}), &[unknown]));
+    let five = Read {
+        address: "field:hp".into(),
+        value: NoteValue::Int(5).encode().unwrap(),
+    };
+    assert!(!reads_hold(&definition, &json!({}), &[five]));
+}
+
+/// The reminder's prompt carries only whole-number and choice fields: never a boolean, a text or
+/// a multiline value (plan 3c-1, "Context"), checked on the request the stub received.
+#[tokio::test]
+async fn text_multiline_and_booleans_are_never_in_the_reminder_prompt() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let mut definition = choices();
+    let unresolved = json!({"state": "unresolved", "reason": "Synthetic fixture"});
+    let fields = definition["fields"].as_array_mut().unwrap();
+    fields.push(json!({"id": "motto", "label": "Motto", "control": "text", "nullable": false, "mapping": unresolved}));
+    fields.push(json!({"id": "story", "label": "Story", "control": "multiline", "nullable": false, "mapping": unresolved}));
+    definition["groups"][0]["fields"]
+        .as_array_mut()
+        .unwrap()
+        .extend([json!("motto"), json!("story")]);
+    let answers = [reminder_reply(MAX_HP_DOWN)];
+    let answers: Vec<&str> = answers.iter().map(String::as_str).collect();
+    let on = assisted_with(
+        &definition,
+        &[
+            ("value-stance", "guard"),
+            ("value-inspired", "false"),
+            ("value-motto", "SECRETMOTTO"),
+            ("value-story", "SECRETSTORY"),
+        ],
+        &answers,
+        (1024, true),
+    )
+    .await;
+    let answer = save_field(&on.setup, "hp", "70").await;
+    let key = answer["unit"]["reminder"]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, started) = remind(&on.setup, &key).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    poll_done(&on.setup, started["job"].as_str().unwrap()).await;
+    let requests = on.stub.requests.lock().unwrap();
+    let sent = &requests[0].dynamic;
+    assert!(
+        sent.contains(r#""id":"max_hp""#) && sent.contains(r#""id":"stance""#),
+        "{sent}"
+    );
+    for absent in [
+        "inspired",
+        "Inspired",
+        "motto",
+        "story",
+        "SECRETMOTTO",
+        "SECRETSTORY",
+    ] {
+        assert!(!sent.contains(absent), "{absent} in {sent}");
+    }
+}
+
+/// Unavailable for the generation and not ready: 404 after the parse and the CSRF check, like
+/// off (a wrong CSRF token is refused first).
+#[tokio::test]
+async fn an_unavailable_or_unready_runtime_answers_the_reminder_route_with_404_after_csrf() {
+    use crate::assistant::jobs::{Reminders, RuntimeEvent};
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let on = reminders_on(&[]).await;
+    let answer = save_field(&on.setup, "hp", "70").await;
+    let key = answer["unit"]["reminder"]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let assistant = &on.handle.assistant;
+    // Unavailable for the generation.
+    assistant.event(RuntimeEvent::GenerationStarted { generation: 2 });
+    assistant.event(RuntimeEvent::Ready {
+        generation: 2,
+        budgets: budgets_at(1024),
+        interpreter: Arc::new(StubInterpreter::default()),
+        path: crate::assistant::runtime::Path::Cpu,
+        reminders: Reminders::Unavailable("test".into()),
+    });
+    assert_eq!(csrf_then_404(&on.setup, &key).await, StatusCode::NOT_FOUND);
+    // Not ready.
+    assistant.event(RuntimeEvent::GenerationEnded {
+        generation: 2,
+        reason: crate::assistant::jobs::EndReason::Exited,
+    });
+    assert_eq!(csrf_then_404(&on.setup, &key).await, StatusCode::NOT_FOUND);
+}
+
+/// A wrong CSRF token is refused first; then the route's answer.
+async fn csrf_then_404(setup: &Setup, key: &str) -> StatusCode {
+    let (status, _, _) = send(
+        setup,
+        "POST",
+        "/private-sheets/1/reminders",
+        Some(&pairs(&[("csrf", "bad"), ("note", key)])),
+        true,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "CSRF first");
+    remind(setup, key).await.0
 }

@@ -31,6 +31,33 @@ use tokio::sync::watch;
 
 /// `--ctx-size` (plan §1.4a, "Flag vector"; measurement-relevant).
 pub(crate) const CTX_SIZE: u32 = 8192;
+/// The measured size of one prompt-cache entry per token, in KiB (Granite 4.2 3B, 3c-0:
+/// 145.8-150 MiB for 1,855-1,915 tokens, as large as the KV cache).
+const ENTRY_KIB_PER_TOKEN: u64 = 80;
+/// The model file's bytes per KiB of entry per token (Granite 4.2 3B: about 2.0 GB for 80 KiB),
+/// the bound for a model whose layers are not known: bigger files get bigger entries.
+const FILE_BYTES_PER_ENTRY_KIB: u64 = 24_000 * 1024;
+
+/// The bound of one prompt-cache entry's size per token, in KiB, for a model file of
+/// `model_size` bytes (0: unknown, the measured minimum).
+pub(crate) fn entry_kib_per_token(model_size: u64) -> u64 {
+    (model_size / FILE_BYTES_PER_ENTRY_KIB).max(ENTRY_KIB_PER_TOKEN)
+}
+
+/// `--cache-ram` in MiB on the CPU path (plan 3c-0): room for two entries of a whole context
+/// (the interpretation's and a reminder's, each prompt plus reply at most the context), at
+/// the entry size per token bounded from the model file's size. Reuse after a reminder needs
+/// both entries to fit (one entry thrashes). b12110 bounds the SUM of the entries' tokens by the
+/// context size but raises that to this memory limit over the entries' average bytes per token
+/// (`docs/results.md`), so two contexts fit only while [`entry_kib_per_token`] is at or above the
+/// model's real per-token entry size; a model beyond that bound evicts the interpretation entry,
+/// which the run-time check of the first interpretation after a reminder catches.
+pub(crate) fn cache_ram_mib(ctx_size: u32, model_size: u64) -> u32 {
+    let kib = entry_kib_per_token(model_size);
+    let mib = (2 * u64::from(ctx_size) * kib).div_ceil(1024);
+    u32::try_from(mib).unwrap_or(u32::MAX)
+}
+
 /// How long the runner may take to report the sandbox's PID.
 const STATUS_WITHIN: Duration = Duration::from_secs(30);
 /// SIGTERM, then SIGKILL after this long.
@@ -211,6 +238,8 @@ pub(crate) struct Chosen {
 pub(crate) struct Real {
     settings: Settings,
     chosen: Mutex<Chosen>,
+    /// The chosen model file's size, as the last preflight read it (0 before).
+    model_size: AtomicU64,
     /// The pinned CPU build (the embedded manifest's; tests give another).
     cpu: Option<Build>,
     /// The pinned GPU (Vulkan) build.
@@ -403,6 +432,7 @@ impl Real {
                 sha256: settings.model_sha256.clone(),
                 alias: settings.alias.clone(),
             }),
+            model_size: AtomicU64::new(0),
             settings,
             cpu,
             gpu,
@@ -416,6 +446,11 @@ impl Real {
             cleanups: Arc::new(Cleanups::default()),
             unconfined: false,
         }
+    }
+
+    /// Records the chosen file's size (the preflight's, and tests').
+    pub(crate) fn set_model_size(&self, size: u64) {
+        self.model_size.store(size, Ordering::Relaxed);
     }
 
     /// The model the next start loads.
@@ -692,14 +727,43 @@ impl Real {
                 "--parallel",
                 "1",
                 "--no-warmup",
-                "--cache-ram",
-                "0",
                 "--reasoning",
                 "off",
             ]
             .map(String::from),
         );
+        // The CPU path keeps two prompts' caches in host RAM (plan 3c-0, choice (c)); the GPU
+        // path has none until its restore is measured (it re-primes instead, choice (a)).
+        let cache = if device.is_some() {
+            0
+        } else {
+            cache_ram_mib(
+                self.settings.ctx_size,
+                self.model_size.load(Ordering::Relaxed),
+            )
+        };
+        args.extend(["--cache-ram".into(), cache.to_string()]);
         args
+    }
+}
+
+/// The model and, on the CPU path, its prompt cache (up to its bound) must fit in the memory
+/// available, less [`MEMORY_MARGIN`].
+fn enough_memory(path: Path, ctx_size: u32, size: u64) -> Result<(), String> {
+    let cache = if path == Path::Cpu {
+        u64::from(cache_ram_mib(ctx_size, size)) << 20
+    } else {
+        0
+    };
+    let need = size.saturating_add(cache);
+    match mem_available() {
+        Some(available) if need > available.saturating_sub(MEMORY_MARGIN) => Err(format!(
+            "not enough memory for this model ({} MiB, with {} MiB of prompt cache; {} MiB available)",
+            size >> 20,
+            cache >> 20,
+            available >> 20
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -2661,15 +2725,8 @@ impl Launcher for Launch {
         let (_, stat) = files::open_file(models.as_fd(), &real.chosen().name, Owners::Mine)
             .map_err(|refusal| format!("the model: {refusal}"))?;
         let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
-        if let Some(available) = mem_available()
-            && size > available.saturating_sub(MEMORY_MARGIN)
-        {
-            return Err(format!(
-                "not enough memory for this model ({} MiB, {} MiB available)",
-                size >> 20,
-                available >> 20
-            ));
-        }
+        real.set_model_size(size);
+        enough_memory(path, real.settings.ctx_size, size)?;
         Ok(())
     }
 

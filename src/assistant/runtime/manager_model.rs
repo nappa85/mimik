@@ -439,7 +439,7 @@ async fn trial_work(
     slot: Arc<Mutex<Option<Arc<dyn Child>>>>,
 ) -> Result<TrialReport, String> {
     reporter.phase(Phase::Checking);
-    launcher.preflight(Path::Cpu).await?;
+    launcher.preflight(plan.path).await?;
     let probed = launcher.probe(plan.path).await;
     match probed.into_iter().find(|(level, _)| *level == plan.level) {
         Some((_, Ok(()))) => {}
@@ -472,7 +472,7 @@ async fn measure_trial(
 ) -> Result<TrialReport, String> {
     let began = Instant::now();
     let answered = AtomicBool::new(false);
-    let (prefix, priming) =
+    let (primed, priming) =
         warm(child, reporter, &answered, plan.path)
             .await
             .map_err(|failed| match failed {
@@ -488,7 +488,7 @@ async fn measure_trial(
     let max_tokens = reply_length::DEFAULT;
     let sample = |n: u8| reporter.phase(Phase::Sample(n));
     let (calibration, budgets) =
-        calibrate_budgets(server.as_ref(), plan.path, max_tokens, prefix, &sample)
+        calibrate_budgets(server.as_ref(), plan.path, max_tokens, primed, &sample)
             .await
             .map_err(|failed| match failed {
                 NotCalibrated::TooSlow(why, _)

@@ -141,7 +141,10 @@ fn structured_body(model: &str, user: &str, ref_ids: &[String], max_tokens: u32)
     });
     if let (Some(object), Value::Object(extra)) = (
         body.as_object_mut(),
-        crate::assistant::interpreter::additional_params(ref_ids),
+        crate::assistant::interpreter::additional_params(
+            &crate::assistant::interpreter::RequestKind::Interpretation,
+            ref_ids,
+        ),
     ) {
         object.extend(extra);
     }

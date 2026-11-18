@@ -1,7 +1,10 @@
 //! The interpretation client (assisted sheet plan §1.4, "Shape" and "Crate"): an
 //! [`Interpreter`] trait, the rig-core adapter over Mimik's bounded transport, and a stub
 //! for tests. One request per call: nothing retries.
-use super::contract::{FIXED_PREFIX, SCHEMA_NAME, schema_for};
+use super::contract::{
+    FIXED_PREFIX, REMINDER_PREFIX, REMINDER_SCHEMA_NAME, SCHEMA_NAME, reminder_schema_for,
+    schema_for,
+};
 use super::transport::Bounded;
 use async_trait::async_trait;
 use rig_core::completion::CompletionRequest;
@@ -10,14 +13,29 @@ use rig_core::providers::openai::OpenAI;
 use rig_core::providers::openai::wire::{LLAMACPP, OpenAIConfig};
 use serde_json::{Value, json};
 
-/// One interpretation request: the dynamic part (the data envelope), the IDs of its context
-/// items (the reply schema's `ref` enum) and the model's `max_tokens`. The fixed prefix is
-/// the same for every request.
+/// What a request is for: it picks the system message and the reply schema (plan 3c-1).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RequestKind {
+    /// A scribble's reading: the fixed prefix and the interpretation schema.
+    #[default]
+    Interpretation,
+    /// A reminder after a decrease: the reminder system message and schema, with the row IDs
+    /// and the change targets of this request (the expression references are `ref_ids`).
+    Reminder {
+        rows: Vec<String>,
+        targets: Vec<String>,
+    },
+}
+
+/// One model request: the dynamic part (the data envelope), the IDs of its context items
+/// (the reply schema's `ref` enum), the model's `max_tokens` and the kind. The system
+/// message is the same for every request of a kind.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Completion {
     pub dynamic: String,
     pub ref_ids: Vec<String>,
     pub max_tokens: u32,
+    pub kind: RequestKind,
 }
 
 /// A completed, bounded 2xx exchange, whatever its content.
@@ -46,6 +64,18 @@ pub(crate) trait Interpreter: Send + Sync {
     async fn tokens(&self, text: &str) -> Result<usize, Failure>;
     /// One streamed completion with the fixed prefix, the schema and `completion`.
     async fn complete(&self, completion: &Completion) -> Result<Completed, Failure>;
+    /// Evaluates the interpretation prefix again (one token of the priming request): after a
+    /// reminder on the GPU path replaced the slot's cache (plan 3c-0, choice (a)).
+    async fn reprime(&self) -> Result<(), Failure> {
+        self.complete(&Completion {
+            dynamic: super::runtime::calibration::priming_envelope(),
+            ref_ids: Vec::new(),
+            max_tokens: 1,
+            kind: RequestKind::Interpretation,
+        })
+        .await
+        .map(|_| ())
+    }
 }
 
 /// The `rig-core` adapter: the `OpenAI` chat route with the llama.cpp dialect, over
@@ -72,14 +102,21 @@ impl RigInterpreter {
     }
 }
 
-/// The body members beside rig's own (plan §1.4): the schema of a request that supplies
+/// The body members beside rig's own (plan §1.4): the schema of a request of `kind` that supplies
 /// `ref_ids` as `response_format`, the greedy sampler and `cache_prompt`. rig sets
 /// `stream: true` for a streamed call.
-pub(crate) fn additional_params(ref_ids: &[String]) -> Value {
+pub(crate) fn additional_params(kind: &RequestKind, ref_ids: &[String]) -> Value {
+    let (name, schema) = match kind {
+        RequestKind::Interpretation => (SCHEMA_NAME, schema_for(ref_ids)),
+        RequestKind::Reminder { rows, targets } => (
+            REMINDER_SCHEMA_NAME,
+            reminder_schema_for(rows, targets, ref_ids),
+        ),
+    };
     json!({
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": SCHEMA_NAME, "strict": true, "schema": schema_for(ref_ids)},
+            "json_schema": {"name": name, "strict": true, "schema": schema},
         },
         "top_k": 1,
         "seed": 0,
@@ -132,10 +169,13 @@ impl Interpreter for RigInterpreter {
 
     async fn complete(&self, completion: &Completion) -> Result<Completed, Failure> {
         let request = CompletionRequest::new(completion.dynamic.as_str())
-            .preamble(FIXED_PREFIX.as_str())
+            .preamble(match completion.kind {
+                RequestKind::Interpretation => FIXED_PREFIX.as_str(),
+                RequestKind::Reminder { .. } => REMINDER_PREFIX.as_str(),
+            })
             .temperature(0.0)
             .max_tokens(u64::from(completion.max_tokens))
-            .additional_params(additional_params(&completion.ref_ids));
+            .additional_params(additional_params(&completion.kind, &completion.ref_ids));
         let stream = self
             .client
             .chat(self.model.as_str())
@@ -168,6 +208,10 @@ pub(crate) mod stub {
         pub gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
         /// When set, `/tokenize` fails with this.
         pub tokenize_fails: Mutex<Option<Failure>>,
+        /// The prompt tokens each completion reports as read from the cache.
+        pub cached_tokens: Mutex<Option<u64>>,
+        /// How long each completion takes (tokio time), in order; later ones take none.
+        pub delays: Mutex<VecDeque<std::time::Duration>>,
     }
 
     impl StubInterpreter {
@@ -198,14 +242,20 @@ pub(crate) mod stub {
             if let Some(gate) = gate {
                 gate.acquire().await.unwrap().forget();
             }
+            let delay = self.delays.lock().unwrap().pop_front();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let answer = self
                 .answers
                 .lock()
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Err(Failure::Transport));
+            let cached_tokens = *self.cached_tokens.lock().unwrap();
             answer.map(|text| Completed {
                 text,
+                cached_tokens,
                 ..Completed::default()
             })
         }

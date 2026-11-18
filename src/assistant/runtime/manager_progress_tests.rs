@@ -15,6 +15,7 @@ type Seen = (usize, usize, Phase, Option<Qualifier>);
 fn delayed() -> Behaviour {
     Behaviour {
         prime_delay: Duration::from_millis(50),
+        tokenize_delay: Duration::from_millis(50),
         ..Behaviour::default()
     }
 }
@@ -76,6 +77,7 @@ fn fresh(steps: usize, from: usize, qualifier: Option<Qualifier>) -> Vec<Seen> {
         Phase::Priming,
         Phase::Sample(1),
         Phase::Sample(2),
+        Phase::Reminders,
     ];
     let phases = &phases[phases.len() - steps..];
     phases
@@ -94,10 +96,11 @@ fn retry(qualifier: Option<Qualifier>) -> Vec<Seen> {
         Phase::Priming,
         Phase::Sample(1),
         Phase::Sample(2),
+        Phase::Reminders,
     ]
     .iter()
     .enumerate()
-    .map(|(at, phase)| (at + 1, 6, *phase, qualifier))
+    .map(|(at, phase)| (at + 1, 7, *phase, qualifier))
     .collect()
 }
 
@@ -106,7 +109,7 @@ async fn a_fresh_start_walks_its_steps_in_order() {
     let launcher = launcher([Start::Ok(delayed())]);
     let (_assistant, handle) = manager(&launcher);
     let seen = walk(&handle, is_ready).await;
-    assert_eq!(seen, fresh(7, 0, None));
+    assert_eq!(seen, fresh(8, 0, None));
     handle.shutdown().await;
 }
 
@@ -162,7 +165,7 @@ async fn a_restart_while_ready_starts_with_the_stopping_step() {
     assert_eq!(handle.restart(), Restart::Accepted);
     // At once, before the manager has taken the command.
     let seen = walk(&handle, is_ready).await;
-    assert_eq!(seen, fresh(8, 0, None));
+    assert_eq!(seen, fresh(9, 0, None));
     handle.shutdown().await;
 }
 
@@ -173,7 +176,7 @@ async fn a_restart_while_unavailable_has_no_stopping_step() {
     super::tests::unavailable(&handle).await;
     assert_eq!(handle.restart(), Restart::Accepted);
     let seen = walk(&handle, is_ready).await;
-    assert_eq!(seen, fresh(7, 0, None));
+    assert_eq!(seen, fresh(8, 0, None));
     handle.shutdown().await;
 }
 
@@ -258,15 +261,15 @@ async fn the_cpu_after_a_gpu_failure_walks_the_fresh_list_from_checking_the_host
     let held = progress_of(&status).unwrap();
     assert_eq!(
         (held.step(), held.steps(), held.phase),
-        (1, 7, Phase::Checking)
+        (1, 8, Phase::Checking)
     );
     assert_eq!(
         held.describe(),
-        "step 1 of 7, checking the host (on the CPU after a GPU failure)"
+        "step 1 of 8, checking the host (on the CPU after a GPU failure)"
     );
     gate.notify_one();
     let seen = walk(&handle, is_ready).await;
-    assert_eq!(seen, fresh(7, 0, Some(Qualifier::GpuFallback)));
+    assert_eq!(seen, fresh(8, 0, Some(Qualifier::GpuFallback)));
     handle.shutdown().await;
 }
 
@@ -306,13 +309,13 @@ async fn a_reply_length_change_stops_the_server_and_a_revert_says_it_went_back()
     // The change's first start is too slow at 2,560 tokens: back to the earlier length, the
     // fresh list again (no stop) with the reason.
     // The change itself walked the list with the stop step.
-    assert!(seen.contains(&(2, 8, Phase::Checking, None)), "{seen:?}");
+    assert!(seen.contains(&(2, 9, Phase::Checking, None)), "{seen:?}");
     let again: Vec<Seen> = seen
         .iter()
         .copied()
         .filter(|item| item.3 == Some(Qualifier::EarlierLength))
         .collect();
-    assert_eq!(again, fresh(7, 0, Some(Qualifier::EarlierLength)));
+    assert_eq!(again, fresh(8, 0, Some(Qualifier::EarlierLength)));
     handle.shutdown().await;
 }
 
@@ -387,7 +390,7 @@ async fn a_trial_walks_its_steps_per_sample_and_per_phrase_then_the_previous_mod
     // The previous model's fresh session is its own progress, from the end of the trial's
     // candidate: the stop step first.
     // The stop itself takes no time with a fake server, so no sample sees it.
-    assert_eq!(&seen[13..], fresh(8, 1, None).as_slice());
+    assert_eq!(&seen[13..], fresh(9, 1, None).as_slice());
     handle.shutdown().await;
 }
 
@@ -516,7 +519,7 @@ async fn only_counted_failures_number_an_attempt() {
         },
     );
     let seen = walk(&handle, is_ready).await;
-    let retried: Vec<Seen> = seen.iter().copied().filter(|s| s.1 == 6).collect();
+    let retried: Vec<Seen> = seen.iter().copied().filter(|s| s.1 == 7).collect();
     assert_eq!(retried, retry(None));
     handle.shutdown().await;
     // A crash after the ready window is not counted either.
@@ -565,13 +568,13 @@ async fn a_restart_while_starting_and_the_end_of_a_trial_show_the_stop_not_a_sta
     until(Duration::from_secs(60), move || stopping_now(&probe)).await;
     let status = handle.status();
     let p = progress_of(&status).unwrap();
-    assert_eq!((p.step(), p.steps()), (1, 8));
+    assert_eq!((p.step(), p.steps()), (1, 9));
     release.notify_one();
     *launcher.unsettled.lock().unwrap() = None;
     let seen = walk(&handle, is_ready).await;
     assert_eq!(
         seen[..2],
-        [(1, 8, Phase::Stopping, None), (2, 8, Phase::Checking, None)]
+        [(1, 9, Phase::Stopping, None), (2, 9, Phase::Checking, None)]
     );
     handle.shutdown().await;
 
@@ -605,13 +608,13 @@ async fn assert_stopping_then_checking(handle: &Handle) {
     let p = progress_of(&status).unwrap();
     assert_eq!(
         (p.step(), p.steps(), p.phase, p.kind),
-        (1, 8, Phase::Stopping, Kind::Fresh { stopping: true })
+        (1, 9, Phase::Stopping, Kind::Fresh { stopping: true })
     );
     let seen = walk(handle, is_ready).await;
-    assert_eq!(seen[0], (1, 8, Phase::Stopping, None));
+    assert_eq!(seen[0], (1, 9, Phase::Stopping, None));
     assert_eq!(
         seen[1],
-        (2, 8, Phase::Checking, None),
+        (2, 9, Phase::Checking, None),
         "no second stop step"
     );
 }
@@ -750,7 +753,7 @@ async fn a_trial_cancelled_while_hashing_has_no_stop_step_and_a_ran_candidate_do
     // Nothing ran: no model server to stop.
     assert_eq!(
         (held.step(), held.steps(), held.phase, held.kind),
-        (1, 7, Phase::Checking, Kind::Fresh { stopping: false })
+        (1, 8, Phase::Checking, Kind::Fresh { stopping: false })
     );
     release.notify_one();
     *launcher.unsettled.lock().unwrap() = None;

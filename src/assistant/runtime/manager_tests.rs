@@ -34,6 +34,8 @@ pub(crate) struct Behaviour {
     pub(crate) prefix_tokens: f64,
     /// How long priming takes.
     pub(crate) prime_delay: Duration,
+    /// How long each `/tokenize` call takes.
+    pub(crate) tokenize_delay: Duration,
 }
 
 /// What a fake server gets wrong.
@@ -67,6 +69,7 @@ impl Default for Behaviour {
             phrase_delay: Duration::from_millis(100),
             prefix_tokens: 1460.0,
             prime_delay: Duration::ZERO,
+            tokenize_delay: Duration::ZERO,
         }
     }
 }
@@ -96,6 +99,9 @@ impl Server for FakeServer {
     async fn tokens(&self, text: &str) -> Result<usize, Failure> {
         if self.behaviour.fault == Fault::TokenizeFails {
             return Err(Failure::Status(500));
+        }
+        if !self.behaviour.tokenize_delay.is_zero() {
+            tokio::time::sleep(self.behaviour.tokenize_delay).await;
         }
         Ok(text.len().div_ceil(3))
     }
@@ -236,6 +242,8 @@ pub(crate) struct FakeLauncher {
     /// Delays of the next preflights, one each, before `preflight_delay` applies.
     pub(crate) preflight_delays: Mutex<VecDeque<Duration>>,
     pub(crate) preflights: Mutex<usize>,
+    /// The path each preflight was for, in order.
+    pub(crate) preflight_paths: Mutex<Vec<Path>>,
     /// While set, `settle` waits (as for a blocking start still finishing).
     pub(crate) unsettled: Mutex<Option<Arc<tokio::sync::Notify>>>,
     pub(crate) cancels: AtomicUsize,
@@ -302,8 +310,9 @@ impl Launcher for FakeLauncher {
         self.hints.lock().unwrap()[usize::from(path == Path::Gpu)].clone()
     }
 
-    async fn preflight(&self, _: Path) -> Result<(), String> {
+    async fn preflight(&self, path: Path) -> Result<(), String> {
         *self.preflights.lock().unwrap() += 1;
+        self.preflight_paths.lock().unwrap().push(path);
         let once = self.preflight_delays.lock().unwrap().pop_front();
         let delay = once.or(*self.preflight_delay.lock().unwrap());
         if let Some(delay) = delay {
@@ -1476,4 +1485,27 @@ fn an_older_cancel_never_replaces_a_newer_one() {
     assert_eq!(cancel.trial.load(Ordering::SeqCst), 2);
     cancel.publish(3);
     assert_eq!(cancel.trial.load(Ordering::SeqCst), 3);
+}
+
+/// The memory preflight counts the CPU path's prompt cache only for a CPU start: a GPU session
+/// checks the GPU path, and the GPU-to-CPU fallback checks the CPU path again, so a host that
+/// cannot hold the cache says why instead of starting.
+#[tokio::test(start_paused = true)]
+async fn the_preflight_is_for_the_path_that_starts_and_the_fallback_checks_the_cpu_again() {
+    let launcher = FakeLauncher::scripted([]);
+    let (assistant, handle) = gpu_manager(&launcher);
+    ready(&assistant).await;
+    assert_eq!(*launcher.preflight_paths.lock().unwrap(), [Path::Gpu]);
+    *launcher.preflight.lock().unwrap() = Some("not enough memory for this model".into());
+    launcher.child(0).crash();
+    let probe = handle.clone();
+    until(Duration::from_mins(15), move || {
+        matches!(probe.status().state, State::Unavailable(_))
+    })
+    .await;
+    assert_eq!(
+        *launcher.preflight_paths.lock().unwrap(),
+        [Path::Gpu, Path::Cpu]
+    );
+    drop(assistant);
 }

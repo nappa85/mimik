@@ -1700,6 +1700,131 @@ def check_cases(args):
     )
 
 
+# --- Reminders (step 3c-1): a smoke check of the reminder prompt, not a quality measure ------
+REMINDER_CASES_PATH = CASES_PATH.with_name("reminder-cases.json")
+REMINDER_PREFIX_SHA256 = "ed16ac36080fa5c22af58ae4da690d58b46491b83d7aa120fe95826bbda335e2"
+REMINDER_SCHEMA_SHA256 = "3744fd50813eba410d12e51c6e9d2cf587ca5f2795db394f9effb3aa3d330ae4"
+QUOTED_ROW = {"type": "string", "description": "the id of a list item from the data, or null"}
+QUOTED_FIELD = {"type": "string", "description": "the id of a field from the data"}
+
+
+def reminder_schema():
+    """The pinned reminder schema (``schemas/reminder-v1.json``) with its placeholder ids."""
+    return json.loads((SCHEMAS_DIR / "reminder-v1.json").read_text())
+
+
+def reminder_prefix():
+    """The reminder system message: instructions, heading, the schema with quoted ids."""
+    quoted = reminder_schema()
+    quoted["properties"]["row"]["anyOf"][0] = QUOTED_ROW
+    quoted["$defs"]["target"] = QUOTED_FIELD
+    quoted["$defs"]["ref"]["properties"]["ref"] = QUOTED_FIELD
+    instructions = (SCHEMAS_DIR / "reminder-v1-instructions.txt").read_text()
+    return instructions + SCHEMA_HEADING + json.dumps(quoted, separators=(",", ":"))
+
+
+def reminder_schema_for(rows, targets, refs):
+    schema = reminder_schema()
+    if rows:
+        schema["properties"]["row"]["anyOf"][0] = {"enum": list(rows)}
+    else:
+        schema["properties"]["row"] = {"type": "null"}
+    schema["$defs"]["target"] = {"enum": list(targets)}
+    schema["$defs"]["ref"]["properties"]["ref"] = {"enum": list(refs)}
+    return schema
+
+
+def build_reminder_request(case):
+    """The request of one reminder case: system message, user envelope, per-request schema."""
+    fields = [f for f in case["fields"] if f["type"] in ("integer", "enum")]
+    envelope = {"decrease": case["decrease"], "fields": fields, "rows": case["rows"]}
+    user = (
+        "<data>\n"
+        + json.dumps(envelope, separators=(",", ":"), ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        + "\n</data>"
+    )
+    decrease = case["decrease"]["id"]
+    targets = [decrease] + [f["id"] for f in fields]
+    refs = [decrease] + [f["id"] for f in fields if f["type"] == "integer"]
+    rows = [r["id"] for r in case["rows"]]
+    return {
+        "system": reminder_prefix(),
+        "user": user,
+        "schema": reminder_schema_for(rows, targets, refs),
+    }
+
+
+def score_reminder(content, case, validator=None):
+    """Score one reply: parsed, schema-valid, relevance and cited row against the case."""
+    row = {"parsed": False, "schema_valid": None, "relevance_ok": False, "row_ok": False}
+    try:
+        reply = json.loads(content)
+    except ValueError:
+        return row
+    row["parsed"] = isinstance(reply, dict)
+    if not row["parsed"]:
+        return row
+    if validator is not None:
+        row["schema_valid"] = validator.is_valid(reply)
+    row["relevance_ok"] = reply.get("relevant") is case["expect_relevant"]
+    row["row_ok"] = (
+        reply.get("row") == case["expect_row"]
+        if case["expect_relevant"]
+        else (reply.get("row") is None)
+    )
+    return row
+
+
+def run_reminder(args):
+    data = json.loads(args.cases.read_text())
+    with open(args.output, "x") as ledger:
+        ledger.write(
+            json.dumps(
+                {
+                    "event": "header",
+                    "arm": "reminder",
+                    "model_label": args.model_label,
+                    "prefix_sha256": hashlib.sha256(reminder_prefix().encode()).hexdigest(),
+                    "max_tokens": args.max_tokens,
+                    "started_unix": time.time(),
+                }
+            )
+            + "\n"
+        )
+        for case in data["cases"]:
+            request = build_reminder_request(case)
+            body = chat_body(request, args.max_tokens)
+            row = {"event": "case", "case": case["id"], "started_unix": time.time()}
+            try:
+                content, timings, usage, finish, ttft, total = stream_chat(
+                    args.endpoint, body, args.request_timeout
+                )
+                try:
+                    import jsonschema
+
+                    validator = jsonschema.Draft202012Validator(request["schema"])
+                except ImportError:
+                    validator = None
+                row.update(
+                    status="completed",
+                    content=content,
+                    timings=timings,
+                    usage=usage,
+                    finish_reason=finish,
+                    ttft_seconds=ttft,
+                    total_seconds=total,
+                    score=score_reminder(content, case, validator),
+                )
+            except (OSError, ValueError, urllib.error.URLError) as error:
+                row.update(status="failed", error=type(error).__name__ + ": " + str(error)[:200])
+            ledger.write(json.dumps(row, ensure_ascii=False) + "\n")
+            ledger.flush()
+            print(f"{case['id']} {row['status']} {row.get('score')}", flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1746,6 +1871,13 @@ def main(argv=None):
     check = sub.add_parser("check-cases")
     check.add_argument("--cases", type=Path, default=CASES_PATH)
     check.add_argument("--contract", choices=CONTRACTS, default="v1")
+    reminder = sub.add_parser("run-reminder")
+    reminder.add_argument("--endpoint", required=True)
+    reminder.add_argument("--model-label", required=True)
+    reminder.add_argument("--output", type=Path, required=True)
+    reminder.add_argument("--cases", type=Path, default=REMINDER_CASES_PATH)
+    reminder.add_argument("--max-tokens", type=int, default=1024)
+    reminder.add_argument("--request-timeout", type=float, default=600)
     args = parser.parse_args(argv)
     if getattr(args, "variant", None) is not None and getattr(args, "contract", "v1") != "v1":
         parser.error("--variant exists for --contract v1 only")
@@ -1755,6 +1887,8 @@ def main(argv=None):
         run_strot(args)
     elif args.command == "prime":
         return prime(args)
+    elif args.command == "run-reminder":
+        run_reminder(args)
     elif args.command == "summarize":
         print(json.dumps([summarize_ledger(p) for p in args.ledgers], indent=2))
     elif args.command == "fieldref-summary":

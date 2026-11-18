@@ -193,7 +193,13 @@ fn allowed_literals(checks: &Checks) -> BTreeSet<u64> {
     allowed
 }
 
-fn candidate(option: Value, checks: &Checks, allowed: &BTreeSet<u64>) -> Result<Candidate, Drop> {
+/// One option (`{expr, explanation}`) checked against `checks` with the literal magnitudes
+/// `allowed` (a reminder's change, whose provenance set differs per target).
+pub(crate) fn candidate(
+    option: Value,
+    checks: &Checks,
+    allowed: &BTreeSet<u64>,
+) -> Result<Candidate, Drop> {
     let option: RawOption = serde_json::from_value(option).map_err(|_| Drop::Shape)?;
     let expr: Node = serde_json::from_value(option.expr).map_err(|_| Drop::Shape)?;
     if depth(&expr) > MAX_DEPTH {

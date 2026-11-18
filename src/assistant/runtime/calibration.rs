@@ -80,12 +80,38 @@ pub(crate) fn filler(cap: usize, variant: usize) -> String {
     text(&items)
 }
 
+/// What priming measured: the prefix's prompt tokens and, for a reminder's cost model, the
+/// tokens it evaluated and the time that took (`prompt_ms` is NaN when the server gave none).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Primed {
+    /// Prompt tokens on an empty cache: the fixed prefix with the template and the minimal
+    /// envelope (evaluated plus cached).
+    pub prefix_tokens: f64,
+    /// Tokens evaluated by the priming request.
+    pub prompt_n: f64,
+    pub prompt_ms: f64,
+}
+
+impl Primed {
+    /// Tests: a priming of `tokens` evaluated at `ms_per_token`.
+    #[cfg(test)]
+    pub(crate) fn of(tokens: f64, ms_per_token: f64) -> Self {
+        Self {
+            prefix_tokens: tokens,
+            prompt_n: tokens,
+            prompt_ms: tokens * ms_per_token,
+        }
+    }
+}
+
 /// What priming and calibration measured, shown on the assistant page.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Calibration {
     /// Priming's prompt tokens on an empty cache: the fixed prefix (with the template and the
     /// minimal envelope).
     pub prefix_tokens: f64,
+    /// Priming's own measurement (kept for the reminder budgets, plan 3c-1).
+    pub primed: Primed,
     pub samples: [Sample; 2],
     /// Bytes per token of each filler (the density that sets N(B)).
     pub density: [f64; 2],
@@ -123,13 +149,13 @@ impl Interrupted {
     }
 }
 
-/// Primes the cache: the readiness gate. Returns priming's prompt tokens.
+/// Primes the cache: the readiness gate. Returns what priming measured.
 ///
 /// # Errors
 ///
 /// The exchange's failure; a priming answer without its prompt tokens is a transport
 /// failure.
-pub(crate) async fn prime(server: &dyn Server) -> Result<f64, Interrupted> {
+pub(crate) async fn prime(server: &dyn Server) -> Result<Primed, Interrupted> {
     let timings = server
         .plain(&priming_envelope(), 1, false)
         .await
@@ -137,7 +163,11 @@ pub(crate) async fn prime(server: &dyn Server) -> Result<f64, Interrupted> {
     let evaluated = timings
         .prompt_n
         .ok_or(Interrupted::Priming(Failure::Transport))?;
-    Ok(evaluated + timings.cache_n.unwrap_or(0.0))
+    Ok(Primed {
+        prefix_tokens: evaluated + timings.cache_n.unwrap_or(0.0),
+        prompt_n: evaluated,
+        prompt_ms: timings.prompt_ms.unwrap_or(f64::NAN),
+    })
 }
 
 fn sample(timings: Timings, wall_ms: f64, filler_tokens: usize) -> Sample {
@@ -169,7 +199,7 @@ pub(crate) async fn calibrate(
     server: &dyn Server,
     path: Path,
     max_tokens: u32,
-    prefix_tokens: f64,
+    primed: Primed,
     progress: &(dyn Fn(u8) + Sync),
 ) -> Result<Calibration, Interrupted> {
     let cap = path.cap();
@@ -198,6 +228,7 @@ pub(crate) async fn calibrate(
         let bytes_per_token = cap as f64 / tokens.max(1) as f64;
         *density = bytes_per_token;
     }
+    let prefix_tokens = primed.prefix_tokens;
     let samples = [samples[0], samples[1]];
     let derived = budgets::derive(&Measured {
         path,
@@ -207,6 +238,7 @@ pub(crate) async fn calibrate(
     });
     Ok(Calibration {
         prefix_tokens,
+        primed,
         samples,
         density,
         derived,

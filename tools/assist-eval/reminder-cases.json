@@ -1,0 +1,13 @@
+{
+  "note": "Synthetic reminder cases (3c-1): a smoke check of the reminder prompt, not a quality measure. expect_relevant is whether a reminder is wanted; expect_row the row it should cite (null: none).",
+  "cases": [
+    {"id": "rm-01", "decrease": {"id": "lantern", "label": "Lantern oil", "before": 6, "after": 2, "phrase": "burned 4 flasks"}, "fields": [{"id": "torches", "label": "Torches", "type": "integer", "value": 1}], "rows": [{"id": "r1", "list": "gear", "name": "Oil flask"}, {"id": "r2", "list": "gear", "name": "Rope"}], "expect_relevant": true, "expect_row": "r1"},
+    {"id": "rm-02", "decrease": {"id": "arrows", "label": "Arrows", "before": 20, "after": 12, "phrase": "shot 8"}, "fields": [], "rows": [{"id": "r1", "list": "gear", "name": "Quiver"}, {"id": "r2", "list": "gear", "name": "Healing potion"}], "expect_relevant": true, "expect_row": "r1"},
+    {"id": "rm-03", "decrease": {"id": "hp", "label": "Hit points", "before": 20, "after": 15, "phrase": "took 5"}, "fields": [{"id": "max_hp", "label": "Maximum hit points", "type": "integer", "value": 24}], "rows": [{"id": "r1", "list": "gear", "name": "Healing potion"}], "expect_relevant": true, "expect_row": "r1"},
+    {"id": "rm-04", "decrease": {"id": "silver", "label": "Silver", "before": 120, "after": 90, "phrase": "paid 30 for the room"}, "fields": [], "rows": [{"id": "r1", "list": "gear", "name": "Shield"}], "expect_relevant": false, "expect_row": null},
+    {"id": "rm-05", "decrease": {"id": "omens", "label": "Omens", "before": 3, "after": 2, "phrase": ""}, "fields": [{"id": "stance", "label": "Stance", "type": "enum", "value": "guard"}], "rows": [], "expect_relevant": false, "expect_row": null},
+    {"id": "rm-06", "decrease": {"id": "rations", "label": "Rations", "before": 5, "after": 0, "phrase": "ate the last"}, "fields": [{"id": "fatigue", "label": "Fatigue", "type": "integer", "value": 1}], "rows": [{"id": "r1", "list": "gear", "name": "Waterskin"}], "expect_relevant": true, "expect_row": null},
+    {"id": "rm-07", "decrease": {"id": "strength", "label": "Strength", "before": 3, "after": 2, "phrase": "cursed"}, "fields": [], "rows": [{"id": "r1", "list": "gear", "name": "Ring of vigour"}], "expect_relevant": true, "expect_row": "r1"},
+    {"id": "rm-08", "decrease": {"id": "agility", "label": "Agility", "before": 2, "after": 1, "phrase": "tired"}, "fields": [{"id": "presence", "label": "Presence", "type": "integer", "value": -1}], "rows": [{"id": "r1", "list": "gear", "name": "Lute"}], "expect_relevant": false, "expect_row": null}
+  ]
+}

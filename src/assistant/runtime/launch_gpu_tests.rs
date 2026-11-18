@@ -100,7 +100,11 @@ fn the_gpu_flag_vector_offloads_every_layer_on_the_listed_device_and_the_cpu_nam
                 skip -= 1;
                 continue;
             }
-            if arg == "--n-gpu-layers" || arg == "--device" || arg == "--verbosity" {
+            if arg == "--n-gpu-layers"
+                || arg == "--device"
+                || arg == "--verbosity"
+                || arg == "--cache-ram"
+            {
                 skip = 1;
                 continue;
             }
@@ -380,4 +384,27 @@ fn a_listing_whose_error_output_stays_open_is_not_over_at_the_deadline() {
     )
     .unwrap_err();
     assert!(error.contains("error output did not end"), "{error}");
+}
+
+#[test]
+fn the_cpu_path_gets_a_prompt_cache_for_two_whole_contexts_and_the_gpu_path_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = Real::new(settings(dir.path(), Choice::Auto, Roots::default()));
+    // Granite 4.2 3B Q4_K_M is about 2.0 GB: 81 KiB of entry per token (80 at least), two entries of the
+    // whole context (the test settings' 256 tokens).
+    real.set_model_size(2_000_000_000);
+    let value = |device| {
+        let args = real.server_args("/m.gguf", "/s.sock", None, "/token", device);
+        let at = args.iter().position(|a| a == "--cache-ram").unwrap();
+        args[at + 1].clone()
+    };
+    assert_eq!(value(None), "41");
+    assert_eq!(value(Some("Vulkan0")), "0");
+    // A bigger file gets a bigger bound (never less than the measured 80 KiB per token).
+    real.set_model_size(5_000_000_000);
+    assert!(value(None).parse::<u32>().unwrap() > 41);
+    real.set_model_size(0);
+    assert_eq!(value(None), "40");
+    assert_eq!(cache_ram_mib(8192, 2_000_000_000), 1296);
+    assert_eq!(cache_ram_mib(8192, 0), 1280);
 }

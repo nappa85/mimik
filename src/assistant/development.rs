@@ -189,3 +189,47 @@ mod resolution_tests {
         assert_eq!(active.max_tokens, 1024);
     }
 }
+
+#[cfg(test)]
+mod reminder_setting_tests {
+    use super::*;
+
+    /// The development endpoint reads the owner's stored reminder choice from the database and
+    /// stores a new one through the same records (the browser check turns reminders on that
+    /// way), under one lock held across the store and the memory.
+    #[tokio::test]
+    async fn the_development_endpoint_reads_and_stores_the_reminder_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(&dir.path().join("mimik.sqlite3")).unwrap();
+        store
+            .run(|db| {
+                db.execute(
+                    "INSERT INTO assistant_reminders(id,enabled,changed_by,changed_at) VALUES(1,1,1,1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let token_file = dir.path().join("token");
+        std::fs::write(&token_file, "dummy-token\n").unwrap();
+        let handle = AssistantHandle::development(Config {
+            endpoint: "http://127.0.0.1:9".into(),
+            token_file,
+            model: crate::assistant::DEFAULT_MODEL.into(),
+            model_sha256: None,
+            model_alias: None,
+        })
+        .unwrap();
+        assert_eq!(handle.assistant.reminder_choice(), None);
+        let handle = handle.with_stored_reminders(store.clone()).await.unwrap();
+        assert_eq!(handle.assistant.reminder_choice(), Some(true));
+        handle.store_reminders(1, false).await.unwrap();
+        assert_eq!(handle.assistant.reminder_choice(), Some(false));
+        let stored = crate::assistant::records::Records::reminders(
+            &crate::assistant::records::SqlRecords(store),
+        )
+        .await;
+        assert_eq!(stored, Ok(Some(false)));
+    }
+}

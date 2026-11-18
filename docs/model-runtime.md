@@ -582,6 +582,35 @@ is superseded or cancelled, the next job waits the larger sample's prompt term a
 admission counts that wait, so one expiry no longer makes the next job miss its deadline too.
 The measurement and the budgets are on the page.
 
+**Prompt cache and reminders.** On the CPU path the server runs with `--cache-ram <MiB>`
+(`launch::cache_ram_mib`): room for two entries of a whole context, so a reminder's prompt does not
+evict the interpretation prefix (one entry thrashes; `docs/results.md`, "Prompt cache across prompts").
+An entry is bounded at 80 KiB per token at least, more for a bigger model file (file size / 24,000
+KiB), and the start's memory check counts the bound beside the model. The GPU path keeps
+`--cache-ram 0` until its restore is measured. Priming's `prompt_n` and `prompt_ms` are kept in
+`Calibration::primed`. At Ready, `reminder_plan::plan` tokenizes the reminder system message and the
+largest valid reminder reply (outside the breaker) and `reminder_budgets::derive` gives the
+reminder's own run deadline, busy term and extra wait, or the reason reminders are unavailable for
+the generation (prompt and reply not fitting the context, deadline over the 600 s ceiling, busy
+term plus restore plus R for the readings that may wait ahead (one on the CPU path, D on the GPU
+path) over Q, or the busy term plus restore over R plus an interpretation's busy term, restore
+beyond R's margin).
+b12110's cache token limit bounds the sum of all entries but is raised to the memory limit divided
+by the average bytes per token (`docs/results.md`), so two whole contexts fit while the file-size
+bound on an entry's size is at or above the model's real one. After a CPU-path
+reminder the first interpretation must report at least 75 % of the prefix read from the cache, else
+reminders are unavailable for the rest of the generation; so are they after that request expires or
+fails, or when the server reports no cached-token figure (`Completed::cached_tokens`, the stream's
+usage, which llama.cpp fills from the same count as `timings.cache_n`; not yet checked against a
+real stream), and a reminder already queued then does not run. The start's memory check counts the
+cache for the CPU path only, and a GPU-to-CPU fallback checks it again. The CPU restore is the development host's cache-entry load time scaled by entry size
+(`RESTORE_S_PER_MIB`, not measured on the running host); the GPU's is priming's measured time.
+`/tokenize` of the reminder prompt is the last step of a start's live progress ("measuring the
+reminder prompt", outside the breaker). On the GPU path the worker re-primes the interpretation
+prefix after every started reminder (`Interpreter::reprime`, one token of the priming request)
+and the server counts as busy until it completes; the scheduling is in
+[assisted-entry.md](assisted-entry.md#reminders).
+
 ## Owner model setting
 
 The owner picks the model on `/admin/assistant` (ASSIST-28, ASSIST-36); the start flags only

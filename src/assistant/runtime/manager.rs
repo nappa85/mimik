@@ -25,15 +25,16 @@
 //!
 //! Every timer is Tokio's, so tests drive the clock.
 use super::budgets::{self, NoBudgets};
-use super::calibration::{self, Calibration};
+use super::calibration::{self, Calibration, Primed};
 use super::models::{
     DeviceDefault, Measurement, Model, ModelFile, ModelStatus, NineB, OlderPrompt, TrialKey,
     TrialReport, TrialState, default_model, gpu_default_name, trial_bound,
 };
 use super::progress::{Kind, Memory, Observer, Phase, Progress, Qualifier, Reporter};
+use super::reminder_plan;
 use super::server::{Health, Server};
 use super::{Level, Path, trial};
-use crate::assistant::jobs::{Assistant, Budgets, EndReason, RuntimeEvent, Signal};
+use crate::assistant::jobs::{Assistant, Budgets, EndReason, Reminders, RuntimeEvent, Signal};
 use crate::assistant::model::{GPU_DEFAULT_MODEL_SHA256, reply_length};
 use crate::assistant::records::{Record, Records};
 use async_trait::async_trait;
@@ -699,6 +700,19 @@ impl Handle {
         }
     }
 
+    /// Stores the owner's reminder setting (no restart: the page then updates the assistant's
+    /// held value).
+    ///
+    /// # Errors
+    ///
+    /// That nothing is stored: no records here (a development endpoint), or the store failed.
+    pub(crate) async fn set_reminders(&self, by: i64, enabled: bool) -> Result<(), String> {
+        match &self.records {
+            Some(records) => records.set_reminders(enabled, by).await,
+            None => Err("this assistant keeps no settings".to_owned()),
+        }
+    }
+
     /// The owner's "Keep the current model": dismisses a finished trial. The previous model
     /// already runs again (every trial ends by restarting it), so nothing restarts.
     pub(crate) fn keep(&self) -> Chosen {
@@ -1220,10 +1234,10 @@ impl Manager {
         generation
     }
 
-    /// The preflight of the session (the CPU build's: the fallback always needs it).
-    async fn preflight(&mut self) -> Result<(), Next> {
+    /// The preflight of a start on `path` (its prompt cache counts only on the CPU path).
+    async fn preflight(&mut self, path: Path) -> Result<(), Next> {
         let launcher = Arc::clone(&self.launcher);
-        match self.interruptible(launcher.preflight(Path::Cpu)).await? {
+        match self.interruptible(launcher.preflight(path)).await? {
             Ok(()) => Ok(()),
             Err(why) => Err(self.hold(why).await),
         }
@@ -1408,7 +1422,7 @@ impl Manager {
             status.gpu_note = note;
             status.landlock = None;
         });
-        if let Err(next) = self.preflight().await {
+        if let Err(next) = self.preflight(first_path).await {
             return next;
         }
         let mut path = first_path;
@@ -1428,6 +1442,10 @@ impl Manager {
                     self.select_model(false).await;
                     self.refresh_reference(Path::Cpu);
                     path = Path::Cpu;
+                    // The CPU path needs memory for its prompt cache too: checked again.
+                    if let Err(next) = self.preflight(Path::Cpu).await {
+                        return next;
+                    }
                 }
             }
         }
@@ -1741,6 +1759,37 @@ impl Manager {
         }
     }
 
+    /// What the generation's measurements allow for reminders (plan 3c-1), logged.
+    async fn plan_reminders(
+        &self,
+        child: &Arc<dyn Child>,
+        calibration: &Calibration,
+        max_tokens: u32,
+        path: Path,
+    ) -> Reminders {
+        // The `/tokenize` calls are a step of the start's live progress (plan 3c-1).
+        self.reporter
+            .phase_within(Phase::Reminders, reminder_plan::TOKENIZE_WITHIN);
+        let reminders = reminder_plan::plan(
+            child.server().as_ref(),
+            calibration,
+            max_tokens,
+            path,
+            self.active.size.unwrap_or(0),
+        )
+        .await;
+        log(&match &reminders {
+            Reminders::Available(b) => format!(
+                "reminders: run {} s, busy {} s, restore {:.2} s",
+                b.run.as_secs(),
+                b.busy.as_secs(),
+                b.restore.seconds
+            ),
+            Reminders::Unavailable(why) => format!("reminders unavailable: {why}"),
+        });
+        reminders
+    }
+
     /// The ready phase: until the child exits, is stopped as hung, or the owner acts.
     async fn ready(
         &mut self,
@@ -1754,10 +1803,16 @@ impl Manager {
         let landlock = child.landlock();
         // Signals from an earlier generation are stale.
         while self.signals.try_recv().is_ok() {}
+        let path = self.status().path;
+        let reminders = self
+            .plan_reminders(child, &calibration, budgets.max_tokens, path)
+            .await;
         self.assistant.event(RuntimeEvent::Ready {
             generation,
             budgets,
             interpreter,
+            path,
+            reminders,
         });
         let level = self.status().level.map_or(0, Level::number);
         log(&format!(
@@ -1770,17 +1825,16 @@ impl Manager {
         ));
         // How long each step took is kept for the same file, path and kind next time (a
         // failed attempt's partial times never reach here).
-        let (path, finished) = {
+        let finished = {
             let status = self.status();
-            let finished = match &status.state {
+            match &status.state {
                 State::Starting(progress)
                     if matches!(progress.kind, Kind::Fresh { .. } | Kind::Retry) =>
                 {
                     Some((progress.kind, progress.finished()))
                 }
                 _ => None,
-            };
-            (status.path, finished)
+            }
         };
         if let Some((kind, steps)) = finished {
             let sha256 = self.active.sha256.clone();
@@ -1887,7 +1941,7 @@ async fn warm(
     reporter: &Reporter,
     health_answered: &AtomicBool,
     path: Path,
-) -> Result<(f64, Duration), Attempt> {
+) -> Result<(Primed, Duration), Attempt> {
     let server = child.server();
     let began = Instant::now();
     // `/health`, then what `loaded()` allows the child: its readers to settle and, on the GPU
@@ -1912,9 +1966,9 @@ async fn warm(
         .map_err(|why| Attempt::Failed(Fail::Other(why)))?;
     reporter.phase(Phase::Priming);
     let priming = Instant::now();
-    let prefix =
+    let primed =
         match tokio::time::timeout(PRIMING_WITHIN, calibration::prime(server.as_ref())).await {
-            Ok(Ok(prefix)) => prefix,
+            Ok(Ok(primed)) => primed,
             Ok(Err(interrupted)) => {
                 return Err(Attempt::Failed(Fail::Other(format!(
                     "priming failed ({})",
@@ -1928,10 +1982,11 @@ async fn warm(
             }
         };
     log(&format!(
-        "primed in {:.1} s ({prefix} prompt tokens)",
-        priming.elapsed().as_secs_f64()
+        "primed in {:.1} s ({} prompt tokens)",
+        priming.elapsed().as_secs_f64(),
+        primed.prefix_tokens
     ));
-    Ok((prefix, priming.elapsed()))
+    Ok((primed, priming.elapsed()))
 }
 
 /// Why the calibration did not give budgets.
@@ -1954,7 +2009,7 @@ async fn calibrate_budgets(
     server: &dyn Server,
     path: Path,
     max_tokens: u32,
-    prefix: f64,
+    primed: Primed,
     progress: &(dyn Fn(u8) + Sync),
 ) -> Result<(Calibration, Budgets), NotCalibrated> {
     // Each sample is held to its timeout; this bounds the whole (two samples, two
@@ -1962,7 +2017,7 @@ async fn calibrate_budgets(
     let within = Duration::from_secs(2 * budgets::SAMPLE_TIMEOUT_S + 60);
     let calibration = match tokio::time::timeout(
         within,
-        calibration::calibrate(server, path, max_tokens, prefix, progress),
+        calibration::calibrate(server, path, max_tokens, primed, progress),
     )
     .await
     {
@@ -2029,9 +2084,9 @@ async fn measure(
     health_answered: &AtomicBool,
 ) -> Result<(Calibration, Budgets), Attempt> {
     let status = &reporter.0;
-    let (prefix, _) = warm(child, reporter, health_answered, path).await?;
+    let (primed, _) = warm(child, reporter, health_answered, path).await?;
     let sample = |n: u8| reporter.phase(Phase::Sample(n));
-    match calibrate_budgets(child.server().as_ref(), path, max_tokens, prefix, &sample).await {
+    match calibrate_budgets(child.server().as_ref(), path, max_tokens, primed, &sample).await {
         Ok(measured) => Ok(measured),
         Err(NotCalibrated::TooSlow(why, calibration)) => {
             if let Some(calibration) = calibration {

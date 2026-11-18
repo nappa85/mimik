@@ -5,6 +5,7 @@
 //! body-bounded, and a second press while a transition or trial runs starts no second one.
 use super::materials::{TrustedDraft, html};
 use super::{AuthResult, AuthState, csrf_admission, owner_auth};
+use crate::assistant::jobs::Reminders;
 use crate::assistant::model::{SpecError, parse_spec};
 use crate::assistant::runtime::manager::{
     CancelTrial, Chosen, Restart, SetLength, State as Runtime, Status, TryGpu, TryModel,
@@ -51,6 +52,10 @@ pub(super) fn routes() -> Router<AuthState> {
             "/admin/assistant/model/length",
             post(set_length).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
         )
+        .route(
+            "/admin/assistant/reminders",
+            post(set_reminders).layer(DefaultBodyLimit::max(MODEL_FORM_BYTES)),
+        )
         .merge(super::assistant_downloads::routes())
         .merge(super::assistant_live::routes())
 }
@@ -79,6 +84,10 @@ enum Notice {
     LengthInvalid,
     LengthUnchanged,
     LengthNotStored,
+    RemindersOn,
+    RemindersOff,
+    RemindersInvalid,
+    RemindersNotStored,
     Kept,
     NothingToKeep,
     ModelBusy,
@@ -146,6 +155,14 @@ impl Notice {
             }
             Self::LengthNotStored => {
                 "The reply length could not be stored; nothing changed and the model server was not restarted."
+            }
+            Self::RemindersOn => "Reminders are on.",
+            Self::RemindersOff => "Reminders are off.",
+            Self::RemindersInvalid => {
+                "That is not a reminder setting this page accepts; nothing changed."
+            }
+            Self::RemindersNotStored => {
+                "The reminder setting could not be stored; nothing changed."
             }
             Self::Kept => "Kept the current model; the trial result is dismissed.",
             Self::NothingToKeep => "There is no trial result to dismiss.",
@@ -282,6 +299,8 @@ struct View {
     budgets: Option<BudgetsView>,
     calibration: Option<CalibrationView>,
     model: ModelView,
+    /// The "Reminders" setting and what the generation's measurements say of it.
+    reminders: ReminderView,
     /// The running work's step, when the runtime is starting.
     progress: Option<super::assistant_live::ProgressView>,
 }
@@ -358,6 +377,73 @@ fn length_view(status: &Status) -> LengthView {
         per_token: run.and_then(|_| per_token(status)),
         worst,
     }
+}
+
+/// The "Reminders" setting (ASSIST-60) and, for the current generation, what its measurements
+/// say: path, threads, model, the estimated time of a reminder, the worst extra wait of a
+/// scribble reading right after one, and why reminders are unavailable when they are.
+pub(super) struct ReminderView {
+    /// The checkbox: the stored choice, else the path's default.
+    pub on: bool,
+    /// The owner has chosen (a stored choice), as opposed to the default.
+    pub chosen: bool,
+    /// Path, threads and model of the generation these numbers are measured on.
+    pub generation: Option<String>,
+    /// About how long a reminder takes (the estimate before the 1.25 margin).
+    pub estimate: Option<String>,
+    /// The worst extra wait of a scribble reading right after a reminder.
+    pub extra_wait: Option<String>,
+    /// Why they are unavailable for this generation.
+    pub unavailable: Option<String>,
+    /// On the CPU path: the catalogue text does not fit.
+    pub names_only: bool,
+}
+
+pub(super) fn reminder_view(
+    choice: Option<bool>,
+    generation: Option<(Path, Reminders)>,
+    model: &str,
+    threads: Option<u32>,
+) -> ReminderView {
+    let path_name = |path: Path| match path {
+        Path::Cpu => "CPU",
+        Path::Gpu => "GPU",
+    };
+    let default_on = matches!(&generation, Some((Path::Gpu, _)));
+    let mut view = ReminderView {
+        on: choice.unwrap_or(default_on),
+        chosen: choice.is_some(),
+        generation: None,
+        estimate: None,
+        extra_wait: None,
+        unavailable: None,
+        names_only: false,
+    };
+    let Some((path, reminders)) = generation else {
+        return view;
+    };
+    view.generation = Some(format!(
+        "{} path{}, {model}",
+        path_name(path),
+        threads.map_or_else(String::new, |n| format!(", {n} threads"))
+    ));
+    view.names_only = path == Path::Cpu;
+    match reminders {
+        Reminders::Unavailable(why) => view.unavailable = Some(why),
+        Reminders::Available(budgets) => {
+            view.estimate = Some(format!("{:.0} s", budgets.estimate_s.ceil()));
+            view.extra_wait = Some(format!(
+                "{} s (the whole prompt of a cancelled reminder, without the chat template's tokens, plus restoring the interpretation prefix{})",
+                budgets.extra_wait.as_secs(),
+                if budgets.restore.dev_host_constant {
+                    "; the restore is a figure measured on the development host, not on this machine"
+                } else {
+                    ", measured by priming"
+                }
+            ));
+        }
+    }
+    view
 }
 
 struct ModelLine {
@@ -545,7 +631,13 @@ fn count(n: f64) -> String {
     format!("{n:.0}")
 }
 
-fn view(status: Status, breaker: String, input: String, error: Option<String>) -> View {
+fn view(
+    status: Status,
+    breaker: String,
+    input: String,
+    error: Option<String>,
+    reminders: ReminderView,
+) -> View {
     let length = length_view(&status);
     let retry_note = status.gpu_retry_note().map(str::to_owned);
     let (gpu_note, gpu_default_note) = if status.path == Path::Cpu {
@@ -583,6 +675,7 @@ fn view(status: Status, breaker: String, input: String, error: Option<String>) -
     };
     View {
         model,
+        reminders,
         progress,
         llama: format!(
             "llama.cpp {} (commit {})",
@@ -676,11 +769,18 @@ async fn render(
     let live_status = status.clone();
     let view = state.options.assistant.as_ref().and_then(|handle| {
         status.map(|status| {
+            let reminders = reminder_view(
+                handle.assistant.reminder_choice(),
+                handle.assistant.reminder_generation(),
+                &status.model.active.spec,
+                handle.threads,
+            );
             view(
                 status,
                 handle.assistant.breaker_state(),
                 input.to_owned(),
                 error,
+                reminders,
             )
         })
     });
@@ -699,7 +799,14 @@ async fn render(
         let (signature, busy) = downloads
             .as_ref()
             .map_or((String::new(), false), |d| (d.signature.clone(), d.polling));
-        super::assistant_live::Live::of(&status, &signature, busy)
+        let reminders = state
+            .options
+            .assistant
+            .as_ref()
+            .map_or_else(String::new, |handle| {
+                super::assistant_live::reminders_signature(&handle.assistant)
+            });
+        super::assistant_live::Live::of(&status, &signature, &reminders, busy)
     });
     html(&Page {
         nav: super::nav::Nav::here(super::nav::Section::Assistant),
@@ -795,6 +902,14 @@ struct LengthForm {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RemindersForm {
+    csrf: String,
+    /// `on` or `off`.
+    reminders: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SwitchForm {
     csrf: String,
     trial: String,
@@ -811,6 +926,15 @@ pub(super) fn runtime(state: &AuthState) -> Option<&crate::assistant::runtime::m
         .assistant
         .as_ref()
         .and_then(|handle| handle.runtime.as_ref())
+}
+
+/// The assistant's job state, if there is an assistant.
+pub(super) fn runtime_assistant(state: &AuthState) -> Option<&crate::assistant::jobs::Assistant> {
+    state
+        .options
+        .assistant
+        .as_ref()
+        .map(|handle| handle.assistant.as_ref())
 }
 
 fn runtime_of(
@@ -961,10 +1085,131 @@ async fn set_length(
     ))
 }
 
+/// "Reminders": stored first (migration 035), then held with the runtime state, so the save
+/// answer and the route see it without a database read. No restart follows.
+async fn set_reminders(
+    State(state): State<AuthState>,
+    session: Session,
+    Form(form): Form<RemindersForm>,
+) -> AuthResult {
+    let auth = owner_auth(&state, &session).await?;
+    csrf_admission(&session, &form.csrf).await?;
+    let handle = state
+        .options
+        .assistant
+        .as_ref()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    handle.runtime.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+    let enabled = match form.reminders.as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return Ok(redirect("reminders-invalid")),
+    };
+    if handle
+        .store_reminders(auth.account.id, enabled)
+        .await
+        .is_err()
+    {
+        return Ok(redirect("reminders-not-stored"));
+    }
+    Ok(redirect(if enabled {
+        "reminders-on"
+    } else {
+        "reminders-off"
+    }))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::landlock_line;
+    use super::{ReminderView, landlock_line, reminder_view};
+    use crate::assistant::jobs::Reminders;
+    use crate::assistant::runtime::Path;
     use crate::assistant::runtime::hako::Landlock;
+    use crate::assistant::runtime::reminder_budgets::{ReminderBudgets, Restore};
+    use std::time::Duration;
+
+    fn budgets(dev_host: bool) -> Reminders {
+        Reminders::Available(ReminderBudgets {
+            run: Duration::from_secs(150),
+            estimate_s: 118.2,
+            busy: Duration::from_secs(80),
+            restore: Restore {
+                seconds: 0.3,
+                dev_host_constant: dev_host,
+            },
+            reply_tokens: 600,
+            prefix_tokens: 1500,
+            extra_wait: Duration::from_secs(81),
+        })
+    }
+
+    fn named(view: &ReminderView) -> (bool, bool) {
+        (view.on, view.chosen)
+    }
+
+    #[test]
+    fn the_reminder_setting_defaults_per_path_and_a_stored_choice_wins() {
+        // No generation yet: off until the path is known; a stored choice shows as stored.
+        assert_eq!(named(&reminder_view(None, None, "m", None)), (false, false));
+        assert_eq!(
+            named(&reminder_view(Some(true), None, "m", None)),
+            (true, true)
+        );
+        let cpu = Some((Path::Cpu, budgets(true)));
+        let gpu = Some((Path::Gpu, budgets(true)));
+        assert_eq!(
+            named(&reminder_view(None, cpu.clone(), "m", None)),
+            (false, false)
+        );
+        assert_eq!(
+            named(&reminder_view(None, gpu.clone(), "m", None)),
+            (true, false)
+        );
+        assert_eq!(
+            named(&reminder_view(Some(false), gpu, "m", None)),
+            (false, true)
+        );
+        assert_eq!(
+            named(&reminder_view(Some(true), cpu, "m", None)),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn the_estimates_come_from_the_measurements_and_the_cpu_says_names_only() {
+        let view = reminder_view(None, Some((Path::Cpu, budgets(true))), "granite", Some(2));
+        assert_eq!(
+            view.generation.as_deref(),
+            Some("CPU path, 2 threads, granite")
+        );
+        assert_eq!(view.estimate.as_deref(), Some("119 s"));
+        let wait = view.extra_wait.unwrap();
+        assert!(wait.starts_with("81 s"), "{wait}");
+        assert!(wait.contains("without the chat template's tokens"));
+        assert!(wait.contains("development host"));
+        assert!(view.names_only && view.unavailable.is_none());
+        // The GPU path measures the restore by priming, and sends catalogue text later.
+        let gpu = reminder_view(None, Some((Path::Gpu, budgets(false))), "qwen", None);
+        assert!(!gpu.names_only);
+        assert!(gpu.extra_wait.unwrap().contains("measured by priming"));
+    }
+
+    #[test]
+    fn a_generation_that_cannot_run_reminders_says_why_and_shows_no_estimate() {
+        let view = reminder_view(
+            Some(true),
+            Some((
+                Path::Cpu,
+                Reminders::Unavailable(
+                    "a reminder would need a run deadline of 700 s, over the 600 s ceiling".into(),
+                ),
+            )),
+            "m",
+            None,
+        );
+        assert!(view.unavailable.unwrap().contains("600 s ceiling"));
+        assert!(view.estimate.is_none() && view.extra_wait.is_none());
+    }
 
     #[test]
     fn the_page_says_how_far_landlock_is_in_force_and_what_stands_alone_otherwise() {

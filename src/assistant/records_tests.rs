@@ -12,6 +12,8 @@ pub(crate) struct MemRecords {
     pub set_gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
     /// The reply length stored per file hash.
     pub lengths: Mutex<std::collections::HashMap<String, u32>>,
+    /// The reminder setting (`None` until set).
+    pub reminders: Mutex<Option<bool>>,
 }
 
 #[async_trait]
@@ -62,6 +64,25 @@ impl Records for MemRecords {
             Some(tokens) => lengths.insert(sha256.to_owned(), tokens),
             None => lengths.remove(sha256),
         };
+        Ok(())
+    }
+
+    async fn reminders(&self) -> Result<Option<bool>, String> {
+        if let Some(why) = self.fail.lock().unwrap().clone() {
+            return Err(why);
+        }
+        Ok(*self.reminders.lock().unwrap())
+    }
+
+    async fn set_reminders(&self, enabled: bool, by: i64) -> Result<(), String> {
+        if let Some(why) = self.fail.lock().unwrap().clone() {
+            return Err(why);
+        }
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("set_reminders {enabled} by {by}"));
+        *self.reminders.lock().unwrap() = Some(enabled);
         Ok(())
     }
 
@@ -594,4 +615,44 @@ async fn the_older_prompt_flag_survives_switches_a_swap_and_a_retrial_in_the_dat
     assert_eq!((older.active, older.previous), (false, false));
     assert_eq!(stored.active.unwrap().model.name, "a.gguf");
     assert_eq!(stored.previous.unwrap().model.name, "b.gguf");
+}
+
+#[tokio::test]
+async fn the_reminder_setting_is_unset_until_chosen_and_one_row_holds_the_choice() {
+    let (_dir, store) = store();
+    let records = SqlRecords(store.clone());
+    assert_eq!(records.reminders().await, Ok(None));
+    records.set_reminders(true, 3).await.unwrap();
+    assert_eq!(records.reminders().await, Ok(Some(true)));
+    records.set_reminders(false, 4).await.unwrap();
+    assert_eq!(records.reminders().await, Ok(Some(false)));
+    let (rows, by) = store
+        .run(|db| {
+            Ok(db.query_row(
+                "SELECT count(*), max(changed_by) FROM assistant_reminders",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!((rows, by), (1, 4));
+    // The table admits no other row and no other value.
+    store
+        .run(|db| {
+            assert!(
+                db.execute(
+                    "INSERT INTO assistant_reminders(id,enabled,changed_by,changed_at) VALUES(2,1,1,1)",
+                    []
+                )
+                .is_err()
+            );
+            assert!(
+                db.execute("UPDATE assistant_reminders SET enabled=2", [])
+                    .is_err()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
 }

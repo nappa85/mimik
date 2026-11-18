@@ -110,8 +110,14 @@ subagent, 2026-11-18): sound with caveats, applied below.
   needs room for both entries: 64 MiB skipped every entry ("exceeds cache size limit"); 256 MiB
   (one entry) evicted the interpretation each time ("making room", no reuse: 0 of 3
   interpretations after a reminder, `cache_n` 4); 300 MiB (295.7 MiB needed) worked. The cache
-  also has a token limit equal to the context size (8,192); whether it bounds each entry or
-  the sum of entries was not checked. An entry holds the prompt and the generated tokens
+  also has a token limit equal to the context size (8,192). Read from b12110's source
+  (`tools/server/server-task.cpp`, `server_prompt_cache::update`): the limit bounds the sum of
+  the tokens of all entries (`n_tokens()` adds them), but it is raised to
+  `--cache-ram` bytes divided by the entries' average bytes per token whenever that is larger,
+  so with `--cache-ram` sized for two whole contexts at the per-token bound (`launch.rs`) the
+  effective token limit is at least two contexts and both entries fit, provided that bound is at
+  or above the model's real bytes per token (measured for Granite 4.2 only); a size above the
+  memory limit evicts the oldest first. An entry holds the prompt and the generated tokens
   (`saving prompt with length 1866` for 1,855 prompt and 11 generated tokens). The slot is chosen by longest
   common prefix similarity (`f_sim_best` over 0.1), else the least recently used slot, and the
   cache entry by prefix match.

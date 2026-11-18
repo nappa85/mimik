@@ -66,11 +66,15 @@ pub(crate) trait Records: Send + Sync {
         max_tokens: Option<u32>,
         by: i64,
     ) -> Result<(), String>;
+    /// The owner's reminder setting (migration 035): `None` until chosen.
+    async fn reminders(&self) -> Result<Option<bool>, String>;
+    /// Stores the reminder setting.
+    async fn set_reminders(&self, enabled: bool, by: i64) -> Result<(), String>;
 }
 
-/// Drops migration 022's, 023's and 032's tables (tests that rewind the schema).
+/// Drops migration 022's, 023's, 032's and 035's tables (tests that rewind the schema).
 #[cfg(test)]
-pub(crate) const DROP_SCHEMA: &str = "DROP TABLE assistant_reply_lengths; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;";
+pub(crate) const DROP_SCHEMA: &str = "DROP TABLE assistant_reminders; DROP TABLE assistant_reply_lengths; DROP TABLE assistant_downloads; DROP TABLE assistant_model_choice; DROP TABLE assistant_models;";
 
 /// The records in the application's database.
 #[derive(Clone)]
@@ -234,6 +238,36 @@ impl Records for SqlRecords {
             })
             .await
             .map_err(|_| "the reply length cannot be stored".to_owned())
+    }
+
+    async fn reminders(&self) -> Result<Option<bool>, String> {
+        self.0
+            .run(|db| {
+                Ok(db
+                    .query_row(
+                        "SELECT enabled FROM assistant_reminders WHERE id=1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .map(|enabled| enabled == 1))
+            })
+            .await
+            .map_err(|_| "the reminder setting cannot be read".to_owned())
+    }
+
+    async fn set_reminders(&self, enabled: bool, by: i64) -> Result<(), String> {
+        self.0
+            .run(move |db| {
+                db.execute(
+                    "INSERT INTO assistant_reminders(id,enabled,changed_by,changed_at) VALUES(1,?1,?2,mimik_auth_now())
+                     ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,changed_by=excluded.changed_by,changed_at=excluded.changed_at",
+                    params![i64::from(enabled), by],
+                )?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| "the reminder setting cannot be stored".to_owned())
     }
 
     async fn swap(&self, by: i64) -> Result<(), String> {

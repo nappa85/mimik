@@ -1,5 +1,5 @@
 use super::super::fake_server::{self, Reply};
-use super::super::interpreter::{Completion, Failure, Interpreter, RigInterpreter};
+use super::super::interpreter::{Completion, Failure, Interpreter, RequestKind, RigInterpreter};
 use super::*;
 use std::sync::atomic::Ordering;
 
@@ -49,7 +49,46 @@ fn completion() -> Completion {
         dynamic: "<data>\n{}\n</data>".into(),
         ref_ids: vec!["max_hp".into(), "luck".into()],
         max_tokens: 352,
+        kind: RequestKind::Interpretation,
     }
+}
+
+#[tokio::test]
+async fn a_reminder_completion_carries_the_reminder_prefix_and_its_own_schema() {
+    use super::super::contract::{REMINDER_PREFIX, reminder_schema_for};
+    let (client, shared) = tcp_interpreter().await;
+    shared.push(Reply::Content(
+        r#"{"relevant":false,"row":null,"hint":"-","option":null}"#.into(),
+    ));
+    let kind = RequestKind::Reminder {
+        rows: vec!["r1".into()],
+        targets: vec!["hp".into(), "stance".into()],
+    };
+    let reminder = Completion {
+        kind: kind.clone(),
+        ref_ids: vec!["hp".into()],
+        ..completion()
+    };
+    client.complete(&reminder).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&shared.seen()[0].body).unwrap();
+    assert_eq!(
+        body["messages"][0]["content"],
+        serde_json::json!([{"type": "text", "text": REMINDER_PREFIX.as_str()}])
+    );
+    assert_eq!(
+        body["response_format"]["json_schema"]["name"],
+        "mimik_reminder_v1"
+    );
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"],
+        reminder_schema_for(
+            &["r1".to_owned()],
+            &["hp".to_owned(), "stance".to_owned()],
+            &["hp".to_owned()]
+        )
+    );
+    assert_eq!(body["cache_prompt"], true);
+    assert_eq!(body["top_k"], 1);
 }
 
 async fn tcp_interpreter() -> (RigInterpreter, std::sync::Arc<fake_server::Shared>) {
