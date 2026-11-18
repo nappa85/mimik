@@ -227,7 +227,7 @@ impl Breaker {
         *self = Self::new();
     }
 
-    #[cfg(test)]
+    /// Whether it is closed (a reminder runs only then: it never takes the probe).
     pub(crate) fn is_closed(&self) -> bool {
         self.state == State::Closed
     }

@@ -9,6 +9,7 @@ mod history_diff;
 mod interpret;
 mod notes;
 mod quick;
+mod remind;
 mod rows;
 mod sheets;
 mod snapshots;

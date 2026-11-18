@@ -39,7 +39,7 @@ fn gear() -> Value {
 }
 
 /// A list `equipment` (field 1) whose name carries the member, keyed by `gear_key`.
-fn definition(entry_type: Option<&str>) -> Value {
+pub(super) fn definition(entry_type: Option<&str>) -> Value {
     let mut member = json!({"id": "gear", "key": "gear_key"});
     if let Some(entry_type) = entry_type {
         member["entry_type"] = entry_type.into();

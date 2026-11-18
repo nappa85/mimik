@@ -60,8 +60,9 @@ pub(super) async fn answer_units(
     units: Vec<(Unit, Option<String>)>,
     shown: (Outcome, String),
     status: StatusCode,
+    reminders: bool,
 ) -> super::ResultResponse {
-    respond(view, permit, units, Shape::Many, shown, status).await
+    respond(view, permit, units, (Shape::Many, reminders), shown, status).await
 }
 
 /// Whether an answer names one unit (`unit`) or every unit an apply changed (`units`).
@@ -79,8 +80,17 @@ pub(super) async fn answer(
     unit: (Unit, Option<String>),
     shown: (Outcome, String),
     status: StatusCode,
+    reminders: bool,
 ) -> super::ResultResponse {
-    respond(view, permit, vec![unit], Shape::One, shown, status).await
+    respond(
+        view,
+        permit,
+        vec![unit],
+        (Shape::One, reminders),
+        shown,
+        status,
+    )
+    .await
 }
 
 /// The one body of both answers: the projection of `units` at the live revision, in the shape
@@ -89,7 +99,7 @@ async fn respond(
     view: SheetView,
     permit: tokio::sync::OwnedSemaphorePermit,
     units: Vec<(Unit, Option<String>)>,
-    shape: Shape,
+    (shape, reminders): (Shape, bool),
     (outcome, message): (Outcome, String),
     status: StatusCode,
 ) -> super::ResultResponse {
@@ -99,7 +109,8 @@ async fn respond(
             .iter()
             .map(|(unit, host)| (*unit, host.as_deref()))
             .collect();
-        projection(&view, &units, shape, outcome, &message).map(|value| value.to_string())
+        projection(&view, &units, (shape, reminders), outcome, &message)
+            .map(|value| value.to_string())
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -117,7 +128,7 @@ async fn respond(
 fn projection(
     view: &SheetView,
     units: &[(Unit, Option<&str>)],
-    shape: Shape,
+    (shape, reminders): (Shape, bool),
     outcome: Outcome,
     message: &str,
 ) -> Result<Value, crate::AppError> {
@@ -136,6 +147,15 @@ fn projection(
             unit_json(view, fields, (*unit, *host))
         })
         .collect();
+    // A save that committed a decrease on a top-level integer field offers a reminder (plan
+    // 3c-1, "Trigger"): the key of the note, which the sheet module posts to the reminder route.
+    if reminders && matches!(outcome, Outcome::Saved) {
+        for ((unit, _), answer) in units.iter().zip(&mut answers) {
+            if let Some(key) = reminder_key(view, *unit) {
+                answer["reminder"] = json!({"key": key});
+            }
+        }
+    }
     // A refusal names its one unit (`Shape::One`).
     if outcome.refused()
         && let (Some(answer), Some((unit, _))) = (answers.first_mut(), units.first())
@@ -263,6 +283,25 @@ fn unit_json<'a>(
         }
         Unit::NewRow(_) | Unit::QuickAdd(_) | Unit::Row { .. } => Value::Null,
     }
+}
+
+/// The key of the note a saved top-level integer field's unit has just committed, when it is a
+/// decrease that triggers a reminder ([`super::remind::trigger`]).
+fn reminder_key(view: &SheetView, unit: Unit) -> Option<String> {
+    let Unit::Field(f) = unit else {
+        return None;
+    };
+    let field = view.immutable.as_ref()?.definition().fields.get(f)?;
+    if field.control != crate::definitions::Control::Integer || field.formula.is_some() {
+        return None;
+    }
+    let stored = view
+        .notes
+        .current
+        .get(&super::super::notes::field_address(&field.id))
+        .filter(|stored| stored.revision == view.snapshot.revision)?;
+    super::super::remind::trigger(stored)?;
+    Some(super::super::assist::key(stored))
 }
 
 /// Adds `key` to the shown note of an `unresolved` scribble (step 2c-1): the stored note's

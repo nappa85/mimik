@@ -17,6 +17,7 @@ pub mod model;
 pub(crate) mod output;
 pub(crate) mod proposal;
 pub(crate) mod records;
+pub(crate) mod reminder;
 pub(crate) mod request;
 pub(crate) mod runtime;
 pub(crate) mod transport;
@@ -36,6 +37,14 @@ pub struct AssistantHandle {
     /// tests, or when they could not start (`downloads_note` says why).
     pub(crate) downloads: Option<Arc<downloads::Downloads>>,
     pub(crate) downloads_note: Option<String>,
+    /// The model server's threads, as the page states them (`None` where none is started).
+    pub(crate) threads: Option<u32>,
+    /// Where the reminder setting is stored when the runtime keeps no records (the
+    /// development endpoint); `None` means the runtime's own.
+    pub(crate) reminder_records: Option<Arc<dyn records::Records>>,
+    /// Held across storing the reminder setting and setting it in memory, so two owner posts
+    /// cannot leave the memory with the older choice.
+    pub(crate) reminder_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The model runtime's configuration, from `--assistant-*` and the data directory.
@@ -76,6 +85,37 @@ impl AssistantHandle {
         self
     }
 
+    /// This handle with the owner's stored reminder choice read from `store` and the setting
+    /// stored there from now on (the development endpoint keeps no other records).
+    ///
+    /// # Errors
+    ///
+    /// The stored setting cannot be read.
+    pub async fn with_stored_reminders(mut self, store: crate::Store) -> Result<Self, String> {
+        let records = records::SqlRecords(store);
+        let choice = records::Records::reminders(&records).await?;
+        self.assistant.set_reminder_choice(choice);
+        self.reminder_records = Some(Arc::new(records));
+        Ok(self)
+    }
+
+    /// Stores the owner's reminder choice and sets it in memory, one at a time; no restart
+    /// follows.
+    ///
+    /// # Errors
+    ///
+    /// Nothing is stored: the records refused, or there are none.
+    pub(crate) async fn store_reminders(&self, by: i64, enabled: bool) -> Result<(), String> {
+        let _held = self.reminder_lock.lock().await;
+        match (&self.reminder_records, &self.runtime) {
+            (Some(records), _) => records.set_reminders(enabled, by).await?,
+            (None, Some(runtime)) => runtime.set_reminders(by, enabled).await?,
+            (None, None) => return Err("this assistant keeps no settings".to_owned()),
+        }
+        self.assistant.set_reminder_choice(Some(enabled));
+        Ok(())
+    }
+
     /// The post-commit note hook the store calls after every save that wrote notes.
     pub(crate) fn note_hook(&self) -> crate::store::NoteHook {
         let assistant = Arc::clone(&self.assistant);
@@ -99,6 +139,9 @@ impl AssistantHandle {
             runtime: Some(runtime),
             downloads: None,
             downloads_note: None,
+            threads: None,
+            reminder_records: None,
+            reminder_lock: Arc::default(),
         }
     }
 
@@ -117,6 +160,9 @@ impl AssistantHandle {
             runtime: Some(runtime),
             downloads: None,
             downloads_note: None,
+            threads: None,
+            reminder_records: None,
+            reminder_lock: Arc::default(),
         }
     }
 
@@ -193,6 +239,8 @@ impl AssistantHandle {
             device,
             roots: runtime::device::Roots::default(),
         };
+        let threads = settings.threads;
+        let reminder_choice = records::Records::reminders(&records).await?;
         let mut handle = Self::with_models(
             Arc::new(runtime::launch::Launch(Arc::new(
                 runtime::launch::Real::new(settings),
@@ -211,6 +259,8 @@ impl AssistantHandle {
             },
         );
         handle.attach(downloads);
+        handle.threads = Some(threads);
+        handle.assistant.set_reminder_choice(reminder_choice);
         Ok(handle)
     }
 
@@ -226,25 +276,48 @@ impl AssistantHandle {
     }
 
     /// A ready assistant over `interpreter` with `budgets`, its worker running, no runtime
-    /// manager (route tests).
+    /// manager (route tests), with reminders available (and switched on) when `reminders`.
     #[cfg(test)]
-    pub(crate) fn ready_for_tests(
+    pub(crate) fn ready_for_tests_with(
         interpreter: Arc<dyn interpreter::Interpreter>,
         budgets: jobs::Budgets,
+        reminders: bool,
     ) -> Self {
+        let allowed = if reminders {
+            jobs::Reminders::Available(runtime::reminder_budgets::ReminderBudgets {
+                run: std::time::Duration::from_secs(60),
+                estimate_s: 40.0,
+                busy: std::time::Duration::from_secs(20),
+                restore: runtime::reminder_budgets::Restore {
+                    seconds: 0.1,
+                    dev_host_constant: true,
+                },
+                reply_tokens: 500,
+                prefix_tokens: 1500,
+                extra_wait: std::time::Duration::from_secs(21),
+            })
+        } else {
+            jobs::Reminders::Unavailable("test".into())
+        };
         let assistant = jobs::Assistant::new();
         assistant.event(jobs::RuntimeEvent::GenerationStarted { generation: 1 });
         assistant.event(jobs::RuntimeEvent::Ready {
             generation: 1,
             budgets,
             interpreter,
+            path: runtime::Path::Cpu,
+            reminders: allowed,
         });
+        assistant.set_reminder_choice(reminders.then_some(true));
         tokio::spawn(Arc::clone(&assistant).work());
         Self {
             assistant,
             runtime: None,
             downloads: None,
             downloads_note: None,
+            threads: None,
+            reminder_records: None,
+            reminder_lock: Arc::default(),
         }
     }
 }

@@ -1499,3 +1499,79 @@ async fn a_reason_with_line_breaks_and_a_nul_gives_the_same_signature_in_the_pag
         status_json(&models).await["signature"].as_str().unwrap()
     );
 }
+
+async fn post_reminders(models: &Models, pairs: &[(&str, &str)]) -> String {
+    let response = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/reminders",
+        Some(form(pairs)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    response.headers()["location"].to_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn the_reminder_route_stores_the_choice_without_a_restart_and_the_page_shows_it() {
+    let _lock = crate::auth::test_resource_lock().await;
+    let models = models(Duration::from_millis(1)).await;
+    let csrf = csrf();
+    // The CPU path: off until chosen, no row.
+    let page = models.page().await;
+    assert!(
+        page.contains("name=\"reminders\" value=\"off\" checked"),
+        "{page}"
+    );
+    assert_eq!(models.count("assistant_reminders").await, 0);
+    // Crafted values change nothing.
+    for crafted in ["", "ON", "true", "1", "on "] {
+        assert_eq!(
+            post_reminders(&models, &[("csrf", &csrf), ("reminders", crafted)]).await,
+            "/admin/assistant?notice=reminders-invalid",
+            "{crafted:?}"
+        );
+    }
+    assert_eq!(models.count("assistant_reminders").await, 0);
+    // On: one row, no restart, and the page shows it as chosen.
+    assert_eq!(
+        post_reminders(&models, &[("csrf", &csrf), ("reminders", "on")]).await,
+        "/admin/assistant?notice=reminders-on"
+    );
+    assert_eq!(models.count("assistant_reminders").await, 1);
+    assert_eq!(models.launcher.starts.lock().unwrap().len(), 1);
+    let page = models.page().await;
+    assert!(
+        page.contains("name=\"reminders\" value=\"on\" checked"),
+        "{page}"
+    );
+    assert!(page.contains("you have chosen"), "{page}");
+    assert_eq!(
+        post_reminders(&models, &[("csrf", &csrf), ("reminders", "off")]).await,
+        "/admin/assistant?notice=reminders-off"
+    );
+    assert_eq!(models.count("assistant_reminders").await, 1);
+    // A request with a wrong CSRF token or an extra field is refused before anything changes.
+    let bad = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/reminders",
+        Some(form(&[("csrf", "wrong"), ("reminders", "on")])),
+    )
+    .await;
+    assert_ne!(bad.status(), StatusCode::SEE_OTHER);
+    let extra = router_request(
+        &models.app,
+        &models.auth[0],
+        "/admin/assistant/reminders",
+        Some(form(&[("csrf", &csrf), ("reminders", "on"), ("x", "1")])),
+    )
+    .await;
+    assert_ne!(extra.status(), StatusCode::SEE_OTHER);
+    let (enabled,): (i64,) = models
+        .store
+        .run(|db| Ok((db.query_row("SELECT enabled FROM assistant_reminders", [], |r| r.get(0))?,)))
+        .await
+        .unwrap();
+    assert_eq!(enabled, 0);
+}

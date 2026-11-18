@@ -38,7 +38,7 @@ pub(crate) const SAMPLE_TOKENS: u32 = 64;
 /// over [`RUN_CEILING_S`].
 pub(crate) const SAMPLE_TIMEOUT_S: u64 = 480;
 /// Tokens kept free in the context for the chat template, on top of the request and the reply.
-const TEMPLATE_MARGIN_TOKENS: f64 = 64.0;
+pub(super) const TEMPLATE_MARGIN_TOKENS: f64 = 64.0;
 /// The cached share of the fixed prefix a sample must show (a timing criterion).
 const MIN_CACHED: f64 = 0.75;
 
@@ -175,7 +175,7 @@ fn rates(sample: &Sample, prefix_tokens: f64) -> Result<Rates, NoBudgets> {
 }
 
 /// R for an estimate: 1.25 × T rounded up to 5 s, at least 15 s.
-fn run_deadline(estimate_s: f64) -> u64 {
+pub(crate) fn run_deadline(estimate_s: f64) -> u64 {
     let scaled = (MARGIN * estimate_s).ceil();
     // A finite, positive estimate below 2^53 s converts exactly; anything else is over every
     // cap anyway.

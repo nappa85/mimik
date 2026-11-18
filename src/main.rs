@@ -132,7 +132,9 @@ async fn assistant(
                 model_sha256: args.assistant.model_sha256.clone(),
                 model_alias: args.assistant.model_alias.clone(),
             },
-        )?;
+        )?
+        .with_stored_reminders(store.clone())
+        .await?;
         println!("DEVELOPMENT ONLY: assistant on, development endpoint (no endpoint check).");
         return Ok(handle);
     }

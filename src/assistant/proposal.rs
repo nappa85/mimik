@@ -16,11 +16,7 @@ pub(crate) enum Kind {
     /// A scribble's reading: bound to the target's current `unresolved` note.
     Interpretation,
     /// A hint after a saved decrease (step 3c): bound to the decrease note, which must still
-    /// be current on its field, the field still holding its `after`. Its producer lands in 3c.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built by step 3c's reminder producer")
-    )]
+    /// be current on its field, the field still holding its `after`.
     Reminder,
 }
 
@@ -38,15 +34,11 @@ impl Kind {
 pub(crate) enum Edit {
     /// An integer: an expression checked as in step 2c (provenance, checked evaluation).
     Expr { candidate: Candidate, shown: String },
-    /// An enum option ID the pin declares (checked by the apply).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "built by step 3c's reminder producer")
-    )]
+    /// An enum option ID the pin declares (checked by the apply): a reminder's change.
     Enum(String),
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "built by step 3c's reminder producer")
+        expect(dead_code, reason = "no v1 producer: reminders send no booleans")
     )]
     Bool(bool),
 }
@@ -93,10 +85,23 @@ impl Change {
     }
 }
 
+/// One value a reminder sent to the model and the option may depend on (plan 3c-1, "Read set
+/// and hash"): the apply re-reads every one by its address and fails on any difference, so a
+/// sheet that changed since the reminder ran is never written from its advice. `address` is a
+/// typed field or cell address, or `row:<host id>` for a catalogue row's name; `value` is the
+/// encoded value or the name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Read {
+    pub address: String,
+    pub value: String,
+}
+
 /// A validated option with its bound read/write set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Proposal {
     pub changes: Vec<Change>,
+    /// Every value the job sent (empty for interpretations), in the content hash.
+    pub reads: Vec<Read>,
     /// The model's explanation, shown in full next to the changes.
     pub explanation: String,
     /// SHA-256 of the bound content.
@@ -112,6 +117,18 @@ pub(crate) fn bind(
     n: usize,
     origin: &Origin,
     changes: Vec<Change>,
+    explanation: String,
+) -> Option<Proposal> {
+    bind_with_reads(id, n, origin, changes, Vec::new(), explanation)
+}
+
+/// [`bind`] for a job that sent values the option depends on ([`Read`]).
+pub(crate) fn bind_with_reads(
+    id: JobId,
+    n: usize,
+    origin: &Origin,
+    changes: Vec<Change>,
+    reads: Vec<Read>,
     explanation: String,
 ) -> Option<Proposal> {
     let targets: BTreeSet<&str> = changes
@@ -132,9 +149,10 @@ pub(crate) fn bind(
     {
         return None;
     }
-    let hash = content_hash(id, n, origin, &changes, &explanation)?;
+    let hash = content_hash(id, n, origin, &changes, &reads, &explanation)?;
     Some(Proposal {
         changes,
+        reads,
         explanation,
         hash,
     })
@@ -150,7 +168,14 @@ pub(crate) fn bind(
 /// reference do), against a client (the apply route takes only `csrf`, never proposal
 /// content), or against the model's judgement of relevance.
 pub(crate) fn verify(id: JobId, n: usize, origin: &Origin, proposal: &Proposal) -> bool {
-    content_hash(id, n, origin, &proposal.changes, &proposal.explanation) == Some(proposal.hash)
+    content_hash(
+        id,
+        n,
+        origin,
+        &proposal.changes,
+        &proposal.reads,
+        &proposal.explanation,
+    ) == Some(proposal.hash)
 }
 
 fn content_hash(
@@ -158,10 +183,11 @@ fn content_hash(
     n: usize,
     origin: &Origin,
     changes: &[Change],
+    reads: &[Read],
     explanation: &str,
 ) -> Option<[u8; 32]> {
     let mut hash = Sha256::new();
-    hash.update(b"mimik-proposal-v2\0");
+    hash.update(b"mimik-proposal-v3\0");
     let mut field = |bytes: &[u8]| {
         hash.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
         hash.update(bytes);
@@ -205,6 +231,11 @@ fn content_hash(
                     .as_bytes(),
             );
         }
+    }
+    field(&u64::try_from(reads.len()).unwrap_or(u64::MAX).to_be_bytes());
+    for read in reads {
+        field(read.address.as_bytes());
+        field(read.value.as_bytes());
     }
     field(explanation.as_bytes());
     Some(hash.finalize().into())

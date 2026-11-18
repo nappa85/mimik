@@ -72,9 +72,9 @@ addresses and by migration 034 to admit the op `reminded` and add the bundle ind
   non-empty rest.
 - **Ops:** `literal`, `sum`, `sign_literal`, `switched`, `unresolved`, `erased`, `reverted`
   and `confirmed` (an applied assistant reading) are written; `reminded` (an applied reminder,
-  step 3c, displayed and undone like `confirmed`) is admitted. `bundle` numbers the notes of
-  one applied proposal or one bundle Undo (per sheet, from 1); `target` is the revision an
-  Undo reverted.
+  undone like `confirmed`) is written. `bundle` numbers the notes of one applied proposal or one
+  bundle Undo (per sheet, from 1); `target` is the revision an Undo reverted, and on a
+  `reminded` note the revision of the decrease note the reminder was bound to.
 - **Typed values** (`NoteValue`), canonical JSON ≤ 80 bytes (`MAX_VALUE_BYTES`):
   `{"absent":true}` (optional property not set, distinct from unknown), `{"unknown":true}`,
   `{"int":"-15"}` (decimal string), `{"enum":"<id>"}`, `{"bool":true}`, `{"row":"present"|
@@ -601,11 +601,10 @@ value before, and an integer expression, an enum option ID or a boolean) with di
 targets: integer, enum or boolean fields and saved-row cells by host ID, never a row add or
 remove. A duplicate target, a fifth change, a change equal to the value before or one that does
 not fit it drops the option. Interpretation options stay one integer change on their target (the apply requires exactly that, and an edit that suits the target's control: expression to integer, option ID to enum, boolean to boolean).
-The content hash (`mimik-proposal-v2`) covers the job, option index, kind, origin and every
-change with its bound values. Origin and kind: `Origin` carries the job's kind. An
-interpretation is bound to the target's current `unresolved` note; a reminder (its producer is
-step 3c) to the decrease note still current on its field with the field still holding its
-`after`. Apply requires, per change, the target on the sheet holding its value before, the
+The content hash (`mimik-proposal-v3`) covers the job, option index, kind, origin, every
+change with its bound values and the read set (below; empty for interpretations). Origin and kind: `Origin` carries the job's kind. An
+interpretation is bound to the target's current `unresolved` note; a reminder to the decrease
+note still current on its field with the field still holding its `after`. Apply requires, per change, the target on the sheet holding its value before, the
 references and expression as above and, for an enum, an option the pin declares; then one
 revision, one note per change sharing one new bundle number (`confirmed` with the phrase;
 `reminded` with the decrease note's phrase). Any refusal is the one 409 with the fixed
@@ -619,6 +618,73 @@ expression in `<bdi>`, "= <value>" and the explanation in `<bdi>`, with a Use bu
 "Use <expression> = <value>"; readings show in `<bdi>` without Use; other answers show their
 message. Use posts the apply route as the cell's flight, like a save (a draft typed meanwhile is kept, a save asked for meanwhile waits), and draws the answer like a save: the answer's `units` name every changed unit, and the module redraws each (the unit that asked as its flight, another unit of the page unless it has a request in flight, is orphaned or holds a draft). Everything is
 `textContent`.
+
+### Reminders
+
+After a save that commits a decrease, the assistant may add a reminder: a hint, possibly citing
+a list row by name, and an optional change set of one to four changes. Never blocking, nothing
+stored beyond the job record; the owner switches reminders on or off on `/admin/assistant`
+(ASSIST-60: unset means on for the GPU path and off for the CPU path, and the page states the
+generation's path, the estimated reminder time and the worst extra wait of a scribble reading
+right after one).
+
+- **Trigger.** A save that commits, on a top-level integer field, a note of op `literal`,
+  `sum`, `sign_literal`, `switched` or `confirmed` (never `reverted` or `reminded`) with a known
+  `before` greater than the known `after`. The JSON answer carries `reminder.key` (the note's key,
+  `<revision>:field:<id>`) on the qualifying unit (per-unit routes and the `units` of an apply);
+  with reminders off, unavailable for the generation or not ready it carries none.
+- **Route.** `POST /private-sheets/{id}/reminders` with exactly `csrf` and `note`; 202 `{job,
+  poll}`, polled through the interpretation poll route. Off, unavailable (also for the rest of
+  a generation after the cache check below failed) or not ready: 404 after the parse and the CSRF
+  check, before rights; the breaker not closed: 503 (transient, the module keeps trying on later
+  decreases). The route re-derives the trigger from the stored
+  note: the field's current note with that revision, an allowed op, `before` > `after`, the field
+  still holding `after`; else 409. A note that already has a current `reminded` note bound to its revision (`target`) with the
+  decrease's typed text starts no new reminder (409; judged from the stored notes, so a reminder whose
+  changed fields were edited afterwards may be asked for again). 429 beyond 8 live reminders.
+- **Scheduling.** Reminders have their own records (8 live, one per account, a newer one
+  superseding the older; 32 records), outside the interpretations' one-live-job rule, repeat
+  detection, D, Q and records. The worker takes a reminder only when no interpretation is
+  queued, with the reminder's own run deadline; an admitted interpretation cancels a running
+  reminder, and admission counts the reminder's busy term (its whole prompt, plus the restore on
+  the GPU path) while one runs. A reminder never takes the half-open probe; its expiries and
+  cancellations are neutral and never feed the hung detector; HTTP and transport failures count,
+  an invalid reply is nothing and counts for nothing, a completed exchange signals Completed. On
+  the GPU path the worker re-primes the interpretation prefix after every started reminder
+  before the next job (`busy_until` ends when that request completes); the re-prime is installed when the reminder starts and dropped when the reminder never reached
+  the server (too long, tokenizer failure); on the CPU path the server's host-RAM prompt cache
+  restores it, and the first interpretation after a reminder must report at least 75 % of the
+  prefix read from the cache (`cached_tokens`), else reminders are unavailable for the rest of
+  the generation, with the reason on the page. Generation changes and a note write on the field
+  end reminders silently. Options live 10 minutes.
+- **Context** (`campaigns::remind`, `assistant::reminder`). `{"decrease": {id, label, before,
+  after, phrase}, "fields": [{id, label, type, value}], "rows": [{id: "r<n>", list, name}]}`:
+  the other stored integer and enum top-level fields in definition order, the names of the rows of
+  lists with a catalogue member (at most 32) as quoted data; never booleans, text, multiline,
+  notes, keys or other properties. Within B and N(B) rows are dropped first (the last first),
+  then fields; the decrease never, and if it alone exceeds them the job is made and ends "too long"
+  (nothing is shown).
+- **Reply.** `{relevant, row, hint, option}` read against the request's own IDs: `relevant:
+  false`, a truncated or invalid reply shows nothing; `row` names a sent row; `option` is one to
+  four changes of `{ref, expr}` (an integer field, expression references limited to the sent
+  integers and the decreased field) or `{ref, enum}` (a sent enum field and an option the pin
+  declares). Literals follow the 2c rule with the decrease's phrase as the phrase, plus the
+  decrease's `before`, `after`, their difference and the change target's own value. An option
+  that fails a check is dropped and the hint stays.
+- **Read set.** The proposal binds every value the reminder sent (the decrease, every field,
+  every row name by `row:<list>/<host>`); the apply re-reads them and answers 409 when a row was
+  renamed or removed or a sent field changed, even if the changes' own numbers did not.
+- **Module.** After a saved answer the module stops an older reminder of the unit and starts one
+  when the unit carries a key (once the route answers 404 it stops trying for the page; a 503
+  does not). A decrease committed by a switch (`switched`) gives no reminder on the page: the
+  switch route redirects and the page is redrawn without the module's answer. The
+  `role="status"` box (`remind-<key>`) below the decreased field shows "Reminder: <hint>", the
+  cited row's name, the option with Use, showing every change (the target's label, the value now,
+  the expression or the choice's label, the value after; an option whose shape the module cannot
+  render is not shown) (the apply route; when the
+  decreased field is not among the changes the asking unit is not redrawn) and Dismiss (hides it
+  in the page). Everything is `textContent`; an answer that is not a well-formed reminder shows
+  nothing.
 
 ## Adaptive sheet presentation
 

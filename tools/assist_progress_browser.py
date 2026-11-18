@@ -133,9 +133,9 @@ def browser(cookie_file):
         page.wait_for_load_state()
         first = page.locator("#progress-text").inner_text()
         require("starting" in state_of(page).lower(), "Restart did not show Starting")
-        # The stop may already be over when the redirect lands; the 8-step list is the one
+        # The stop may already be over when the redirect lands; the 9-step list is the one
         # with the stop step.
-        require(" of 8, " in first, f"Restart did not walk the list with the stop: {first}")
+        require(" of 9, " in first, f"Restart did not walk the list with the stop: {first}")
         print(f"after Restart: {first}", flush=True)
         nojs, plain = context({"width": 390, "height": 844}, javascript=False)
         plain.goto(PAGE)

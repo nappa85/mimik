@@ -6,11 +6,14 @@
 //! check-then-enqueue and every post-commit note-write hook; it is never held across a
 //! database wait, the permit wait or the model call.
 use super::breaker::{self, Admission, Breaker};
-use super::interpreter::{Completion, Failure, Interpreter};
+use super::interpreter::{Completion, Failure, Interpreter, RequestKind};
 use super::output::{self, Candidate, Reading};
-use super::proposal::bind;
 pub(crate) use super::proposal::{Change, Edit, Kind, Proposal, verify};
+use super::proposal::{bind, bind_with_reads};
+use super::reminder::{self, ReminderRequest};
 use super::request::{self, Bounds, Draft, NotRendered};
+use super::runtime::Path;
+use super::runtime::reminder_budgets::ReminderBudgets;
 use crate::campaigns::NoteValue;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -75,7 +78,19 @@ pub(crate) enum RuntimeEvent {
         generation: u64,
         budgets: Budgets,
         interpreter: Arc<dyn Interpreter>,
+        /// Which path the generation runs on (the reminder setting's default depends on it).
+        path: Path,
+        /// What the generation's measurements allow for reminders (plan 3c-1).
+        reminders: Reminders,
     },
+}
+
+/// Whether reminders can run in a generation, from its measurements.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Reminders {
+    /// Not possible, with the reason the page states.
+    Unavailable(String),
+    Available(ReminderBudgets),
 }
 
 /// The runtime's state as a start or a poll reports it first.
@@ -94,6 +109,8 @@ enum Runtime {
         generation: u64,
         budgets: Budgets,
         interpreter: Arc<dyn Interpreter>,
+        path: Path,
+        reminders: Reminders,
     },
     Unavailable(String),
 }
@@ -157,6 +174,23 @@ pub(crate) enum Answer {
     Superseded,
     /// A note write made its origin non-current.
     Stale,
+    /// A reminder's valid reply: the hint, the cited row's name and the option that passed
+    /// every check (none, or one).
+    Reminder {
+        hint: String,
+        row: Option<String>,
+        options: Vec<Proposal>,
+    },
+}
+
+impl Answer {
+    /// The options a job offers, if any.
+    fn options(&self) -> &[Proposal] {
+        match self {
+            Self::Options(options) | Self::Reminder { options, .. } => options,
+            _ => &[],
+        }
+    }
 }
 
 enum State {
@@ -165,7 +199,36 @@ enum State {
     Done { answer: Answer, at: Instant },
 }
 
+/// A reminder's request as the sheet built it: rendered by the worker within B and N(B).
+#[derive(Clone, Debug)]
+pub(crate) struct ReminderDraft {
+    pub request: ReminderRequest,
+}
+
+/// Why a reminder start is refused (plan 3c-1, "Scheduling").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReminderRefusal {
+    /// Off, unavailable for the generation or not ready: the module stays quiet (404).
+    NotAvailable,
+    /// The breaker is not closed (a reminder never takes the half-open probe): transient, so
+    /// the module may try again on a later decrease (503).
+    BreakerNotClosed,
+    /// A newer note for the target exists (409).
+    Conflict,
+    /// 8 live reminders, or no finished record to evict (429).
+    Busy,
+}
+
+/// Live reminders at most.
+pub(crate) const MAX_LIVE_REMINDERS: usize = 8;
+/// Reminder records at most; a start evicts the oldest finished one.
+pub(crate) const MAX_REMINDER_RECORDS: usize = 32;
+/// How long a reminder may wait for the worker.
+pub(crate) const REMINDER_QUEUE_WAIT: Duration = Duration::from_secs(60);
+
 struct Job {
+    /// A reminder's request (`None` for an interpretation).
+    reminder: Option<ReminderDraft>,
     id: JobId,
     ticket: breaker::Ticket,
     account: i64,
@@ -191,8 +254,8 @@ impl Job {
 
     /// Finished with options that are still applicable at `now`.
     fn offering(&self, now: Instant) -> bool {
-        matches!(&self.state, State::Done { answer: Answer::Options(options), at }
-            if !options.is_empty() && !self.applied && now < *at + OPTION_TTL)
+        matches!(&self.state, State::Done { answer, at }
+            if !answer.options().is_empty() && !self.applied && now < *at + OPTION_TTL)
     }
 }
 
@@ -208,6 +271,10 @@ struct SheetWrites {
 struct Table {
     jobs: Vec<Job>,
     queue: VecDeque<JobId>,
+    /// Reminder records, outside the interpretations' one-live-job rule, repeat detection and
+    /// capacity.
+    reminders: Vec<Job>,
+    reminder_queue: VecDeque<JobId>,
     writes: BTreeMap<i64, SheetWrites>,
     next_ticket: breaker::Ticket,
 }
@@ -263,6 +330,14 @@ pub(crate) enum Poll {
 /// How long a transport error waits for its generation's end to be published.
 const TRANSPORT_GRACE: Duration = Duration::from_secs(1);
 
+/// A pending re-prime of the interpretation prefix after a started reminder.
+struct Reprime {
+    generation: u64,
+    interpreter: Arc<dyn Interpreter>,
+    /// The restore time priming measured: how long the server is busy with it.
+    wait: Duration,
+}
+
 /// The assistant: the job table, the worker's wake-up, the runtime state and the breaker.
 pub(crate) struct Assistant {
     table: Mutex<Table>,
@@ -275,7 +350,21 @@ pub(crate) struct Assistant {
     grace: Mutex<Duration>,
     /// Until when the server is presumed busy with a request cancelled at its deadline.
     busy_until: Mutex<Option<Instant>>,
+    /// Until when the presumed busy time is a reminder's (its dropped prompt or its re-prime):
+    /// the interpretation queued behind it does not count toward D.
+    reminder_busy: Mutex<Option<Instant>>,
+    /// Set after a CPU-path reminder reached the server: the next interpretation's completion
+    /// must show the prefix read back from the cache (plan 3c-0, "runtime detection").
+    cache_check: std::sync::atomic::AtomicBool,
+    /// Why reminders were switched off for the generation after the cache check failed.
+    cache_off: Mutex<Option<String>>,
     signals: Mutex<Option<tokio::sync::mpsc::UnboundedSender<Signal>>>,
+    /// A started reminder on the GPU path leaves the interpretation prefix evicted: the worker
+    /// re-primes it before the next job (plan 3c-0, choice (a)).
+    reprime: Mutex<Option<Reprime>>,
+    /// The owner's reminder setting as stored (`None` until chosen), kept here so the save
+    /// answer and the route read the effective value without a database read.
+    reminder_choice: Mutex<Option<bool>>,
     /// How often the breaker was reset (tests).
     #[cfg(test)]
     pub(crate) resets: std::sync::atomic::AtomicUsize,
@@ -291,7 +380,12 @@ impl Assistant {
             changed: Notify::new(),
             grace: Mutex::new(TRANSPORT_GRACE),
             busy_until: Mutex::new(None),
+            reminder_busy: Mutex::new(None),
+            cache_check: std::sync::atomic::AtomicBool::new(false),
+            cache_off: Mutex::new(None),
+            reprime: Mutex::new(None),
             signals: Mutex::new(None),
+            reminder_choice: Mutex::new(None),
             #[cfg(test)]
             resets: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -299,6 +393,12 @@ impl Assistant {
 
     fn table(&self) -> MutexGuard<'_, Table> {
         self.table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn cache_off(&self) -> MutexGuard<'_, Option<String>> {
+        self.cache_off
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -342,11 +442,14 @@ impl Assistant {
                 *self.runtime() = Runtime::Starting {
                     generation: Some(generation),
                 };
+                self.forget_reminder_state();
             }
             RuntimeEvent::Ready {
                 generation,
                 budgets,
                 interpreter,
+                path,
+                reminders,
             } => {
                 let current = match &*self.runtime() {
                     Runtime::Starting { generation } => *generation,
@@ -357,6 +460,8 @@ impl Assistant {
                         generation,
                         budgets,
                         interpreter,
+                        path,
+                        reminders,
                     };
                     self.wake.notify_one();
                 }
@@ -379,14 +484,97 @@ impl Assistant {
                     .busy_until
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *self
+                    .reprime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                self.forget_reminder_state();
                 let mut table = self.table();
                 table.queue.clear();
                 for job in table.jobs.iter_mut().filter(|job| job.live()) {
                     self.end(job, Answer::Restarted, now);
                 }
+                table.reminder_queue.clear();
+                for job in table.reminders.iter_mut().filter(|job| job.live()) {
+                    close(job, Answer::Restarted, now);
+                }
             }
         }
         self.changed.notify_waiters();
+    }
+
+    /// What a generation's reminders leave behind ends with it: the reminder busy time, the
+    /// pending cache check and its verdict.
+    fn forget_reminder_state(&self) {
+        *self
+            .reminder_busy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.cache_check
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        *self.cache_off() = None;
+    }
+
+    /// Sets the owner's stored reminder choice (`None`: not chosen). Called at start from the
+    /// database and by the assistant page on a change; no restart follows.
+    pub(crate) fn set_reminder_choice(&self, choice: Option<bool>) {
+        *self
+            .reminder_choice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = choice;
+        self.changed.notify_waiters();
+    }
+
+    /// The stored choice.
+    pub(crate) fn reminder_choice(&self) -> Option<bool> {
+        *self
+            .reminder_choice
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The reminder budgets while the runtime is ready and the generation allows reminders,
+    /// whether or not the owner turned them on.
+    #[cfg(test)]
+    pub(crate) fn reminder_budgets(&self) -> Option<ReminderBudgets> {
+        match &*self.runtime() {
+            Runtime::Ready {
+                reminders: Reminders::Available(budgets),
+                ..
+            } => Some(*budgets),
+            _ => None,
+        }
+    }
+
+    /// Whether reminders run now (ASSIST-60): the runtime is ready, the generation allows
+    /// them (3c-1, "Budgets") and the setting is on; unset means on for the GPU path and off
+    /// for the CPU path. Not ready, unavailable or off: no reminder key anywhere.
+    pub(crate) fn reminders_effective(&self) -> bool {
+        let Runtime::Ready {
+            path, reminders, ..
+        } = &*self.runtime()
+        else {
+            return false;
+        };
+        matches!(reminders, Reminders::Available(_))
+            && self.cache_off().is_none()
+            && self.reminder_choice().unwrap_or(*path == Path::Gpu)
+    }
+
+    /// What the page states of the generation's reminders: its path and what they allow.
+    pub(crate) fn reminder_generation(&self) -> Option<(Path, Reminders)> {
+        match &*self.runtime() {
+            Runtime::Ready {
+                path, reminders, ..
+            } => Some((
+                *path,
+                match self.cache_off().as_ref() {
+                    Some(why) => Reminders::Unavailable(why.clone()),
+                    None => reminders.clone(),
+                },
+            )),
+            _ => None,
+        }
     }
 
     /// The breaker's state, for the assistant page.
@@ -483,6 +671,20 @@ impl Assistant {
             return Err(Refusal::Unavailable);
         }
         table.next_ticket += 1;
+        // An admitted interpretation cancels a running reminder (plan 3c-1, "Scheduling"): the
+        // worker's busy term for it was counted by `admissible`.
+        let cancelled = table
+            .reminders
+            .iter_mut()
+            .filter(|job| matches!(job.state, State::Running { .. }))
+            .map(|job| close(job, Answer::Superseded, now))
+            .count();
+        if cancelled > 0 {
+            // Set here, under the table's lock, so the next admission counts it before the
+            // worker has seen the cancel.
+            let until = now + self.reminder_busy_term();
+            self.presume_busy_until(until, true);
+        }
         if let Some((id, _)) = superseded {
             table.queue.retain(|queued| *queued != id);
             if let Some(job) = table.jobs.iter_mut().find(|job| job.id == id) {
@@ -513,6 +715,7 @@ impl Assistant {
         }
         let id = JobId::random();
         table.jobs.push(Job {
+            reminder: None,
             id,
             ticket,
             account,
@@ -527,6 +730,133 @@ impl Assistant {
         drop(table);
         self.wake.notify_one();
         Ok((id, false))
+    }
+
+    /// Starts a reminder after the database check found the decrease note current (plan 3c-1,
+    /// "Scheduling"): outside the one-live-job rule and the interpretation records. Refused
+    /// unless reminders run now and the breaker is closed; a newer note for the target
+    /// conflicts; the account's older live reminder is superseded; at most 8 live reminders
+    /// and 32 records.
+    pub(crate) fn start_reminder(
+        &self,
+        registration: &Registration,
+        account: i64,
+        origin: Origin,
+        draft: ReminderDraft,
+    ) -> Result<JobId, ReminderRefusal> {
+        debug_assert_eq!(registration.sheet, origin.sheet);
+        debug_assert_eq!(origin.kind, Kind::Reminder);
+        if !self.reminders_effective() {
+            return Err(ReminderRefusal::NotAvailable);
+        }
+        if !self.breaker().is_closed() {
+            return Err(ReminderRefusal::BreakerNotClosed);
+        }
+        let now = Instant::now();
+        let mut table = self.table();
+        // Again under the table's lock: a generation that ended meanwhile has already ended
+        // the reminders (the event takes this lock after setting the state), so none is queued
+        // after it.
+        if !self.reminders_effective() {
+            return Err(ReminderRefusal::NotAvailable);
+        }
+        let newer_write = table.writes.get(&origin.sheet).is_some_and(|writes| {
+            writes
+                .latest
+                .iter()
+                .any(|(target, latest)| *latest > origin.revision && covers(target, &origin.target))
+        });
+        if newer_write {
+            return Err(ReminderRefusal::Conflict);
+        }
+        let superseded = table
+            .reminders
+            .iter()
+            .find(|job| job.account == account && job.live())
+            .map(|job| job.id);
+        let live = table
+            .reminders
+            .iter()
+            .filter(|job| job.live() && Some(job.id) != superseded)
+            .count();
+        if live >= MAX_LIVE_REMINDERS {
+            return Err(ReminderRefusal::Busy);
+        }
+        if let Some(id) = superseded {
+            table.reminder_queue.retain(|queued| *queued != id);
+            if let Some(job) = table.reminders.iter_mut().find(|job| job.id == id) {
+                close(job, Answer::Superseded, now);
+            }
+        }
+        if table.reminders.len() >= MAX_REMINDER_RECORDS {
+            let oldest = table
+                .reminders
+                .iter()
+                .enumerate()
+                .filter(|(_, job)| !job.live())
+                .min_by_key(|(_, job)| match job.state {
+                    State::Done { at, .. } => at,
+                    _ => now,
+                })
+                .map(|(index, _)| index);
+            let Some(index) = oldest else {
+                return Err(ReminderRefusal::Busy);
+            };
+            table.reminders.remove(index);
+        }
+        let id = JobId::random();
+        // Reminders hold no breaker ticket of their own: a reminder never takes the probe and
+        // its expiries are neutral; failures are recorded with this number.
+        let ticket = table.next_ticket;
+        table.next_ticket += 1;
+        table.reminders.push(Job {
+            reminder: Some(draft),
+            id,
+            ticket,
+            account,
+            origin,
+            enqueued: now,
+            started: None,
+            state: State::Queued,
+            draft: None,
+            applied: false,
+        });
+        table.reminder_queue.push_back(id);
+        drop(table);
+        self.wake.notify_one();
+        Ok(id)
+    }
+
+    /// Reminder records held (tests).
+    #[cfg(test)]
+    pub(crate) fn reminder_records(&self) -> usize {
+        self.table().reminders.len()
+    }
+
+    /// A reminder's state as a poll sees it, or `None` when it is not one (tests).
+    #[cfg(test)]
+    pub(crate) fn poll_reminder_for_tests(
+        &self,
+        account: i64,
+        sheet: i64,
+        id: JobId,
+    ) -> Option<Poll> {
+        let known = self
+            .table()
+            .reminders
+            .iter()
+            .any(|job| job.id == id && job.account == account && job.origin.sheet == sheet);
+        known.then(|| self.poll(account, sheet, id))
+    }
+
+    /// Records a counted failure as a completed exchange's opposite would (tests).
+    #[cfg(test)]
+    pub(crate) fn breaker_failure_for_tests(&self, ticket: breaker::Ticket) {
+        self.breaker().record(
+            ticket,
+            breaker::Outcome::Failure { generation: 1 },
+            Instant::now().into_std(),
+        );
     }
 
     /// The post-commit hook of every note writer (saves, Undo, switch, row removal, apply):
@@ -554,6 +884,17 @@ impl Assistant {
             }
         }
         table.queue.retain(|id| !stale.contains(id));
+        // Reminders end silently: the module shows nothing for a stale one.
+        let mut stale_reminders = Vec::new();
+        for job in &mut table.reminders {
+            if stale_origin(&job.origin) && (job.live() || job.offering(now)) {
+                stale_reminders.push(job.id);
+                close(job, Answer::Stale, now);
+            }
+        }
+        table
+            .reminder_queue
+            .retain(|id| !stale_reminders.contains(id));
         prune(&mut table, sheet);
     }
 
@@ -564,6 +905,7 @@ impl Assistant {
         let Some(job) = table
             .jobs
             .iter()
+            .chain(&table.reminders)
             .find(|job| job.id == id && job.account == account && job.origin.sheet == sheet)
         else {
             return Poll::Missing;
@@ -571,10 +913,9 @@ impl Assistant {
         match &job.state {
             State::Queued => Poll::Queued,
             State::Running { .. } => Poll::Running,
-            State::Done {
-                answer: Answer::Options(_),
-                ..
-            } if !job.offering(now) => Poll::Done(Answer::AskAgain),
+            State::Done { answer, .. } if !answer.options().is_empty() && !job.offering(now) => {
+                Poll::Done(Answer::AskAgain)
+            }
             State::Done { answer, .. } => Poll::Done(answer.clone()),
         }
     }
@@ -593,18 +934,16 @@ impl Assistant {
         let job = table
             .jobs
             .iter()
+            .chain(&table.reminders)
             .find(|job| job.id == id && job.account == account && job.origin.sheet == sheet)?;
         if !job.offering(now) {
             return None;
         }
-        let State::Done {
-            answer: Answer::Options(options),
-            ..
-        } = &job.state
-        else {
+        let State::Done { answer, .. } = &job.state else {
             return None;
         };
-        options
+        answer
+            .options()
             .get(n)
             .map(|option| (job.origin.clone(), option.clone()))
     }
@@ -636,6 +975,7 @@ impl Assistant {
         let ticket = table.next_ticket;
         table.next_ticket += 1;
         table.jobs.push(Job {
+            reminder: None,
             id,
             ticket,
             account,
@@ -651,7 +991,14 @@ impl Assistant {
 
     /// Marks job `id` applied, after the apply's commit: options are alternatives.
     pub(crate) fn consume(&self, id: JobId) {
-        if let Some(job) = self.table().jobs.iter_mut().find(|job| job.id == id) {
+        let mut table = self.table();
+        let table = &mut *table;
+        if let Some(job) = table
+            .jobs
+            .iter_mut()
+            .chain(table.reminders.iter_mut())
+            .find(|job| job.id == id)
+        {
             job.applied = true;
         }
     }
@@ -666,8 +1013,39 @@ impl Assistant {
                 }
                 continue;
             }
+            if self.reprime().await {
+                continue;
+            }
             match self.next() {
-                Some(run) => self.run(run).await,
+                Some(run) => {
+                    // Installed as the reminder starts, so admission counts it while the
+                    // reminder runs.
+                    let sent = Arc::clone(&run.sent);
+                    let reminder = run.work.is_reminder();
+                    let cpu_reminder = matches!(run.work, Work::Reminder { gpu: false, .. });
+                    let generation = run.generation;
+                    if let Some(after) = run.reprime() {
+                        *self
+                            .reprime
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(after);
+                    }
+                    self.run(run).await;
+                    if reminder && !sent.load(std::sync::atomic::Ordering::SeqCst) {
+                        // The reminder never reached the server (too long, the tokenizer
+                        // failed, cancelled first): the slot's cache is untouched.
+                        let mut pending = self
+                            .reprime
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if pending.as_ref().is_some_and(|p| p.generation == generation) {
+                            *pending = None;
+                        }
+                    } else if cpu_reminder {
+                        self.cache_check
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
                 None => self.wake.notified().await,
             }
         }
@@ -706,6 +1084,7 @@ impl Assistant {
                 budgets,
                 generation,
                 interpreter,
+                ..
             } => (*budgets, *generation, Arc::clone(interpreter)),
             _ => return None,
         };
@@ -735,19 +1114,120 @@ impl Assistant {
                 id,
                 ticket: job.ticket,
                 origin: job.origin.clone(),
-                draft,
+                work: Work::Interpretation(draft),
+                deadline: budgets.run,
+                busy: budgets.busy_after_expiry,
                 budgets,
                 generation,
                 interpreter,
                 cancel,
+                sent: Arc::default(),
+                cached: Arc::default(),
+            });
+        }
+        // A reminder only when no interpretation is queued (the loop above emptied the queue).
+        let (path, reminders) = match &*self.runtime() {
+            Runtime::Ready {
+                path, reminders, ..
+            } => (*path, reminders.clone()),
+            _ => return None,
+        };
+        while let Some(id) = table.reminder_queue.pop_front() {
+            let Some(job) = table.reminders.iter_mut().find(|job| job.id == id) else {
+                continue;
+            };
+            let Reminders::Available(allowed) = &reminders else {
+                close(job, Answer::Unavailable, now);
+                continue;
+            };
+            if let Some(answer) = self.reminder_not_run(job.enqueued, now) {
+                close(job, answer, now);
+                continue;
+            }
+            let Some(draft) = job.reminder.take() else {
+                close(job, Answer::AskAgain, now);
+                continue;
+            };
+            let cancel = Arc::new(Notify::new());
+            job.state = State::Running {
+                cancel: Arc::clone(&cancel),
+            };
+            job.started = Some(now);
+            return Some(Run {
+                id,
+                ticket: job.ticket,
+                origin: job.origin.clone(),
+                work: Work::Reminder {
+                    request: draft.request,
+                    reply_tokens: allowed.reply_tokens,
+                    gpu: path == Path::Gpu,
+                    restore: Duration::from_secs_f64(allowed.restore.seconds.max(0.0)),
+                },
+                deadline: allowed.run,
+                busy: allowed.busy,
+                budgets,
+                generation,
+                interpreter,
+                cancel,
+                sent: Arc::default(),
+                cached: Arc::default(),
             });
         }
         None
     }
 
+    /// Why a queued reminder does not run now: switched off meanwhile (the cache check, the
+    /// owner's setting), waited too long, or the breaker is not closed (a reminder never takes
+    /// the half-open probe).
+    fn reminder_not_run(&self, enqueued: Instant, now: Instant) -> Option<Answer> {
+        if !self.reminders_effective() || !self.breaker().is_closed() {
+            Some(Answer::Unavailable)
+        } else if now > enqueued + REMINDER_QUEUE_WAIT {
+            Some(Answer::AskAgain)
+        } else {
+            None
+        }
+    }
+
+    /// Re-primes the interpretation prefix after a started reminder on the GPU path, before any
+    /// next job; `busy_until` covers it and ends when the request completes. Returns whether
+    /// one ran.
+    async fn reprime(&self) -> bool {
+        let Some(pending) = self
+            .reprime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return false;
+        };
+        if self.generation_over(pending.generation) {
+            return false;
+        }
+        let bound = pending.wait * 2 + Duration::from_secs(10);
+        // Presumed busy for the restore time the Ready rules count; the worker awaits the request
+        // (within its bound) before it starts any job, so a slower one delays the next job, not
+        // the admission arithmetic.
+        self.presume_busy_until(Instant::now() + pending.wait, true);
+        // A failure or a timeout changes nothing: the next interpretation evaluates its own
+        // prefix, which its run deadline's margin covers.
+        let _ = tokio::time::timeout(bound, pending.interpreter.reprime()).await;
+        if !self.generation_over(pending.generation) {
+            *self
+                .busy_until
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            *self
+                .reminder_busy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        true
+    }
+
     async fn run(&self, run: Run) {
         let work = attempt(&run);
-        let deadline = tokio::time::sleep(run.budgets.run);
+        let deadline = tokio::time::sleep(run.deadline);
         tokio::pin!(deadline);
         let result = tokio::select! {
             result = work => Some(result),
@@ -779,15 +1259,16 @@ impl Assistant {
             }
         }
         let now = Instant::now();
-        let mut table = self.table();
+        let mut guard = self.table();
         // A late answer from a job ended meanwhile is discarded; whoever ended it recorded a
         // neutral outcome, and one more is harmless, so a probe never stays in flight.
-        let current = table.jobs.iter_mut().find(|job| {
+        let table = &mut *guard;
+        let current = table.jobs.iter_mut().chain(table.reminders.iter_mut()).find(|job| {
             job.id == run.id
                 && matches!(&job.state, State::Running { cancel } if Arc::ptr_eq(cancel, &run.cancel))
         });
         let Some(job) = current else {
-            drop(table);
+            drop(guard);
             // Ended meanwhile (superseded or stale as the deadline fired): its request was
             // still dropped mid-way, so the server is presumed busy as on any expiry, while
             // it is still this generation's (`presume_busy` checks).
@@ -796,14 +1277,20 @@ impl Assistant {
             }
             return self.neutral(&run);
         };
+        if !run.work.is_reminder() {
+            self.check_restored_prefix(&run, result.as_ref());
+        }
         match &result {
             None => {
                 self.presume_busy(&run);
-                self.signal(Signal::Expired {
-                    generation: run.generation,
-                });
+                // A reminder's expiry never feeds the hung detector.
+                if !run.work.is_reminder() {
+                    self.signal(Signal::Expired {
+                        generation: run.generation,
+                    });
+                }
             }
-            Some(Ok(_)) => self.signal(Signal::Completed {
+            Some(Ok(_) | Err(Attempt::Invalid)) => self.signal(Signal::Completed {
                 generation: run.generation,
             }),
             Some(Err(_)) => {}
@@ -811,6 +1298,8 @@ impl Assistant {
         let (answer, outcome) = match result {
             None => (Answer::AskAgain, breaker::Outcome::Neutral),
             Some(Err(Attempt::TooLong)) => (Answer::TooLong, breaker::Outcome::Neutral),
+            // An invalid reminder reply is `Nothing` and counts for nothing.
+            Some(Err(Attempt::Invalid)) => (Answer::Nothing, breaker::Outcome::Neutral),
             Some(Err(Attempt::Failed | Attempt::Transport)) => (
                 Answer::Unavailable,
                 breaker::Outcome::Failure {
@@ -820,8 +1309,62 @@ impl Assistant {
             Some(Ok(answer)) => (answer, breaker::Outcome::Success),
         };
         close(job, answer, now);
-        drop(table);
+        drop(guard);
         self.breaker().record(run.ticket, outcome, now.into_std());
+    }
+
+    /// After a CPU-path reminder, the first interpretation that reached the server must have read
+    /// at least 75 % of the prefix from the prompt cache (the calibration rule); otherwise the
+    /// host-RAM cache does not restore it and reminders are unavailable for the rest of the
+    /// generation, with the reason. An expiry or a transport or HTTP failure of that request
+    /// counts as a failed check, and so does a completion without the figure (unverified). A
+    /// request that never reached the server (too long, tokenizer) settles nothing.
+    fn check_restored_prefix(&self, run: &Run, result: Option<&Result<Answer, Attempt>>) {
+        if !self.cache_check.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let sent = run.sent.load(std::sync::atomic::Ordering::SeqCst);
+        let cached = *run
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prefix = match &*self.runtime() {
+            Runtime::Ready {
+                generation,
+                reminders: Reminders::Available(budgets),
+                ..
+            } if *generation == run.generation => budgets.prefix_tokens,
+            _ => return,
+        };
+        let failed = match result {
+            Some(Ok(_)) => match cached {
+                None => Some(
+                    "the server reported no cached-token figure, so the restore is unverified"
+                        .to_owned(),
+                ),
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "token counts of a few thousand, exact in f64"
+                )]
+                Some(cached) if (cached as f64) < 0.75 * prefix as f64 => Some(format!(
+                    "{cached} of {prefix} prefix tokens were read from the cache"
+                )),
+                Some(_) => None,
+            },
+            None if sent => Some("the interpretation expired".to_owned()),
+            Some(Err(Attempt::Failed | Attempt::Transport)) if sent => {
+                Some("the interpretation request failed".to_owned())
+            }
+            _ => return,
+        };
+        self.cache_check
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(why) = failed {
+            *self.cache_off() = Some(format!(
+                "the prompt cache did not restore the interpretation prefix after a reminder ({why})"
+            ));
+            self.changed.notify_waiters();
+        }
     }
 
     /// Whether `generation` is no longer the ready one.
@@ -852,12 +1395,44 @@ impl Assistant {
     fn presume_busy(&self, run: &Run) {
         let current = matches!(&*self.runtime(), Runtime::Ready { generation, .. } if *generation == run.generation);
         if current {
-            *self
-                .busy_until
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                Some(Instant::now() + run.budgets.busy_after_expiry);
+            self.presume_busy_until(Instant::now() + run.busy, run.work.is_reminder());
         }
+    }
+
+    /// Presumes the server busy until `until` (never shortening what is presumed), noting
+    /// whether it is a reminder's.
+    fn presume_busy_until(&self, until: Instant, reminder: bool) {
+        let mut busy = self
+            .busy_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *busy = Some(busy.map_or(until, |earlier| earlier.max(until)));
+        if reminder {
+            *self
+                .reminder_busy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = *busy;
+        }
+    }
+
+    /// The presumed busy time left (tests).
+    #[cfg(test)]
+    pub(crate) fn busy_for_tests(&self) -> Duration {
+        self.busy_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map_or(Duration::ZERO, |until| {
+                until.saturating_duration_since(Instant::now())
+            })
+    }
+
+    /// Whether a re-prime is pending (tests).
+    #[cfg(test)]
+    pub(crate) fn reprime_pending_for_tests(&self) -> bool {
+        self.reprime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     fn neutral(&self, run: &Run) {
@@ -871,7 +1446,13 @@ impl Assistant {
     /// Moves job `id`'s finish back past the option lifetime (route tests).
     #[cfg(test)]
     pub(crate) fn expire_for_tests(&self, id: JobId) {
-        if let Some(job) = self.table().jobs.iter_mut().find(|job| job.id == id)
+        let mut table = self.table();
+        let table = &mut *table;
+        if let Some(job) = table
+            .jobs
+            .iter_mut()
+            .chain(table.reminders.iter_mut())
+            .find(|job| job.id == id)
             && let State::Done { at, .. } = &mut job.state
             && let Some(earlier) = at.checked_sub(OPTION_TTL)
         {
@@ -920,6 +1501,20 @@ impl Assistant {
     }
 }
 
+impl Assistant {
+    /// How long the server stays busy after a reminder is dropped: its whole prompt. The
+    /// GPU path's re-priming that follows is the pending [`Reprime`], counted on its own.
+    fn reminder_busy_term(&self) -> Duration {
+        match &*self.runtime() {
+            Runtime::Ready {
+                reminders: Reminders::Available(budgets),
+                ..
+            } => budgets.busy,
+            _ => Duration::ZERO,
+        }
+    }
+}
+
 /// The breaker (503) then capacity (429) of a start, computed as if `superseded` were
 /// already gone (plan §1.4, "Jobs"): at most D waiting, the worst-case wait (the running
 /// job's remaining run deadline, or the rest of the busy time after a deadline cancel, plus
@@ -944,6 +1539,36 @@ impl Assistant {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .map_or(Duration::ZERO, |until| until.saturating_duration_since(now));
+        // A running reminder is cancelled by the admission, but the server may still be
+        // evaluating its whole prompt (a cancel can come before the first token); on the GPU
+        // path the re-priming follows. A re-priming still pending counts the same.
+        let reminder_busy = if table
+            .reminders
+            .iter()
+            .any(|job| matches!(job.state, State::Running { .. }))
+        {
+            self.reminder_busy_term()
+        } else {
+            Duration::ZERO
+        };
+        let pending_reprime = self
+            .reprime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map_or(Duration::ZERO, |pending| pending.wait);
+        let busy_left = busy_left.max(reminder_busy) + pending_reprime;
+        // The first job queued behind a reminder's busy time waits for that time, not for a
+        // running job, so it takes no place among the D that may wait: a scribble reading is
+        // never refused because of a reminder, as it is not because of a running reading.
+        let behind_reminder = waiting > 0
+            && running_left.is_zero()
+            && self
+                .reminder_busy
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some_and(|until| until > now);
+        let counted = waiting - usize::from(behind_reminder);
         let worst =
             running_left.max(busy_left) + budgets.run * u32::try_from(waiting).unwrap_or(u32::MAX);
         let live_records = table
@@ -959,7 +1584,7 @@ impl Assistant {
         if breaker_refuses {
             return Err(Refusal::Unavailable);
         }
-        if waiting >= budgets.depth || worst > budgets.queue_wait || live_records >= MAX_RECORDS {
+        if counted >= budgets.depth || worst > budgets.queue_wait || live_records >= MAX_RECORDS {
             return Err(Refusal::Busy);
         }
         Ok(())
@@ -995,6 +1620,7 @@ fn prune(table: &mut Table, sheet: i64) {
     let live = table
         .jobs
         .iter()
+        .chain(&table.reminders)
         .filter(|job| job.origin.sheet == sheet && job.live())
         .map(|job| job.origin.revision)
         .min();
@@ -1013,18 +1639,62 @@ fn prune(table: &mut Table, sheet: i64) {
     }
 }
 
+/// What a run sends.
+enum Work {
+    Interpretation(Draft),
+    Reminder {
+        request: ReminderRequest,
+        reply_tokens: u32,
+        /// The GPU path re-primes the interpretation prefix after the reminder.
+        gpu: bool,
+        restore: Duration,
+    },
+}
+
+impl Work {
+    fn is_reminder(&self) -> bool {
+        matches!(self, Self::Reminder { .. })
+    }
+}
+
 struct Run {
     id: JobId,
     ticket: breaker::Ticket,
     origin: Origin,
-    draft: Draft,
+    work: Work,
+    /// The run deadline: R for an interpretation, the reminder's own for a reminder.
+    deadline: Duration,
+    /// How long the server is presumed busy after the request is dropped.
+    busy: Duration,
     budgets: Budgets,
     generation: u64,
     interpreter: Arc<dyn Interpreter>,
     cancel: Arc<Notify>,
+    /// Set once a reminder's request is about to reach the server (its cache is then touched).
+    sent: Arc<std::sync::atomic::AtomicBool>,
+    /// The prompt tokens the server read from its cache for this run's completion, once known.
+    cached: Arc<Mutex<Option<u64>>>,
+}
+
+impl Run {
+    /// The re-prime a started reminder leaves to do (GPU path), whatever way it ends.
+    fn reprime(&self) -> Option<Reprime> {
+        match self.work {
+            Work::Reminder {
+                gpu: true, restore, ..
+            } => Some(Reprime {
+                generation: self.generation,
+                interpreter: Arc::clone(&self.interpreter),
+                wait: restore,
+            }),
+            _ => None,
+        }
+    }
 }
 
 enum Attempt {
+    /// A reminder's reply is not valid: shown as nothing, counted for nothing.
+    Invalid,
     TooLong,
     /// A failure that counts at once (an HTTP status, a tokenizer failure).
     Failed,
@@ -1035,24 +1705,37 @@ enum Attempt {
 
 /// Renders, calls the model once and reads the reply.
 async fn attempt(run: &Run) -> Result<Answer, Attempt> {
-    let rendered = request::render(&run.draft, run.budgets.bounds, run.interpreter.as_ref())
+    let draft = match &run.work {
+        Work::Interpretation(draft) => draft,
+        Work::Reminder {
+            request,
+            reply_tokens,
+            ..
+        } => return attempt_reminder(run, request, *reply_tokens).await,
+    };
+    let rendered = request::render(draft, run.budgets.bounds, run.interpreter.as_ref())
         .await
         .map_err(|error| match error {
             NotRendered::TooLong => Attempt::TooLong,
             NotRendered::Tokenizer(_) => Attempt::Failed,
         })?;
+    run.sent.store(true, std::sync::atomic::Ordering::SeqCst);
     let completed = run
         .interpreter
         .complete(&Completion {
             dynamic: rendered.dynamic,
             ref_ids: rendered.ref_ids,
             max_tokens: run.budgets.max_tokens,
+            kind: RequestKind::Interpretation,
         })
         .await
         .map_err(|failure| match failure {
             Failure::Transport => Attempt::Transport,
             Failure::Status(_) => Attempt::Failed,
         })?;
+    *run.cached
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = completed.cached_tokens;
     Ok(match output::read(&completed.text, &rendered.checks) {
         Err(_) => Answer::Nothing,
         Ok(Reading::Ambiguous(readings)) => Answer::Readings(readings),
@@ -1060,7 +1743,7 @@ async fn attempt(run: &Run) -> Result<Answer, Attempt> {
             // An option's index is its position among those kept, which the apply names.
             let mut options: Vec<Proposal> = Vec::new();
             for candidate in shown {
-                if let Some(option) = proposal(run, options.len(), candidate) {
+                if let Some(option) = proposal(run, draft, options.len(), candidate) {
                     options.push(option);
                 }
             }
@@ -1077,15 +1760,14 @@ async fn attempt(run: &Run) -> Result<Answer, Attempt> {
 /// hash covering the job, the option's index, the origin, the write (target, value before,
 /// value after) and every reference (address and value). `None` drops an option equal to the
 /// current value.
-fn proposal(run: &Run, n: usize, candidate: Candidate) -> Option<Proposal> {
-    let before = run.draft.target.value;
-    let labels: BTreeMap<&str, &str> = run
-        .draft
+fn proposal(run: &Run, draft: &Draft, n: usize, candidate: Candidate) -> Option<Proposal> {
+    let before = draft.target.value;
+    let labels: BTreeMap<&str, &str> = draft
         .items
         .iter()
         .map(|(item, _)| (item.id.as_str(), item.label.as_str()))
         .collect();
-    let target_label = run.draft.target.label.clone().unwrap_or_default();
+    let target_label = draft.target.label.clone().unwrap_or_default();
     let name = |alias: &str| {
         if alias == super::contract::TARGET_ALIAS {
             // The target as the other references: its label and Mimik's value.
@@ -1114,6 +1796,55 @@ fn proposal(run: &Run, n: usize, candidate: Candidate) -> Option<Proposal> {
         edit: Edit::Expr { candidate, shown },
     };
     bind(run.id, n, &run.origin, vec![change], explanation)
+}
+
+/// Renders a reminder within B and N(B), calls the model once and reads the reply (plan 3c-1).
+async fn attempt_reminder(
+    run: &Run,
+    request: &ReminderRequest,
+    reply_tokens: u32,
+) -> Result<Answer, Attempt> {
+    let rendered = reminder::render(
+        request,
+        run.budgets.bounds,
+        reply_tokens,
+        run.interpreter.as_ref(),
+    )
+    .await
+    .map_err(|error| match error {
+        NotRendered::TooLong => Attempt::TooLong,
+        NotRendered::Tokenizer(_) => Attempt::Failed,
+    })?;
+    run.sent.store(true, std::sync::atomic::Ordering::SeqCst);
+    let completed = run
+        .interpreter
+        .complete(&rendered.completion)
+        .await
+        .map_err(|failure| match failure {
+            Failure::Transport => Attempt::Transport,
+            Failure::Status(_) => Attempt::Failed,
+        })?;
+    Ok(match reminder::read(&completed.text, &rendered.kept) {
+        Err(_) => return Err(Attempt::Invalid),
+        Ok(reminder::Reading::Nothing) => Answer::Nothing,
+        Ok(reminder::Reading::Hint { hint, row, option }) => Answer::Reminder {
+            hint,
+            row,
+            options: option
+                .and_then(|(changes, explanation)| {
+                    bind_with_reads(
+                        run.id,
+                        0,
+                        &run.origin,
+                        changes,
+                        rendered.reads.clone(),
+                        explanation,
+                    )
+                })
+                .into_iter()
+                .collect(),
+        },
+    })
 }
 
 #[cfg(test)]

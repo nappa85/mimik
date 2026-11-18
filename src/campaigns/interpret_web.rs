@@ -41,7 +41,7 @@ pub(super) const INTERPRET_POST_BYTES: usize = 8192;
 /// Every apply refusal (D-P): nothing written, never a literal fallback.
 const CHANGED: &str = "Something this proposal used has changed: ask again.";
 
-fn reply(status: StatusCode, body: &Value) -> Response {
+pub(super) fn reply(status: StatusCode, body: &Value) -> Response {
     let mut response = (
         status,
         [(header::CONTENT_TYPE, "application/json")],
@@ -52,6 +52,10 @@ fn reply(status: StatusCode, body: &Value) -> Response {
     // A refusal's JSON is the answer itself: the error page must not replace it.
     response.extensions_mut().insert(AssistantAnswer);
     response
+}
+
+pub(super) fn refusal_json(status: StatusCode, kind: &str, message: &str) -> Response {
+    reply(status, &json!({"status": kind, "message": message}))
 }
 
 fn assistant(state: &AuthState) -> Result<Arc<Assistant>, StatusCode> {
@@ -256,7 +260,37 @@ pub(super) async fn poll(
                 )
             }
         }
-        Poll::Done(answer) => reply(StatusCode::OK, &done(id, job, &answer)),
+        Poll::Done(answer) => {
+            let shows_options = matches!(answer, Answer::Options(_) | Answer::Reminder { .. });
+            let pin = if shows_options {
+                // The options name their targets and enum choices by label: the pin's
+                // definition, read like the apply does.
+                let Some(permit) =
+                    crate::definitions::admit_within(super::unit_web::PERMIT_WAIT).await
+                else {
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                };
+                let (view, _, permit) = state
+                    .store()
+                    .private_read_base(auth, id, None, permit)
+                    .await
+                    .map_err(error)?;
+                drop(permit);
+                view.immutable
+            } else {
+                None
+            };
+            reply(
+                StatusCode::OK,
+                &done(
+                    id,
+                    job,
+                    &answer,
+                    pin.as_ref()
+                        .map(crate::definitions::private_pin::ImmutablePin::definition),
+                ),
+            )
+        }
     })
 }
 
@@ -267,13 +301,18 @@ fn ask_again() -> Response {
     )
 }
 
-fn done(sheet: i64, job: JobId, answer: &Answer) -> Value {
+fn done(
+    sheet: i64,
+    job: JobId,
+    answer: &Answer,
+    definition: Option<&crate::definitions::Definition>,
+) -> Value {
     let message = |state: &str, message: &str| json!({"state": state, "message": message});
     match answer {
         Answer::Options(options) => json!({
             "state": "options",
             "message": "The assistant's reading:",
-            "options": options.iter().enumerate().map(|(n, option)| option_json(sheet, job, n, option)).collect::<Vec<_>>(),
+            "options": options.iter().enumerate().map(|(n, option)| option_json(definition, sheet, job, n, option)).collect::<Vec<_>>(),
         }),
         Answer::Readings(readings) => json!({
             "state": "readings",
@@ -290,23 +329,78 @@ fn done(sheet: i64, job: JobId, answer: &Answer) -> Value {
         Answer::AskAgain => message("ask_again", "The assistant took too long: ask again."),
         Answer::Superseded => message("superseded", "A newer entry replaced this one."),
         Answer::Stale => message("stale", "This entry changed since: ask again."),
+        // A reminder: the hint, the cited row's name and the option(s), as the module shows them
+        // below the decreased field; the module treats every other reminder state as nothing.
+        Answer::Reminder { hint, row, options } => json!({
+            "state": "reminder",
+            "message": "Reminder",
+            "hint": hint,
+            "row": row,
+            "options": options.iter().enumerate().map(|(n, option)| option_json(definition, sheet, job, n, option)).collect::<Vec<_>>(),
+        }),
     }
 }
 
-fn option_json(sheet: i64, job: JobId, n: usize, option: &Proposal) -> Value {
-    // An interpretation option is one integer change; a longer proposal shows its first.
-    let change = &option.changes[0];
-    let before = match &change.before {
+/// The label of the target at `address` and the labels of its enum choices (none for other
+/// controls); an address the pin does not know shows as itself.
+fn label_of<'a>(
+    definition: Option<&'a crate::definitions::Definition>,
+    address: &'a str,
+) -> (&'a str, &'a [crate::definitions::Choice]) {
+    let found = definition.and_then(|definition| match target(definition, address)? {
+        interpret::Target::Field(field) => Some((field.label.as_str(), field.options.as_deref())),
+        interpret::Target::Cell { property, .. } => {
+            Some((property.label.as_str(), property.options.as_deref()))
+        }
+    });
+    found.map_or((address, &[][..]), |(label, options)| {
+        (label, options.unwrap_or(&[]))
+    })
+}
+
+fn option_json(
+    definition: Option<&crate::definitions::Definition>,
+    sheet: i64,
+    job: JobId,
+    n: usize,
+    option: &Proposal,
+) -> Value {
+    // An enum value shows as its choice's label, an unknown number as `?`.
+    let value = |choices: &[crate::definitions::Choice], value: &NoteValue| match value {
         NoteValue::Unknown => "?".to_owned(),
+        NoteValue::Enum(id) => choices
+            .iter()
+            .find(|choice| &choice.id == id)
+            .map_or_else(|| id.clone(), |choice| choice.label.clone()),
         other => other.text(),
     };
-    let after = change.after().text();
+    let changes: Vec<Value> = option
+        .changes
+        .iter()
+        .map(|change| {
+            let (label, choices) = label_of(definition, &change.address);
+            let before = value(choices, &change.before);
+            let after = value(choices, &change.after());
+            let shown = match &change.edit {
+                Edit::Enum(_) => after.clone(),
+                _ => change.shown(),
+            };
+            json!({
+                "target": label,
+                "before": before,
+                "expression": shown,
+                "after": after,
+            })
+        })
+        .collect();
+    let first = &changes[0];
     json!({
         "n": n.to_string(),
-        "current": before,
-        "expression": change.shown(),
-        "value": after,
-        "effect": format!("{before} \u{2192} {after}"),
+        "changes": changes,
+        "current": first["before"],
+        "expression": first["expression"],
+        "value": first["after"],
+        "effect": format!("{} \u{2192} {}", first["before"].as_str().unwrap_or(""), first["after"].as_str().unwrap_or("")),
         "explanation": option.explanation,
         "action": format!("/private-sheets/{sheet}/proposals/{}/{n}", job.text()),
     })
@@ -391,6 +485,7 @@ pub(super) async fn apply(
                         "The assistant's reading was used.".into(),
                     ),
                     StatusCode::OK,
+                    assistant.reminders_effective(),
                 )
                 .await
             } else {
@@ -459,6 +554,9 @@ pub(in crate::campaigns) fn plan(
     {
         return None;
     }
+    if !reads_hold(definition, data, &proposal.reads) {
+        return None;
+    }
     let mut writes = Vec::new();
     let mut notes = Vec::new();
     let mut units = Vec::new();
@@ -496,7 +594,9 @@ pub(in crate::campaigns) fn plan(
             raw: stored.note.raw.clone(),
             before: Some(change.before.clone()),
             after: after.clone(),
-            target: None,
+            // A reminder's notes name the decrease note they are bound to, which is how a
+            // later reminder request sees this one was applied.
+            target: (op == Op::Reminded).then_some(origin.revision),
         });
         writes.push((located, after));
     }
@@ -510,6 +610,43 @@ pub(in crate::campaigns) fn plan(
     view.notes.bound = vec![stored];
     view.notes.bundle = true;
     Some(units)
+}
+
+/// Whether every value a reminder sent still reads the same (plan 3c-1, "Read set and hash"):
+/// a field or cell by its typed address and encoded value, a catalogue row by its `row:` address
+/// (list and host ID) and its name. A row renamed or removed, or a sent field changed, fails.
+pub(in crate::campaigns) fn reads_hold(
+    definition: &crate::definitions::Definition,
+    data: &Value,
+    reads: &[crate::assistant::proposal::Read],
+) -> bool {
+    reads.iter().all(|read| {
+        if let Some(path) = read.address.strip_prefix("row:") {
+            let Some((list, host)) = path.split_once('/') else {
+                return false;
+            };
+            let Some(list) = definition.fields.iter().find(|field| field.id == list) else {
+                return false;
+            };
+            let Some(name) = values::properties(list)
+                .iter()
+                .find(|property| property.catalogue.is_some())
+            else {
+                return false;
+            };
+            return data[&list.id].as_array().is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    row["id"].as_str() == Some(host)
+                        && row[&name.id].as_str() == Some(read.value.as_str())
+                })
+            });
+        }
+        // A top-level key the data lacks was sent as unknown, so it reads as unknown now.
+        assist::locate(definition, data, &read.address)
+            .and_then(|located| assist::value_or_unknown_at(&located, data))
+            .and_then(|value| value.encode().ok())
+            .is_some_and(|encoded| encoded == read.value)
+    })
 }
 
 /// Whether the edit suits the control of the target at `address`: an expression an integer, an

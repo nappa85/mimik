@@ -176,6 +176,8 @@ where
 mod assist_web;
 #[path = "interpret_web.rs"]
 pub(in crate::campaigns) mod interpret_web;
+#[path = "remind_web.rs"]
+mod remind_web;
 #[path = "sheet_json.rs"]
 mod sheet_json;
 #[path = "unit_web.rs"]
@@ -253,6 +255,12 @@ pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
                 get(interpret_web::poll),
             )
             .route(
+                "/private-sheets/{id}/reminders",
+                post(remind_web::start)
+                    .layer(DefaultBodyLimit::max(interpret_web::INTERPRET_POST_BYTES))
+                    .route_layer(middleware::from_fn(signed_in)),
+            )
+            .route(
                 "/private-sheets/{id}/proposals/{job}/{n}",
                 post(interpret_web::apply)
                     .layer(DefaultBodyLimit::max(interpret_web::INTERPRET_POST_BYTES))
@@ -265,6 +273,7 @@ pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
         units
             .route("/private-sheets/{id}/interpretations", post(off))
             .route("/private-sheets/{id}/interpretations/{job}", get(off))
+            .route("/private-sheets/{id}/reminders", post(off))
             .route("/private-sheets/{id}/proposals/{job}/{n}", post(off))
     };
     Router::new()

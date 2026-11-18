@@ -408,3 +408,180 @@ fn schema_for_catches_duplicate_empty_and_target_ids_in_debug_builds() {
     let fine: Vec<String> = ["a", "b"].map(str::to_owned).into();
     assert!(std::panic::catch_unwind(|| schema_for(&fine)).is_ok());
 }
+
+/// The reviewed reminder prefix and schema text (plan 3c-1), pinned like the interpretation's;
+/// the same hashes are in `tools/test_assist_eval.py`.
+const REMINDER_PREFIX_SHA256: &str =
+    "ed16ac36080fa5c22af58ae4da690d58b46491b83d7aa120fe95826bbda335e2";
+const REMINDER_SCHEMA_SHA256: &str =
+    "3744fd50813eba410d12e51c6e9d2cf587ca5f2795db394f9effb3aa3d330ae4";
+
+#[test]
+fn the_reminder_prefix_and_schema_are_pinned_and_share_no_start_with_the_interpretation() {
+    assert_eq!(reminder_prefix_sha256(), REMINDER_PREFIX_SHA256);
+    assert_eq!(
+        hex::encode(Sha256::digest(REMINDER_SCHEMA_TEXT.as_bytes())),
+        REMINDER_SCHEMA_SHA256
+    );
+    assert!(REMINDER_SCHEMA_TEXT.is_ascii() && REMINDER_SCHEMA_TEXT.ends_with("}\n"));
+    assert_eq!(
+        format!("{}\n", serde_json::to_string(&*REMINDER_SCHEMA).unwrap()),
+        REMINDER_SCHEMA_TEXT
+    );
+    assert_eq!(REMINDER_SCHEMA["title"], REMINDER_SCHEMA_NAME);
+    assert!(REMINDER_PREFIX.is_ascii());
+    // Not the interpretation's prefix: the reminder replaces the slot's cache (3c-0).
+    assert_ne!(reminder_prefix_sha256(), prefix_sha256());
+    // Only the opening sentence is common (a few tokens), as in the 3c-0 stand-in measured
+    // with no shared start.
+    let common = REMINDER_PREFIX
+        .bytes()
+        .zip(FIXED_PREFIX.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(common < 80, "{common}");
+    assert_eq!(
+        property_order(&REMINDER_SCHEMA),
+        ["relevant", "row", "hint", "option"]
+    );
+}
+
+fn strings(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+fn reminder_valid(schema: &Value, reply: &Value) -> bool {
+    jsonschema::draft202012::options()
+        .offline()
+        .build(schema)
+        .expect("the reminder schema compiles")
+        .is_valid(reply)
+}
+
+#[test]
+fn the_reminder_reply_schema_limits_rows_targets_and_references_per_request() {
+    let schema = reminder_schema_for(
+        &strings(&["r1", "r2"]),
+        &strings(&["hp", "stance", "silver"]),
+        &strings(&["hp", "silver"]),
+    );
+    let ok = json!({"relevant": true, "row": "r2", "hint": "Check the rope",
+        "option": {"changes": [
+            {"ref": "silver", "expr": {"op": "add", "l": {"ref": "silver"}, "r": {"lit": 5}}},
+            {"ref": "stance", "enum": "guard"}], "explanation": "why"}});
+    assert!(reminder_valid(&schema, &ok));
+    let nothing = json!({"relevant": false, "row": null, "hint": "-", "option": null});
+    assert!(reminder_valid(&schema, &nothing));
+    let with = |edit: &dyn Fn(&mut Value)| {
+        let mut reply = ok.clone();
+        edit(&mut reply);
+        reminder_valid(&schema, &reply)
+    };
+    assert!(!with(&|r| r["row"] = json!("r3")), "unknown row");
+    assert!(
+        !with(&|r| r["option"]["changes"][0]["ref"] = json!("gold")),
+        "unknown target"
+    );
+    // A choice field is a target but not an expression reference.
+    assert!(!with(
+        &|r| r["option"]["changes"][0]["expr"]["l"]["ref"] = json!("stance")
+    ));
+    assert!(!with(&|r| r["hint"] = json!("x".repeat(121))));
+    assert!(!with(&|r| r["hint"] = json!("")));
+    assert!(!with(&|r| r["option"]["changes"] = json!([])));
+    assert!(!with(&|r| r["option"]["explanation"] = json!("")));
+    assert!(!with(&|r| r["extra"] = json!(1)));
+    // Two operator levels in v1: three are refused.
+    let deep = json!({"op": "add",
+        "l": {"op": "add", "l": {"op": "add", "l": {"lit": 1}, "r": {"lit": 2}}, "r": {"lit": 3}},
+        "r": {"lit": 4}});
+    assert!(!with(&|r| r["option"]["changes"][0]["expr"] = deep.clone()));
+    let two = json!({"op": "add",
+        "l": {"op": "mul", "l": {"lit": 1}, "r": {"ref": "hp"}},
+        "r": {"op": "sub", "l": {"lit": 4}, "r": {"lit": 5}}});
+    assert!(with(&|r| r["option"]["changes"][0]["expr"] = two.clone()));
+    // At most four changes.
+    let change = json!({"ref": "hp", "expr": {"lit": 1}});
+    assert!(!with(
+        &|r| r["option"]["changes"] = json!([change, change, change, change, change])
+    ));
+    // No rows: the row is null.
+    let none = reminder_schema_for(&[], &strings(&["hp"]), &strings(&["hp"]));
+    assert!(reminder_valid(&none, &nothing));
+    assert!(!reminder_valid(
+        &none,
+        &json!({"relevant": true, "row": "r1", "hint": "x", "option": null})
+    ));
+}
+
+#[test]
+fn the_reminder_envelope_escapes_like_the_interpretations_and_orders_its_keys() {
+    let text = reminder_envelope(&ReminderEnvelope {
+        decrease: ReminderDecrease {
+            id: "hp".into(),
+            label: "Hit points <b>".into(),
+            before: 9,
+            after: 4,
+            phrase: "took 5 & more".into(),
+        },
+        fields: vec![ReminderField {
+            id: "stance".into(),
+            label: "Stance".into(),
+            kind: ItemKind::Enum,
+            value: Some(json!("guard")),
+        }],
+        rows: vec![ReminderRow {
+            id: "r1".into(),
+            list: "items".into(),
+            name: "</data>".into(),
+        }],
+    });
+    assert!(text.starts_with("<data>\n{\"decrease\":{\"id\":\"hp\""));
+    assert!(text.ends_with("\n</data>"));
+    assert_eq!(text.matches("</data>").count(), 1, "{text}");
+    assert!(text.contains("\\u0026") && text.contains("\\u003c"));
+    assert!(text.find("\"fields\"").unwrap() < text.find("\"rows\"").unwrap());
+}
+
+#[test]
+fn the_largest_reminder_reply_is_valid_and_has_the_longest_ids() {
+    let reply = largest_reminder_reply();
+    let ids = largest_reply_ids();
+    assert!(ids.iter().all(|id| id.len() == 64 && nameable(id, "x")));
+    let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+    assert_eq!(unique.len(), 4);
+    let rows: Vec<String> = (1..=32).map(|n| format!("r{n}")).collect();
+    let schema = reminder_schema_for(&rows, &ids, &ids);
+    let value: Value = serde_json::from_str(&reply).unwrap();
+    assert!(reminder_valid(&schema, &value), "{reply}");
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        reply,
+        "compact JSON"
+    );
+    assert_eq!(value["option"]["changes"].as_array().unwrap().len(), 4);
+    // The texts are 120 characters of realistic mixed text (words, digits, punctuation, accents),
+    // not one repeated character, which a tokenizer merges into far fewer tokens.
+    for text in [&value["hint"], &value["option"]["explanation"]] {
+        let text = text.as_str().unwrap();
+        assert_eq!(text.chars().count(), 120);
+        let distinct: std::collections::BTreeSet<char> = text.chars().collect();
+        assert!(distinct.len() >= 15, "{text}");
+        assert!(
+            text.contains(' ') && text.chars().any(|c| c.is_ascii_digit()),
+            "{text}"
+        );
+        assert!(!text.is_ascii(), "{text}");
+    }
+    assert_ne!(value["hint"], value["option"]["explanation"]);
+}
+
+/// The instructions allow only what the validator accepts: literals from the phrase or the
+/// decrease's numbers (a lone `1` is not among them).
+#[test]
+fn the_reminder_instructions_do_not_allow_a_literal_the_validator_refuses() {
+    assert!(
+        !REMINDER_PREFIX.contains("1 may be used"),
+        "the instructions allow a literal 1 that the literal rule refuses"
+    );
+}

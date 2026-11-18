@@ -3,6 +3,29 @@
 One entry each: `**ID** [area]`, the limit, and what would close it. When an entry is fixed, delete it; git history keeps it.
 Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted for now and wait for a product step.
 
+## Reminders (3c-1, built; live checks pending)
+
+- **REMIND-APPLIED** [applied reminder] "A reminder was already applied for this note" is judged
+  from the current `reminded` notes bound (`target`) to the decrease note's revision with its
+  typed text, so once every field the applied reminder changed has been edited again, the same
+  decrease note may be asked for a new reminder, and two decreases of one save typed alike are not
+  told apart (the note holds no decrease address). Close with a stored link (address) if that
+  proves confusing.
+- **REMIND-REPRIME** [GPU path] The re-priming after each reminder (`Interpreter::reprime`) is
+  tested with stubs only; the GPU's measured restore decides whether the host-RAM cache replaces
+  it (3c-0, live).
+
+- **REMIND-RESTORE** [CPU prompt cache] The CPU restore cost in the reminder budgets is the
+  development host's cache-entry load time scaled by entry size (`RESTORE_S_PER_MIB`), not measured
+  on the running host. The token limit of b12110's cache bounds the sum of the entries but rises
+  with `--cache-ram` (`docs/results.md`, 3c-0), so two whole contexts fit. A restore that does not
+  happen is detected at run time (the first interpretation after a reminder reading under 75 % of
+  the prefix from the cache switches reminders off for the generation) but not measured live. Close
+  with the live checks of `docs/assisted-sheet-plan.md`, 3c-1.
+- **REMIND-REPLY-BOUND** [reply bound] The reminder reply bound is the `/tokenize` count of the
+  largest valid reply built with 64-character IDs (`contract::largest_reminder_reply`); it is
+  not a measured model reply.
+
 ## PDF source uploads
 
 - **SRC-UPLOAD-POLL** [HTTP admission] The server is HTTP/1 only. Before CSRF admission the

@@ -11,6 +11,7 @@ use super::Path;
 use super::budgets::SAMPLE_TIMEOUT_S;
 use super::manager::{MAX_FAILURES, PRIMING_WITHIN, RETRY_AFTER, State, Status};
 use super::models::TrialState;
+use super::reminder_plan::TOKENIZE_WITHIN;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,6 +29,8 @@ pub(crate) enum Phase {
     Priming,
     /// Calibration sample 1 or 2.
     Sample(u8),
+    /// The reminder prompt's `/tokenize` at the start of a generation (plan 3c-1).
+    Reminders,
     WaitingRetry,
     /// A trial waits for the running model server to stop.
     WaitingStop,
@@ -48,6 +51,7 @@ impl Phase {
             Self::Loading => "loading the model".to_owned(),
             Self::Priming => "priming".to_owned(),
             Self::Sample(n) => format!("calibration sample {n} of 2"),
+            Self::Reminders => "measuring the reminder prompt".to_owned(),
             Self::WaitingRetry => "waiting to retry".to_owned(),
             Self::WaitingStop => "waiting for the model server to stop".to_owned(),
             Self::Hashing => "hashing the model file".to_owned(),
@@ -64,6 +68,7 @@ impl Phase {
             // calibration's bound is `2 * SAMPLE_TIMEOUT_S + 60`, so one sample can take
             // all of its share.
             Self::Sample(_) => Some((Duration::from_secs(SAMPLE_TIMEOUT_S + 60), false)),
+            Self::Reminders => Some((TOKENIZE_WITHIN, false)),
             Self::WaitingRetry => Some((RETRY_AFTER, true)),
             _ => None,
         }
@@ -71,8 +76,8 @@ impl Phase {
 }
 
 use Phase::{
-    Checking, Hashing, Loading, Phrase, Priming, Sample, StartingServer, Stopping, Verifying,
-    WaitingRetry, WaitingStop,
+    Checking, Hashing, Loading, Phrase, Priming, Reminders, Sample, StartingServer, Stopping,
+    Verifying, WaitingRetry, WaitingStop,
 };
 
 const FRESH_STOPPING: &[Phase] = &[
@@ -84,6 +89,7 @@ const FRESH_STOPPING: &[Phase] = &[
     Priming,
     Sample(1),
     Sample(2),
+    Reminders,
 ];
 const FRESH: &[Phase] = &[
     Checking,
@@ -93,6 +99,7 @@ const FRESH: &[Phase] = &[
     Priming,
     Sample(1),
     Sample(2),
+    Reminders,
 ];
 const RETRY: &[Phase] = &[
     StartingServer,
@@ -101,6 +108,7 @@ const RETRY: &[Phase] = &[
     Priming,
     Sample(1),
     Sample(2),
+    Reminders,
 ];
 const WAITING: &[Phase] = &[WaitingRetry];
 const TRIAL: &[Phase] = &[
@@ -507,7 +515,7 @@ mod tests {
     fn the_lists_have_their_steps_in_order() {
         assert_eq!(FRESH_STOPPING.len(), FRESH.len() + 1);
         assert_eq!(&FRESH_STOPPING[1..], FRESH);
-        assert_eq!(RETRY.len(), 6);
+        assert_eq!(RETRY.len(), 7);
         assert_eq!(TRIAL.len(), 13);
         assert_eq!(TRIAL.first(), Some(&WaitingStop));
         assert_eq!(TRIAL.last(), Some(&Phrase(5)));
@@ -535,7 +543,7 @@ mod tests {
         assert_eq!(progress.phase, StartingServer);
         assert_eq!(
             progress.describe(),
-            "step 1 of 6, starting the model server (attempt 2 of up to 4)"
+            "step 1 of 7, starting the model server (attempt 2 of up to 4)"
         );
         assert!(progress.enter(Loading));
         progress.within(Duration::from_secs(65));

@@ -6,7 +6,10 @@ with synthetic data only. At 1280 x 720 and 390 x 844: a saved scribble shows "T
 then the option with the current value, the expression and the effect; its explanation is
 shown as text; Use writes the value with a confirmed note and Undo restores it; an
 ambiguous reply shows readings without Use; a newer save supersedes a job still polling;
-no CSP violation, no console error, no horizontal overflow.
+no CSP violation, no console error, no horizontal overflow. A second run with the stored
+reminder setting on (step 3c-1) saves a decrease: the reminder shows its hint as text with Use
+and Dismiss, Use writes a field the asking field is not among (which is not redrawn), Dismiss
+and a newer save hide it.
 
 Run inside the browser container (containers/browser.Dockerfile):
   python3 tools/assist_model_browser.py <dev-endpoint mimik> --fixture <source_fixture out>
@@ -16,6 +19,7 @@ import argparse
 import http.client
 import json
 import secrets
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -63,6 +67,36 @@ def reply_for(note):
     }
 
 
+def reminder_reply(envelope):
+    """The fake model's reply to a reminder (synthetic data only): lower Max HP by the
+    decrease's difference, a literal the decrease's own numbers give."""
+    decrease = envelope["decrease"]
+    lost = decrease["before"] - decrease["after"]
+    other = next(
+        field
+        for field in envelope["fields"]
+        if field["type"] == "integer" and field["id"] not in {"max_hp", decrease["id"]}
+    )
+    return {
+        "relevant": True,
+        "row": None,
+        "hint": f"Rest to recover {MARKUP}",
+        "option": {
+            "changes": [
+                {
+                    "ref": "max_hp",
+                    "expr": {"op": "sub", "l": {"ref": "max_hp"}, "r": {"lit": lost}},
+                },
+                {
+                    "ref": other["id"],
+                    "expr": {"op": "add", "l": {"ref": other["id"]}, "r": {"lit": lost}},
+                },
+            ],
+            "explanation": f"matching the {lost} lost {MARKUP}",
+        },
+    }
+
+
 def text_of(content):
     if isinstance(content, str):
         return content
@@ -72,6 +106,7 @@ def text_of(content):
 class FakeModel(BaseHTTPRequestHandler):
     token = ""
     requests = []
+    reminders = 0
     primed = None
 
     def log_message(self, *args):
@@ -137,11 +172,16 @@ class FakeModel(BaseHTTPRequestHandler):
             )
             return
         envelope = json.loads(user[len("<data>\n") : -len("\n</data>")])
-        note = envelope["note"]
-        FakeModel.requests.append(note)
-        if note.startswith("slow"):
-            time.sleep(4)
-        content = json.dumps(reply_for(note))
+        schema = (body.get("response_format") or {}).get("json_schema", {}).get("name")
+        if schema == "mimik_reminder_v1":
+            FakeModel.reminders += 1
+            content = json.dumps(reminder_reply(envelope))
+        else:
+            note = envelope["note"]
+            FakeModel.requests.append(note)
+            if note.startswith("slow"):
+                time.sleep(4)
+            content = json.dumps(reply_for(note))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -262,7 +302,10 @@ def scenario(page, sheet):
     box = page.locator("#assist-0")
     shown = box.inner_text()
     value = int(start_value)
-    require(f"Now {value}" in shown and f"{value} − 15" in shown, f"The option differs: {shown}")
+    require(
+        f": now {value}," in shown and "HP (" in shown and f"({value}) − 15" in shown,
+        f"The option differs: {shown}",
+    )
     require(f"= {value - 15}" in shown, f"The option's value differs: {shown}")
     require(MARKUP in shown, "The explanation is not shown as text")
     require(box.locator("img").count() == 0, "Model text became markup")
@@ -336,6 +379,78 @@ def scenario(page, sheet):
     no_overflow(page, "assistant after supersession")
 
 
+def reminder_scenario(page, sheet):
+    """Step 3c-1: a saved decrease shows a reminder below the field; its hint and explanation
+    are text; Use changes Max HP only (the asking field is not redrawn); Dismiss and a newer
+    save hide it."""
+    errors = []
+    page.add_init_script(CSP_PROBE)
+    page.on(
+        "console", lambda message: errors.append(message.text) if message.type == "error" else None
+    )
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(sheet)
+    until(page, "document.documentElement.dataset.sheetAssist === 'ready'", "the module")
+    hp = page.locator("#v0")
+    max_hp = page.locator("#v1")
+    hp.fill("84")
+    hp.press("Enter")
+    until(page, "!document.querySelector('form[aria-busy]')", "the save")
+    require(
+        page.locator("#remind-0").count() == 0, "An increase or a first value offered a reminder"
+    )
+
+    hp.fill("70")
+    hp.press("Enter")
+    until(page, "!!document.querySelector('#remind-0 .assist-use')", "the reminder")
+    box = page.locator("#remind-0")
+    shown = box.inner_text()
+    require(f"Reminder: Rest to recover {MARKUP}" in shown, f"The hint differs: {shown}")
+    require("matching the 14 lost" in shown, f"The explanation differs: {shown}")
+    # Every change is shown with its target: both fields the option writes.
+    require(
+        box.locator(".assist-change").count() == 2
+        and "Max HP" in shown
+        and shown.count(": now ") == 2,
+        f"The reminder does not show both changes with their targets: {shown}",
+    )
+    require(box.locator("img").count() == 0, "Model text became markup")
+    require(box.get_attribute("role") == "status", "The reminder box is not a status region")
+    require(box.locator("button.remind-dismiss").count() == 1, "The reminder has no Dismiss")
+    require(page.locator("#assist-0").count() == 0, "A reminder used the interpretation box")
+    no_overflow(page, "reminder")
+
+    # Use writes Max HP; HP, the asking field, is not among the changes and keeps its control.
+    before = int(max_hp.input_value())
+    box.locator(".assist-use").click()
+    until(page, f"document.querySelector('#v1').value === '{before - 14}'", "Max HP after Use")
+    until(page, "!document.querySelector('#remind-0')", "the reminder to go after Use")
+    require(hp.input_value() == "70", "Use redrew the asking field")
+
+    # Dismiss hides it in the page; nothing is stored, so a reload shows none either.
+    hp.fill("60")
+    hp.press("Enter")
+    until(page, "!!document.querySelector('#remind-0 .remind-dismiss')", "the second reminder")
+    box.locator(".remind-dismiss").click()
+    require(page.locator("#remind-0").count() == 0, "Dismiss left the reminder")
+    page.wait_for_timeout(500)
+    require(page.locator("#remind-0").count() == 0, "A dismissed reminder came back")
+
+    # A newer save (here an increase) hides a reminder that no longer applies.
+    hp.fill("50")
+    hp.press("Enter")
+    until(page, "!!document.querySelector('#remind-0 .remind-dismiss')", "the third reminder")
+    hp.fill("65")
+    hp.press("Enter")
+    until(page, "!document.querySelector('#remind-0')", "the older reminder to go")
+    require(
+        page.evaluate("window.__csp.length") == 0,
+        f"CSP violations: {page.evaluate('window.__csp')}",
+    )
+    require(not errors, f"Console errors: {errors}")
+    no_overflow(page, "after reminders")
+
+
 def stalled_use(page, sheet, stall_url):
     """Use whose answer never comes (stall_url None: the request is held unanswered at the
     browser; otherwise the page is served through StallingProxy, whose apply answer is JSON
@@ -390,27 +505,11 @@ def stalled_use(page, sheet, stall_url):
     until(page, "!document.querySelector('form[aria-busy]')", "the save")
 
 
-def main(argv=None):
+def run_assistant(binary, fixture, server, front, stage, reminders):
+    """One server run over the fake model: the interpretation scenarios, or with `reminders` the
+    stored reminder setting on and the reminder scenario."""
     from playwright.sync_api import sync_playwright
 
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("binary", type=Path, help="A development (dev-endpoint) mimik build")
-    parser.add_argument("--fixture", type=Path, required=True, help="source_fixture output")
-    parser.add_argument(
-        "--stage",
-        choices=("all", "stall-json"),
-        default="all",
-        help="stall-json runs only the stalled-JSON-body stage (red runs)",
-    )
-    args = parser.parse_args(argv)
-    binary = args.binary.resolve(strict=True)
-    fixture = args.fixture.resolve(strict=True)
-    FakeModel.token = secrets.token_urlsafe(32)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    proxy = ThreadingHTTPServer(("127.0.0.1", 0), StallingProxy)
-    threading.Thread(target=proxy.serve_forever, daemon=True).start()
-    front = f"http://127.0.0.1:{proxy.server_address[1]}"
     with tempfile.TemporaryDirectory(prefix="mimik-assistant-browser-") as temp:
         directory = fresh_directory(Path(temp) / "data")
         token_file = Path(temp) / "model.token"
@@ -419,6 +518,13 @@ def main(argv=None):
         create_accounts(binary, directory, passwords)
         prepare_unknown_registry_source(binary, directory, fixture)
         version = publish_assist_definition(binary, directory, fixture)
+        if reminders:
+            # The owner's stored choice (on the CPU path, reminders are off until chosen).
+            with sqlite3.connect(directory / "smoke.sqlite3") as db:
+                db.execute(
+                    "INSERT INTO assistant_reminders(id,enabled,changed_by,changed_at)"
+                    " VALUES(1,1,1,1)"
+                )
         extra = (
             "--assistant",
             "--assistant-dev-endpoint",
@@ -445,8 +551,12 @@ def main(argv=None):
                         context.add_cookies(
                             [{"name": name, "value": value, "url": "http://127.0.0.1:3000"}]
                         )
+                        if reminders:
+                            reminder_scenario(context.new_page(), f"http://127.0.0.1:3000{sheet}")
+                            context.close()
+                            continue
                         stages = (None, "front")
-                        if args.stage == "all":
+                        if stage == "all":
                             scenario(context.new_page(), f"http://127.0.0.1:3000{sheet}")
                         else:
                             stages = ("front",)
@@ -457,11 +567,37 @@ def main(argv=None):
                 finally:
                     browser.close()
             log_text = (directory / "server.log").read_text()
-            for phrase in ("took 15 damage", "ambiguous 4", "slow 15", FakeModel.token):
+            phrases = ("took 15 damage", "ambiguous 4", "slow 15", "Rest to recover")
+            for phrase in (*phrases, FakeModel.token):
                 require(phrase not in log_text, "Player text or the token reached the server log")
         finally:
             stop(process, log)
-            server.shutdown()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("binary", type=Path, help="A development (dev-endpoint) mimik build")
+    parser.add_argument("--fixture", type=Path, required=True, help="source_fixture output")
+    parser.add_argument(
+        "--stage",
+        choices=("all", "stall-json"),
+        default="all",
+        help="stall-json runs only the stalled-JSON-body stage (red runs)",
+    )
+    args = parser.parse_args(argv)
+    binary = args.binary.resolve(strict=True)
+    fixture = args.fixture.resolve(strict=True)
+    FakeModel.token = secrets.token_urlsafe(32)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeModel)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), StallingProxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    front = f"http://127.0.0.1:{proxy.server_address[1]}"
+    run_assistant(binary, fixture, server, front, args.stage, reminders=False)
+    if args.stage == "all":
+        run_assistant(binary, fixture, server, front, args.stage, reminders=True)
+        require(FakeModel.reminders >= 3, "The fake model saw no reminder request")
+    server.shutdown()
     print("Assistant Chromium scenario passed at 1280 and 390 (development build, fake model).")
     return 0
 

@@ -62,7 +62,7 @@ fn model(model: &Model) -> String {
 /// What changes the page, as a plain joined string. `downloads` is the downloads' own
 /// signature (empty without downloads). The generation is part of it only while idle: while
 /// work runs the page shows it in place.
-pub(super) fn signature(status: &Status, downloads: &str) -> String {
+pub(super) fn signature(status: &Status, downloads: &str, reminders: &str) -> String {
     let state = match &status.state {
         Runtime::Starting(_) => "starting".to_owned(),
         Runtime::Ready => "ready".to_owned(),
@@ -96,9 +96,21 @@ pub(super) fn signature(status: &Status, downloads: &str) -> String {
         format!("budgets {}", status.budgets.is_some()),
         generation,
         downloads.to_owned(),
+        reminders.to_owned(),
     ]
     .join("|");
     hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// The reminder setting's part of the signature: the stored choice and the effective value
+/// (the effective value changes with a generation's measurements, a stored choice with the
+/// page), so a change from another tab or a new generation reloads the page.
+pub(super) fn reminders_signature(assistant: &crate::assistant::jobs::Assistant) -> String {
+    format!(
+        "reminders {:?} {}",
+        assistant.reminder_choice(),
+        assistant.reminders_effective()
+    )
 }
 
 /// The running work as the page shows it.
@@ -138,9 +150,14 @@ pub(super) struct Live {
 
 impl Live {
     /// For `status` and the downloads' signature and busy flag.
-    pub(super) fn of(status: &Status, downloads: &str, downloads_busy: bool) -> Self {
+    pub(super) fn of(
+        status: &Status,
+        downloads: &str,
+        reminders: &str,
+        downloads_busy: bool,
+    ) -> Self {
         Self {
-            signature: signature(status, downloads),
+            signature: signature(status, downloads, reminders),
             poll_ms: poll_ms(busy(status, downloads_busy)),
         }
     }
@@ -159,7 +176,9 @@ async fn status_json(
     let (signature, downloads_busy) = downloads
         .as_ref()
         .map_or((String::new(), false), |d| (d.signature.clone(), d.busy));
-    let live = Live::of(&status, &signature, downloads_busy);
+    let reminders =
+        super::assistant::runtime_assistant(&state).map_or_else(String::new, reminders_signature);
+    let live = Live::of(&status, &signature, &reminders, downloads_busy);
     let progress = progress(&status)
         .map(|p| json!({"text": p.text, "step": p.step, "steps": p.steps, "done": p.done, "time": p.time}));
     let mut body = serde_json::Map::new();
@@ -185,14 +204,14 @@ mod tests {
         ready(&assistant).await;
         let status = handle.status();
         assert!(!busy(&status, false));
-        assert_eq!(Live::of(&status, "", false).poll_ms, IDLE_POLL_MS);
+        assert_eq!(Live::of(&status, "", "", false).poll_ms, IDLE_POLL_MS);
         assert!(busy(&status, true));
-        assert_eq!(Live::of(&status, "", true).poll_ms, BUSY_POLL_MS);
+        assert_eq!(Live::of(&status, "", "", true).poll_ms, BUSY_POLL_MS);
         assert!(progress(&status).is_none());
         // The same state with and without the download differs only in the downloads' part.
         assert_ne!(
-            Live::of(&status, "idle", false).signature,
-            Live::of(&status, "running", true).signature
+            Live::of(&status, "idle", "", false).signature,
+            Live::of(&status, "running", "", true).signature
         );
     }
 }

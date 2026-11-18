@@ -29,6 +29,9 @@ const released = new WeakSet();
 const waiting = new WeakSet();
 /** The assistant (step 2c-1): `false` once its start route answered 404 (it is off). */
 let assistantOn = true;
+/** The reminders (step 3c-1): `false` once their route answered 404 (off, unavailable or not
+ * ready). A transient refusal (503: the breaker is not closed) leaves them on. */
+let remindersOn = true;
 
 /** The only attribute names `element` sets: no inline styling, no event handler, no URL that
  * loads anything. */
@@ -511,6 +514,7 @@ function validUnit(unit, refused) {
   return (
     text(unit.value) &&
     textOrNull(unit.state) &&
+    (unit.reminder === undefined || (record(unit.reminder) && text(unit.reminder.key))) &&
     (unit.link === undefined ||
       unit.link === null ||
       (record(unit.link) && ENTRY_PATH.test(unit.link.href) && DIGITS.test(unit.link.catalogue))) &&
@@ -646,6 +650,11 @@ function settle(unit, flight, answer, status, submitter, quiet = false) {
     const current = unit.gen === flight.gen;
     showUnit(unit, answer.unit, answer.revision, current && answer.status === 'saved');
     interpret(unit, answer.unit.note);
+    if (answer.status === 'saved') {
+      // The decreased value is saved: an older reminder no longer applies; a decrease starts one.
+      stopRemind(unit);
+      remind(unit, answer.unit.reminder);
+    }
     unit.sent = answerKey(unit, answer.unit);
     unit.ack = current ? entryKey(unit.form) : unit.sent;
     if (!quiet) {
@@ -800,13 +809,24 @@ function sheetPath(unit) {
 }
 
 function assistBox(unit) {
+  return boxFor(unit, 'assist');
+}
+
+/** The reminder's box, below the decreased field (step 3c-1). */
+function remindBox(unit) {
+  return boxFor(unit, 'remind');
+}
+
+/** The unit's `role="status"` box of a kind (`assist`: an interpretation, `remind`: a
+ * reminder), made on first use. */
+function boxFor(unit, kind) {
   const shown = names(unit);
   if (!shown) {
     return null;
   }
-  let box = document.getElementById(`assist-${shown.key}`);
+  let box = document.getElementById(`${kind}-${shown.key}`);
   if (!box) {
-    box = element('div', { class: 'entry-assist', id: `assist-${shown.key}`, role: 'status' });
+    box = element('div', { class: `entry-${kind}`, id: `${kind}-${shown.key}`, role: 'status' });
     const after = unit.form.querySelector('.entry-actions') || unit.form.querySelector('.entry-note') || saveButton(unit.form);
     if (after) {
       after.after(box);
@@ -835,6 +855,123 @@ function assistText(unit, text) {
   if (box) {
     box.replaceChildren(element('p', { class: 'assist-message' }, text));
   }
+}
+
+/** Ends the unit's reminder on this page: its polling stops and its box goes. */
+function stopRemind(unit) {
+  unit.remind += 1;
+  const shown = names(unit);
+  if (shown) {
+    document.getElementById(`remind-${shown.key}`)?.remove();
+  }
+}
+
+/** The token a job of this kind holds: a newer start or a stop changes it. */
+function current(unit, reminder) {
+  return reminder ? unit.remind : unit.assist;
+}
+
+/** Starts a reminder for a saved decrease and polls it (step 3c-1). The module stays quiet
+ * on every refusal and failure: a reminder is never blocking. */
+async function remind(unit, reminder) {
+  if (!remindersOn || !record(reminder) || !text(reminder.key) || !names(unit)) {
+    return;
+  }
+  const base = sheetPath(unit);
+  if (!base) {
+    return;
+  }
+  const token = unit.remind;
+  const started = await postForm(`${base}/reminders`, [
+    ['csrf', csrfOf(unit)],
+    ['note', reminder.key],
+  ]);
+  if (token !== unit.remind) {
+    return;
+  }
+  if (started.status === 404) {
+    remindersOn = false;
+    return;
+  }
+  const answer = started.answer;
+  if (started.status === 202 && record(answer) && text(answer.poll) && POLL_PATH.test(answer.poll)) {
+    poll(unit, token, answer.poll, 500, true);
+  }
+}
+
+/** The reminder's end: its hint, the cited row's name and the option with Use, and Dismiss.
+ * Anything that is not a well-formed reminder shows nothing. */
+function showReminder(unit, token, answer) {
+  if (token !== unit.remind) {
+    return;
+  }
+  const options = record(answer) && Array.isArray(answer.options) ? answer.options.filter(validOption) : [];
+  if (
+    !record(answer) ||
+    answer.state !== 'reminder' ||
+    !text(answer.hint) ||
+    !(answer.row === null || text(answer.row)) ||
+    !Array.isArray(answer.options) ||
+    options.length !== answer.options.length
+  ) {
+    document.getElementById(`remind-${names(unit)?.key}`)?.remove();
+    return;
+  }
+  const box = remindBox(unit);
+  if (!box) {
+    return;
+  }
+  const lines = [element('p', { class: 'remind-message' }, `Reminder: ${answer.hint}`)];
+  if (answer.row !== null) {
+    lines.push(element('p', { class: 'remind-row' }, 'About: ', element('bdi', {}, answer.row)));
+  }
+  const list = element('ul', { class: 'assist-options' });
+  for (const option of options) {
+    list.append(optionItem(unit, token, option, true));
+  }
+  const dismiss = element('button', { type: 'button', class: 'remind-dismiss' }, 'Dismiss');
+  dismiss.addEventListener('click', () => {
+    stopRemind(unit);
+  });
+  box.replaceChildren(...lines, ...(options.length > 0 ? [list] : []), dismiss);
+}
+
+/** An option as an interpretation or a reminder offers it: one to four changes, each with its
+ * target, the value now and the value it would write. An option whose shape is not exactly
+ * that is not shown. */
+function validOption(option) {
+  return (
+    record(option) &&
+    [option.explanation, option.action].every(text) &&
+    PROPOSAL_PATH.test(option.action) &&
+    Array.isArray(option.changes) &&
+    option.changes.length >= 1 &&
+    option.changes.length <= 4 &&
+    option.changes.every(
+      (change) => record(change) && [change.target, change.before, change.expression, change.after].every(text),
+    )
+  );
+}
+
+/** One option's list item with its Use button. */
+function optionItem(unit, token, option, reminder) {
+  const summary = option.changes.map((change) => `${change.target} ${change.expression} = ${change.after}`).join('; ');
+  const use = element('button', { type: 'button', class: 'assist-use', 'aria-label': `Use ${summary}` }, 'Use');
+  use.addEventListener('click', () => applyOption(unit, token, option.action, use, reminder));
+  const lines = option.changes.map((change) =>
+    element(
+      'span',
+      { class: 'assist-change' },
+      element('bdi', {}, change.target),
+      `: now ${change.before}, `,
+      element('bdi', {}, change.expression),
+      ` = ${change.after}`,
+    ),
+  );
+  const item = element('li', {});
+  lines.forEach((line, n) => item.append(n > 0 ? '; ' : '', line));
+  item.append(' \u00b7 ', element('bdi', { class: 'assist-explanation' }, option.explanation), ' ', use);
+  return item;
 }
 
 function csrfOf(unit) {
@@ -877,9 +1014,9 @@ async function interpret(unit, note) {
   }
 }
 
-function poll(unit, token, path, delay) {
+function poll(unit, token, path, delay, reminder = false) {
   setTimeout(async () => {
-    if (token !== unit.assist || !document.contains(unit.form)) {
+    if (token !== current(unit, reminder) || !document.contains(unit.form)) {
       return;
     }
     let status = 0;
@@ -896,14 +1033,18 @@ function poll(unit, token, path, delay) {
     } catch {
       answer = null;
     }
-    if (token !== unit.assist) {
+    if (token !== current(unit, reminder)) {
       return;
     }
     if (status === 200 && record(answer) && answer.state === 'thinking') {
-      poll(unit, token, path, Math.min(2000, Math.round(delay * 1.5)));
+      poll(unit, token, path, Math.min(2000, Math.round(delay * 1.5)), reminder);
       return;
     }
-    showAssistant(unit, token, answer);
+    if (reminder) {
+      showReminder(unit, token, answer);
+    } else {
+      showAssistant(unit, token, answer);
+    }
   }, delay);
 }
 
@@ -921,27 +1062,9 @@ function showAssistant(unit, token, answer) {
   if (answer.state === 'options' && Array.isArray(answer.options)) {
     const list = element('ul', { class: 'assist-options' });
     for (const option of answer.options) {
-      if (!record(option) || ![option.current, option.expression, option.value, option.explanation, option.action].every(text) || !PROPOSAL_PATH.test(option.action)) {
-        continue;
+      if (validOption(option)) {
+        list.append(optionItem(unit, token, option, false));
       }
-      const use = element(
-        'button',
-        { type: 'button', class: 'assist-use', 'aria-label': `Use ${option.expression} = ${option.value}` },
-        'Use',
-      );
-      use.addEventListener('click', () => applyOption(unit, token, option.action, use));
-      list.append(
-        element(
-          'li',
-          {},
-          element('span', {}, `Now ${option.current}: `),
-          element('bdi', {}, option.expression),
-          element('span', {}, ` = ${option.value} \u00b7 `),
-          element('bdi', { class: 'assist-explanation' }, option.explanation),
-          ' ',
-          use,
-        ),
-      );
     }
     box.replaceChildren(heading, list);
     return;
@@ -1010,8 +1133,8 @@ function settleApplied(unit, flight, answer) {
  * like a save: the draft generation and sequence are taken before the request, a save asked
  * for meanwhile waits in the unit's queue, and page posts wait for it, so a draft typed while
  * Use is on its way is kept. */
-async function applyOption(unit, token, action, button) {
-  if (token !== unit.assist || unit.flight || unit.orphan) {
+async function applyOption(unit, token, action, button, reminder = false) {
+  if (token !== current(unit, reminder) || unit.flight || unit.orphan) {
     return;
   }
   button.disabled = true;
@@ -1023,16 +1146,24 @@ async function applyOption(unit, token, action, button) {
   const result = await postForm(action, [['csrf', csrfOf(unit)]]);
   land(unit, () => {
     if (result.status === 200 && valid(result.answer, true)) {
-      stopAssist(unit);
+      if (reminder) {
+        stopRemind(unit);
+      } else {
+        stopAssist(unit);
+      }
       return settleApplied(unit, flight, result.answer);
     }
-    if (token === unit.assist) {
-      assistText(
-        unit,
+    if (token === current(unit, reminder)) {
+      const message =
         record(result.answer) && text(result.answer.message)
           ? result.answer.message
-          : 'Not used: the server did not answer; try again.',
-      );
+          : 'Not used: the server did not answer; try again.';
+      if (reminder) {
+        const box = remindBox(unit);
+        box?.replaceChildren(element('p', { class: 'remind-message' }, message));
+      } else {
+        assistText(unit, message);
+      }
     }
     return false;
   });
@@ -1069,6 +1200,7 @@ function enhance(form) {
     hold: false,
     orphan: false,
     assist: 0,
+    remind: 0,
   };
   units.set(form, unit);
   if (projection === null || unit.base > projection) {

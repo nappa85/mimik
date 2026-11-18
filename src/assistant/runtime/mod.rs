@@ -20,6 +20,8 @@ pub(crate) mod manifest;
 pub(crate) mod models;
 pub(crate) mod probe;
 pub(crate) mod progress;
+pub(crate) mod reminder_budgets;
+pub(crate) mod reminder_plan;
 pub(crate) mod rundir;
 pub(crate) mod runner;
 pub(crate) mod sandbox;

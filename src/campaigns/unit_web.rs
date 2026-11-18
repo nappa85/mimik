@@ -368,6 +368,7 @@ async fn no_change(
                 (unit, draft.host),
                 (sheet_json::Outcome::Unchanged, unchanged(unit, label)),
                 StatusCode::OK,
+                false,
             )
             .await
         }
@@ -419,6 +420,9 @@ async fn saved(
         (unit, host),
         (sheet_json::Outcome::Saved, format!("{label} saved.")),
         StatusCode::OK,
+        state
+            .assistant()
+            .is_some_and(|assistant| assistant.reminders_effective()),
     )
     .await
 }
@@ -519,6 +523,7 @@ async fn refused(
             (draft.unit, draft.host),
             (outcome, message),
             status,
+            false,
         )
         .await;
     }
