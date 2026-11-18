@@ -132,7 +132,8 @@ async fn a_generation_without_budgets_has_no_reminders() {
 }
 
 /// The GPU restore is sized from the shipped model's measured entry (Qwen3.5-9B: 32 KiB per token
-/// and five 50.25 MiB states), recognised by its pinned SHA-256.
+/// and five 50.25 MiB states), recognised by its pinned SHA-256, for the whole saved entry: the
+/// interpretation's prefix, N(B) and `max_tokens`.
 #[tokio::test]
 async fn the_gpu_restore_is_sized_from_the_measured_entry_of_the_shipped_model() {
     use crate::assistant::model::GPU_DEFAULT_MODEL_SHA256;
@@ -149,11 +150,48 @@ async fn the_gpu_restore_is_sized_from_the_measured_entry_of_the_shipped_model()
     let Reminders::Available(budgets) = reminders else {
         panic!("{reminders:?}");
     };
-    let entry = calibration.prefix_tokens * 32.0 / 1024.0 + 5.0 * 50.25;
+    let n = f64::from(
+        u32::try_from(calibration.derived.as_ref().unwrap().budgets.bounds.tokens).unwrap(),
+    );
+    let entry = (calibration.prefix_tokens + n + 1024.0) * 32.0 / 1024.0 + 5.0 * 50.25;
     let expected = entry * 0.00053 + 0.010;
     assert!(
         (budgets.restore.seconds - expected).abs() < 1e-9,
         "{} against {expected}",
         budgets.restore.seconds
+    );
+}
+
+/// The prime sends one reminder request through the interpreter, as real reminders do: the
+/// reminder kind (so the system message and template match), `max_tokens` 1, a synthetic
+/// envelope with no sheet data.
+#[tokio::test]
+async fn the_prime_sends_one_synthetic_reminder_request_with_one_token() {
+    use crate::assistant::interpreter::RequestKind;
+    let stub = StubInterpreter::answering([Ok("{}".to_owned())]);
+    prime(&stub, Duration::from_secs(60)).await.unwrap();
+    let requests = stub.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(matches!(requests[0].kind, RequestKind::Reminder { .. }));
+    assert_eq!(requests[0].max_tokens, 1);
+    assert!(requests[0].dynamic.contains("took 1 damage"));
+}
+
+#[tokio::test]
+async fn a_failed_prime_is_a_failure_and_a_slow_one_a_timeout() {
+    let stub = StubInterpreter::answering([Err(Failure::Status(500))]);
+    assert_eq!(
+        prime(&stub, Duration::from_secs(60)).await,
+        Err(PrimeFailure::Failed)
+    );
+    tokio::time::pause();
+    let stub = StubInterpreter::answering([Ok("{}".to_owned())]);
+    stub.delays
+        .lock()
+        .unwrap()
+        .push_back(Duration::from_secs(100));
+    assert_eq!(
+        prime(&stub, Duration::from_secs(60)).await,
+        Err(PrimeFailure::TimedOut)
     );
 }

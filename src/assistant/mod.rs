@@ -145,13 +145,17 @@ impl AssistantHandle {
         }
     }
 
-    /// [`Self::with_launcher`] with the owner's model setting.
+    /// [`Self::with_launcher`] with the owner's model setting and stored reminder choice, the
+    /// latter set before the runtime manager starts, so the start's reminder planning never
+    /// races the setting (3c-1c).
     pub(crate) fn with_models(
         launcher: Arc<dyn runtime::manager::Launcher>,
         config: runtime::manager::Config,
         models: runtime::manager::ModelSetup,
+        reminder_choice: Option<bool>,
     ) -> Self {
         let assistant = jobs::Assistant::new();
+        assistant.set_reminder_choice(reminder_choice);
         tokio::spawn(Arc::clone(&assistant).work());
         let runtime =
             runtime::manager::spawn_with(Arc::clone(&assistant), launcher, config, models);
@@ -257,10 +261,10 @@ impl AssistantHandle {
                 device_default,
                 older_prompt,
             },
+            reminder_choice,
         );
         handle.attach(downloads);
         handle.threads = Some(threads);
-        handle.assistant.set_reminder_choice(reminder_choice);
         Ok(handle)
     }
 
@@ -287,15 +291,15 @@ impl AssistantHandle {
             jobs::Reminders::Available(runtime::reminder_budgets::ReminderBudgets {
                 run: std::time::Duration::from_secs(60),
                 estimate_s: 40.0,
-                busy: std::time::Duration::from_secs(20),
+                busy_verified: std::time::Duration::from_secs(6),
+                busy_unverified: std::time::Duration::from_secs(20),
                 restore: runtime::reminder_budgets::Restore {
                     seconds: 0.1,
                     dev_host_constant: true,
                 },
-                reprime: std::time::Duration::from_secs(9),
                 reply_tokens: 500,
                 prefix_tokens: 1500,
-                extra_wait: std::time::Duration::from_secs(21),
+                system_tokens: 1800,
             })
         } else {
             jobs::Reminders::Unavailable("test".into())
@@ -308,6 +312,7 @@ impl AssistantHandle {
             interpreter,
             path: runtime::Path::Cpu,
             reminders: allowed,
+            prepared: jobs::Prepared::default(),
         });
         assistant.set_reminder_choice(reminders.then_some(true));
         tokio::spawn(Arc::clone(&assistant).work());

@@ -1,13 +1,14 @@
-//! Reminder budgets (assisted sheet plan 3c-1, "Budgets"): a reminder never shares
+//! Reminder budgets (assisted sheet plan 3c-1, "Budgets"; 3c-1c): a reminder never shares
 //! [`Budgets`](crate::assistant::jobs::Budgets) with an interpretation. It has its own run
 //! deadline (its prompt at the measured prompt rate, its reply bound at the per-token speed
-//! and the path's slowdown), its own busy term (the whole reminder prompt, as a cancel can
-//! come before its first token) and a restore cost for the interpretation prefix that every
-//! reminder that started leaves behind. Reminders are unavailable for a generation whose
-//! numbers do not fit, with the reason for the page.
+//! and the path's slowdown) and two busy terms, the extra wait a scribble reading gets while a
+//! reminder runs: the whole reminder prompt until a reminder has shown its system message
+//! cached (unverified), and the variable part plus restoring the reminder's cache entry once
+//! one has (verified). Both include restoring the interpretation prefix, which every reminder
+//! that started leaves behind. Reminders are unavailable for a generation whose numbers do not
+//! fit, with the reason for the page.
 use super::Path;
 use super::budgets::{Derived, Measured, RUN_CEILING_S, TEMPLATE_MARGIN_TOKENS, run_deadline};
-use super::calibration::Primed;
 use super::launch::CTX_SIZE;
 use std::time::Duration;
 
@@ -41,29 +42,19 @@ pub(crate) fn restore(path: Path, entry_mib: f64) -> Restore {
     }
 }
 
-/// The GPU path's fallback after a failed cache check: re-priming the prefix, the time priming
-/// measured (without that time, the measured prompt rate times the prefix).
-pub(crate) fn reprime_seconds(primed: &Primed, prompt_rate_s: f64) -> f64 {
-    let measured = primed.prompt_ms / 1000.0;
-    if measured.is_finite() && measured > 0.0 {
-        measured
-    } else {
-        prompt_rate_s * primed.prefix_tokens
-    }
-}
-
 /// What a reminder needs, from the generation's measurements.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Inputs {
     pub measured: Measured,
     pub derived: Derived,
-    pub primed: Primed,
     /// The reminder system message's tokens (`/tokenize`; the chat template's are not counted).
     pub system_tokens: f64,
     /// The reminder reply bound in tokens.
     pub reply_tokens: u32,
-    /// The size of the interpretation prefix's cache entry, MiB.
+    /// The size of the interpretation's cache entry, MiB (prefix, N(B) and `max_tokens`).
     pub entry_mib: f64,
+    /// The size of the reminder's cache entry, MiB (system message, N(B) and reply bound).
+    pub reminder_entry_mib: f64,
 }
 
 /// A reminder's budgets for a generation.
@@ -73,19 +64,22 @@ pub(crate) struct ReminderBudgets {
     pub run: Duration,
     /// The estimated time of a reminder (before the 1.25 margin).
     pub estimate_s: f64,
-    /// The busy term: `p x (reminder prompt + N(B))`, the whole prompt (a cancel can come
-    /// before the first token), counted by `presume_busy` and by admission while one runs.
-    pub busy: Duration,
+    /// The busy term (the extra wait X) once a reminder of the generation has shown its system
+    /// message cached: restoring the reminder's entry, the variable part of the prompt and the
+    /// template's tail, and restoring the interpretation's entry afterwards.
+    pub busy_verified: Duration,
+    /// The busy term (Y) until then, and again after a cancelled reminder: the whole reminder
+    /// prompt (a cancel can come before the first token) and the interpretation's restore.
+    pub busy_unverified: Duration,
+    /// The restore of the interpretation's entry after a reminder.
     pub restore: Restore,
-    /// How long re-priming the prefix takes (GPU path, after a failed cache check).
-    pub reprime: Duration,
     pub reply_tokens: u32,
     /// The interpretation prefix's tokens (priming's): the next interpretation after a reminder
     /// must read at least 75 % of them from the cache (checked at run time).
     pub prefix_tokens: u64,
-    /// The worst extra wait of a scribble reading right after a cancelled reminder: its whole
-    /// prompt plus the restore.
-    pub extra_wait: Duration,
+    /// The reminder system message's tokens: a completed reminder must read at least 75 % of
+    /// them from the cache (checked at run time).
+    pub system_tokens: u64,
 }
 
 /// Why reminders are unavailable for a generation.
@@ -95,16 +89,13 @@ pub(crate) enum Unavailable {
     Unmeasured,
     /// The run deadline would pass the 600 s ceiling.
     OverCeiling { needed_s: u64 },
-    /// The busy term, the restore and the readings ahead (R each) are more than Q: a reminder
-    /// could make a scribble reading refused.
-    BeyondQueue { needed_s: u64, queue_s: u64 },
     /// The restore does not fit the margin of an interpretation's run deadline.
     BeyondMargin,
     /// The system message, N(B), the reply bound and the template's margin exceed the
     /// context.
     BeyondContext { needed: u64, context: u32 },
-    /// The busy term plus the restore is more than a running interpretation makes a scribble
-    /// reading wait (R plus its busy term).
+    /// The unverified busy term is more than a running interpretation makes a scribble reading
+    /// wait (R plus its busy term).
     WorseThanInterpretation {
         needed_s: u64,
         interpretation_s: u64,
@@ -118,10 +109,7 @@ impl Unavailable {
             Path::Cpu => "; more threads or the GPU path could make them available",
             Path::Gpu => "",
         };
-        format!(
-            "reminders are off for this generation: {}{help}",
-            self.reason()
-        )
+        format!("{}{help}", self.reason())
     }
 
     fn reason(&self) -> String {
@@ -129,9 +117,6 @@ impl Unavailable {
             Self::Unmeasured => "the generation's measurements are incomplete".to_owned(),
             Self::OverCeiling { needed_s } => format!(
                 "a reminder would need a run deadline of {needed_s} s, over the {RUN_CEILING_S} s ceiling"
-            ),
-            Self::BeyondQueue { needed_s, queue_s } => format!(
-                "a scribble reading waiting behind a reminder and the readings ahead of it could wait {needed_s} s, more than the {queue_s} s it may"
             ),
             Self::BeyondMargin => {
                 "restoring the interpretation prefix would exceed the run deadline's margin"
@@ -218,39 +203,18 @@ pub(crate) fn derive(inputs: &Inputs) -> Result<ReminderBudgets, Unavailable> {
         return Err(Unavailable::OverCeiling { needed_s: run });
     }
     let restore = restore(path, inputs.entry_mib);
-    let reprime = reprime_seconds(&inputs.primed, p);
-    if !restore.seconds.is_finite() || !reprime.is_finite() {
+    let reminder_restore = self::restore(path, inputs.reminder_entry_mib);
+    if !restore.seconds.is_finite() || !reminder_restore.seconds.is_finite() {
         return Err(Unavailable::Unmeasured);
     }
-    // What follows the reminder's prompt: the restore, and on the GPU path, after a failed cache
-    // check, the re-prime that admission adds as its own wait (the longer of the two counts).
-    let wait_after = match path {
-        Path::Cpu => restore.seconds,
-        Path::Gpu => restore.seconds.max(reprime),
-    };
-    let busy = Duration::from_secs_f64(prompt_s.ceil());
-    // Rounded up to whole seconds, as Q is.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a non-negative number of seconds, far below u64"
-    )]
-    let needed_s = (prompt_s + wait_after).ceil() as u64;
-    // A reading may wait behind the reminder's busy time and the restore, and behind the readings
-    // admitted ahead of it: one on the CPU path (D is 1 and the first reading does not count
-    // toward it), D on the GPU path; each takes R. All within Q.
-    let queue_s = inputs.derived.budgets.queue_wait.as_secs();
-    let ahead = match path {
-        Path::Cpu => 1,
-        Path::Gpu => u64::try_from(inputs.derived.budgets.depth).unwrap_or(u64::MAX),
-    };
-    let ahead_s = inputs.derived.budgets.run.as_secs().saturating_mul(ahead);
-    if needed_s.saturating_add(ahead_s) > queue_s {
-        return Err(Unavailable::BeyondQueue {
-            needed_s: needed_s.saturating_add(ahead_s),
-            queue_s,
-        });
-    }
+    // Rounded up to whole seconds, as Q is. Unverified (Y): the whole prompt, then the
+    // interpretation's restore. Verified (X): the reminder's own restore, the variable part and
+    // the user turn's template tail, then the interpretation's restore.
+    let unverified_s = prompt_s + restore.seconds;
+    let verified_s =
+        reminder_restore.seconds + p * (bound_tokens + TEMPLATE_MARGIN_TOKENS) + restore.seconds;
+    let seconds = |s: f64| Duration::from_secs_f64(s.ceil());
+    let (busy_unverified, busy_verified) = (seconds(unverified_s), seconds(verified_s));
     // The restore from the host-RAM cache happens inside the next interpretation's request, so
     // it must fit the margin R leaves over the estimate, on both paths.
     #[expect(
@@ -264,21 +228,21 @@ pub(crate) fn derive(inputs: &Inputs) -> Result<ReminderBudgets, Unavailable> {
     // Never worse for a scribble reading than a running interpretation: R plus its busy term.
     let interpretation_s =
         (inputs.derived.budgets.run + inputs.derived.budgets.busy_after_expiry).as_secs();
-    if needed_s > interpretation_s {
+    if busy_unverified.as_secs() > interpretation_s {
         return Err(Unavailable::WorseThanInterpretation {
-            needed_s,
+            needed_s: busy_unverified.as_secs(),
             interpretation_s,
         });
     }
     Ok(ReminderBudgets {
         run: Duration::from_secs(run),
         estimate_s,
-        busy,
+        busy_verified,
+        busy_unverified,
         restore,
-        reprime: Duration::from_secs_f64(reprime.max(0.0)),
         reply_tokens: inputs.reply_tokens,
-        prefix_tokens: prefix_tokens(inputs.primed.prefix_tokens),
-        extra_wait: Duration::from_secs(needed_s),
+        prefix_tokens: prefix_tokens(inputs.measured.prefix_tokens),
+        system_tokens: prefix_tokens(inputs.system_tokens),
     })
 }
 

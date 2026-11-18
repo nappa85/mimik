@@ -128,6 +128,7 @@ async fn models_older(
                 previous: false,
             },
         },
+        None,
     );
     let runtime = handle.runtime.clone().unwrap();
     let app = crate::auth::app_with_options(

@@ -64,18 +64,6 @@ pub(crate) trait Interpreter: Send + Sync {
     async fn tokens(&self, text: &str) -> Result<usize, Failure>;
     /// One streamed completion with the fixed prefix, the schema and `completion`.
     async fn complete(&self, completion: &Completion) -> Result<Completed, Failure>;
-    /// Evaluates the interpretation prefix again (one token of the priming request): after a
-    /// reminder on the GPU path replaced the slot's cache (plan 3c-0, choice (a)).
-    async fn reprime(&self) -> Result<(), Failure> {
-        self.complete(&Completion {
-            dynamic: super::runtime::calibration::priming_envelope(),
-            ref_ids: Vec::new(),
-            max_tokens: 1,
-            kind: RequestKind::Interpretation,
-        })
-        .await
-        .map(|_| ())
-    }
 }
 
 /// The `rig-core` adapter: the `OpenAI` chat route with the llama.cpp dialect, over

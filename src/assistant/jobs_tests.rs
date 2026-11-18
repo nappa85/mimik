@@ -57,6 +57,7 @@ fn ready(stub: Arc<StubInterpreter>, budgets: Budgets) -> Arc<Assistant> {
         interpreter: stub,
         path: Path::Cpu,
         reminders: Reminders::Unavailable("test".into()),
+        prepared: Prepared::default(),
     });
     tokio::spawn(Arc::clone(&assistant).work());
     assistant
@@ -253,6 +254,7 @@ async fn a_job_past_its_queue_wait_never_runs() {
         interpreter: Arc::clone(&stub) as Arc<dyn Interpreter>,
         path: Path::Cpu,
         reminders: Reminders::Unavailable("test".into()),
+        prepared: Prepared::default(),
     });
     // The worker is late: the job waits past Q (35 s) before it is picked up.
     let (job, _) = start(&assistant, 1, origin(1, "field:hp", 5)).unwrap();
@@ -659,6 +661,7 @@ fn ready_with(interpreter: Arc<dyn Interpreter>) -> Arc<Assistant> {
         interpreter,
         path: Path::Cpu,
         reminders: Reminders::Unavailable("test".into()),
+        prepared: Prepared::default(),
     });
     tokio::spawn(Arc::clone(&assistant).work());
     assistant
@@ -959,6 +962,7 @@ async fn half_open_without_worker() -> Arc<Assistant> {
         interpreter: Arc::new(StubInterpreter::default()),
         path: Path::Cpu,
         reminders: Reminders::Unavailable("test".into()),
+        prepared: Prepared::default(),
     });
     let now = Instant::now().into_std();
     for ticket in 1000..1003 {
@@ -1000,6 +1004,7 @@ async fn a_queued_probe_ended_by_a_generation_change_leaves_the_breaker_half_ope
         interpreter: Arc::new(StubInterpreter::default()),
         path: Path::Cpu,
         reminders: Reminders::Unavailable("test".into()),
+        prepared: Prepared::default(),
     });
     assert!(start(&assistant, 2, origin(2, "field:hp", 5)).is_ok());
 }
@@ -1230,20 +1235,7 @@ async fn a_job_superseded_as_its_deadline_fires_still_keeps_the_server_busy() {
 /// runtime that is not ready, has none whatever is stored.
 #[tokio::test]
 async fn the_effective_reminder_setting_follows_the_stored_choice_the_path_and_the_budgets() {
-    use super::super::runtime::reminder_budgets::{ReminderBudgets, Restore};
-    let allowed = Reminders::Available(ReminderBudgets {
-        run: Duration::from_secs(60),
-        estimate_s: 40.0,
-        busy: Duration::from_secs(20),
-        restore: Restore {
-            seconds: 0.1,
-            dev_host_constant: true,
-        },
-        reprime: Duration::from_secs(9),
-        reply_tokens: 500,
-        prefix_tokens: 1500,
-        extra_wait: Duration::from_secs(21),
-    });
+    let allowed = Reminders::Available(reminder_budgets(20));
     let ready = |assistant: &Arc<Assistant>, generation, path, reminders| {
         assistant.event(RuntimeEvent::GenerationStarted { generation });
         assistant.event(RuntimeEvent::Ready {
@@ -1252,6 +1244,7 @@ async fn the_effective_reminder_setting_follows_the_stored_choice_the_path_and_t
             interpreter: Arc::new(StubInterpreter::default()),
             path,
             reminders,
+            prepared: Prepared::default(),
         });
     };
     let assistant = Assistant::new();
@@ -1351,8 +1344,26 @@ fn start_reminder(
     assistant.start_reminder(&registration, account, origin, reminder_draft())
 }
 
-fn reminders_ready(on: bool) -> Arc<Assistant> {
+/// Reminder budgets for the tests: a 60 s run deadline, a restore of 0.2 s, the unverified busy
+/// term `busy_s` and a verified one of a quarter of it, 1,500 prefix and system tokens.
+fn reminder_budgets(busy_s: u64) -> super::super::runtime::reminder_budgets::ReminderBudgets {
     use super::super::runtime::reminder_budgets::{ReminderBudgets, Restore};
+    ReminderBudgets {
+        run: Duration::from_secs(60),
+        estimate_s: 40.0,
+        busy_verified: Duration::from_secs(busy_s / 4),
+        busy_unverified: Duration::from_secs(busy_s),
+        restore: Restore {
+            seconds: 0.2,
+            dev_host_constant: true,
+        },
+        reply_tokens: 500,
+        prefix_tokens: 1500,
+        system_tokens: 1500,
+    }
+}
+
+fn reminders_ready(on: bool) -> Arc<Assistant> {
     let assistant = Assistant::new();
     assistant.event(RuntimeEvent::GenerationStarted { generation: 1 });
     assistant.event(RuntimeEvent::Ready {
@@ -1360,19 +1371,8 @@ fn reminders_ready(on: bool) -> Arc<Assistant> {
         budgets: budgets(),
         interpreter: Arc::new(StubInterpreter::default()),
         path: Path::Gpu,
-        reminders: Reminders::Available(ReminderBudgets {
-            run: Duration::from_secs(60),
-            estimate_s: 40.0,
-            busy: Duration::from_secs(20),
-            restore: Restore {
-                seconds: 0.1,
-                dev_host_constant: true,
-            },
-            reprime: Duration::from_secs(9),
-            reply_tokens: 500,
-            prefix_tokens: 1500,
-            extra_wait: Duration::from_secs(21),
-        }),
+        reminders: Reminders::Available(reminder_budgets(20)),
+        prepared: Prepared::default(),
     });
     assistant.set_reminder_choice(Some(on));
     assistant
@@ -1484,7 +1484,8 @@ async fn the_note_hook_and_a_generation_change_end_reminders_and_a_newer_note_co
 const REMINDER_REPLY: &str = r#"{"relevant":true,"row":"r1","hint":"The antidote may help","option":{"changes":[{"ref":"hp","expr":{"op":"add","l":{"ref":"hp"},"r":{"lit":15}}}],"explanation":"heal 15"}}"#;
 
 /// A ready assistant with reminders on, its worker running, over `stub`: a reminder run
-/// deadline of 60 s, `busy` the busy term, a restore of 0.2 s and 5 s of re-priming (the fallback).
+/// deadline of 60 s, `busy` the unverified busy term (the verified one a quarter of it) and a
+/// restore of 0.2 s. The stub reads 1,500 tokens from its cache unless it says otherwise.
 fn reminders_running(stub: Arc<StubInterpreter>, path: Path, busy_s: u64) -> Arc<Assistant> {
     reminders_queue(stub, path, (busy_s, 35))
 }
@@ -1495,7 +1496,10 @@ fn reminders_queue(
     path: Path,
     (busy_s, queue_s): (u64, u64),
 ) -> Arc<Assistant> {
-    use super::super::runtime::reminder_budgets::{ReminderBudgets, Restore};
+    {
+        let mut cached = stub.cached_tokens.lock().unwrap();
+        cached.get_or_insert(1500);
+    }
     let assistant = Assistant::new();
     assistant.set_transport_grace(Duration::from_millis(10));
     assistant.event(RuntimeEvent::GenerationStarted { generation: 1 });
@@ -1506,19 +1510,8 @@ fn reminders_queue(
         budgets: interpretation,
         interpreter: stub,
         path,
-        reminders: Reminders::Available(ReminderBudgets {
-            run: Duration::from_secs(60),
-            estimate_s: 40.0,
-            busy: Duration::from_secs(busy_s),
-            restore: Restore {
-                seconds: 0.2,
-                dev_host_constant: true,
-            },
-            reprime: Duration::from_secs(5),
-            reply_tokens: 500,
-            prefix_tokens: 1500,
-            extra_wait: Duration::from_secs(21),
-        }),
+        reminders: Reminders::Available(reminder_budgets(busy_s)),
+        prepared: Prepared::default(),
     });
     assistant.set_reminder_choice(Some(true));
     tokio::spawn(Arc::clone(&assistant).work());
@@ -1532,7 +1525,6 @@ fn kinds(stub: &StubInterpreter) -> Vec<&'static str> {
         .iter()
         .map(|request| match (&request.kind, request.max_tokens) {
             (RequestKind::Reminder { .. }, _) => "reminder",
-            (RequestKind::Interpretation, 1) => "reprime",
             (RequestKind::Interpretation, _) => "interpretation",
         })
         .collect()
@@ -1623,16 +1615,22 @@ async fn an_admitted_interpretation_cancels_a_running_reminder_and_its_busy_term
     assert_eq!(assistant.poll(2, 2, job), Poll::Running);
     gate.add_permits(3);
 
-    // A busy term past Q (35 s) refuses the interpretation: the reminder keeps running.
+    // A busy term past Q (35 s) no longer refuses the interpretation: it is admitted with an
+    // allowance of Q and the term (3c-1c), and the reminder is cancelled.
     let (stub, gate) = gated(3);
     let assistant = reminders_running(stub, Path::Cpu, 40);
     let reminder = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
     settle().await;
+    let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
     assert_eq!(
-        start(&assistant, 2, origin(2, "field:hp", 5)),
-        Err(Refusal::Busy)
+        assistant.allowance_for_tests(job),
+        Some(Duration::from_secs(35 + 40))
     );
-    assert_eq!(assistant.poll(1, 1, reminder), Poll::Running);
+    settle().await;
+    assert_eq!(
+        assistant.poll(1, 1, reminder),
+        Poll::Done(Answer::Superseded)
+    );
     gate.add_permits(3);
 }
 
@@ -1700,75 +1698,33 @@ async fn reminder_replies_and_failures_reach_the_breaker_as_specified() {
     assert!(!assistant.breaker_closed());
 }
 
-/// On the GPU path the prompt cache restores the interpretation prefix: a started reminder is
-/// followed by no re-prime and the next interpretation goes straight on. After a failed cache
-/// check every started reminder is followed by a re-priming of the prefix before the next job,
-/// and the server is busy until that request completes. The CPU path sends none.
+/// On both paths the prompt cache restores the interpretation prefix: a started reminder is
+/// followed by no re-prime and the next interpretation goes straight on (3c-1c, step 5).
 #[tokio::test]
-async fn the_gpu_path_reprimes_only_after_a_failed_cache_check_and_the_cpu_path_never() {
-    // The cache works: no re-prime.
-    let stub = Arc::new(StubInterpreter::answering([
-        Ok(REMINDER_REPLY.to_owned()),
-        Ok(HEAL.to_owned()),
-    ]));
-    *stub.cached_tokens.lock().unwrap() = Some(1500);
-    let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
-    assert!(matches!(
-        until_done(&assistant, 1, 1, id).await,
-        Poll::Done(_)
-    ));
-    for _ in 0..20 {
-        settle().await;
+async fn no_path_reprimes_after_a_reminder() {
+    for path in [Path::Gpu, Path::Cpu] {
+        let stub = Arc::new(StubInterpreter::answering([
+            Ok(REMINDER_REPLY.to_owned()),
+            Ok(HEAL.to_owned()),
+        ]));
+        *stub.cached_tokens.lock().unwrap() = Some(1500);
+        let assistant = reminders_running(Arc::clone(&stub), path, 20);
+        let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
+        assert!(matches!(
+            until_done(&assistant, 1, 1, id).await,
+            Poll::Done(_)
+        ));
+        for _ in 0..20 {
+            settle().await;
+        }
+        assert_eq!(assistant.busy_for_tests(), Duration::ZERO);
+        let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+        assert!(matches!(
+            until_done(&assistant, 2, 2, job).await,
+            Poll::Done(_)
+        ));
+        assert_eq!(kinds(&stub), ["reminder", "interpretation"], "{path:?}");
     }
-    assert!(!assistant.reprime_pending_for_tests());
-    let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
-    assert!(matches!(
-        until_done(&assistant, 2, 2, job).await,
-        Poll::Done(_)
-    ));
-    assert_eq!(kinds(&stub), ["reminder", "interpretation"]);
-
-    // The cache failed: the fallback re-prime follows each reminder.
-    let (stub, gate) = gated(0);
-    stub.answers.lock().unwrap().extend([
-        Ok(REMINDER_REPLY.to_owned()),
-        Ok(HEAL.to_owned()),
-        Ok(HEAL.to_owned()),
-    ]);
-    let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    assistant.fail_cache_for_tests();
-    let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
-    gate.add_permits(1);
-    assert!(matches!(
-        until_done(&assistant, 1, 1, id).await,
-        Poll::Done(_)
-    ));
-    // The re-priming is in flight (waiting at the gate); an interpretation waits behind it.
-    let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
-    for _ in 0..20 {
-        settle().await;
-    }
-    assert_eq!(kinds(&stub), ["reminder", "reprime"]);
-    assert_eq!(assistant.poll(2, 2, job), Poll::Queued);
-    gate.add_permits(2);
-    assert!(matches!(
-        until_done(&assistant, 2, 2, job).await,
-        Poll::Done(_)
-    ));
-    assert_eq!(kinds(&stub), ["reminder", "reprime", "interpretation"]);
-
-    let stub = Arc::new(StubInterpreter::answering([Ok(REMINDER_REPLY.to_owned())]));
-    let assistant = reminders_running(Arc::clone(&stub), Path::Cpu, 20);
-    let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
-    assert!(matches!(
-        until_done(&assistant, 1, 1, id).await,
-        Poll::Done(_)
-    ));
-    for _ in 0..20 {
-        settle().await;
-    }
-    assert_eq!(kinds(&stub), ["reminder"]);
 }
 
 // --- Review fixes (plan 3c-1, "Budgets" and "Scheduling") -----------------------------------
@@ -1816,49 +1772,13 @@ async fn cancelling_a_running_reminder_sets_the_busy_time_at_once() {
     gate.add_permits(2);
 }
 
-/// On the GPU path the re-prime is installed when the reminder starts, not after it returns.
-#[tokio::test(start_paused = true)]
-async fn the_fallback_reprime_is_installed_when_the_reminder_starts() {
-    let (stub, gate) = gated(0);
-    stub.answers
-        .lock()
-        .unwrap()
-        .extend([Ok(REMINDER_REPLY.to_owned()), Ok(HEAL.to_owned())]);
-    let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
-    settle().await;
-    assert!(
-        !assistant.reprime_pending_for_tests(),
-        "none while the cache restores the prefix"
-    );
-    gate.add_permits(2);
-    settle().await;
-    let (stub, gate) = gated(0);
-    stub.answers
-        .lock()
-        .unwrap()
-        .extend([Ok(REMINDER_REPLY.to_owned()), Ok(HEAL.to_owned())]);
-    let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    assistant.fail_cache_for_tests();
-    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
-    settle().await;
-    assert!(
-        assistant.reprime_pending_for_tests(),
-        "installed while it runs"
-    );
-    gate.add_permits(2);
-    settle().await;
-    assert_eq!(assistant.busy_for_tests(), Duration::ZERO);
-}
-
 /// A reminder that never reached the server (its tokenizer call failed) leaves the slot's
-/// cache alone: no re-prime.
+/// cache alone: no interpretation check is armed by it.
 #[tokio::test(start_paused = true)]
-async fn a_reminder_that_never_reached_the_server_is_not_followed_by_a_reprime() {
+async fn a_reminder_that_never_reached_the_server_arms_no_cache_check() {
     let stub = Arc::new(StubInterpreter::default());
     *stub.tokenize_fails.lock().unwrap() = Some(Failure::Status(500));
     let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    assistant.fail_cache_for_tests();
     let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
     assert!(matches!(
         until_done(&assistant, 1, 1, id).await,
@@ -1867,15 +1787,14 @@ async fn a_reminder_that_never_reached_the_server_is_not_followed_by_a_reprime()
     for _ in 0..3 {
         settle().await;
     }
-    assert!(!assistant.reprime_pending_for_tests());
+    assert!(!assistant.cache_check_armed_for_tests());
     assert!(kinds(&stub).is_empty(), "{:?}", kinds(&stub));
 }
 
-/// Runtime detection (plans 3c-0 and 3c-1b): the first interpretation after a reminder must have
-/// read at least 75 % of the prefix from the cache. Too little, no figure at all, an expiry (also
-/// an unrelated one) or a transport failure make reminders unavailable for the rest of the
-/// generation on the CPU path, with the reason; on the GPU path they stay available and the next
-/// reminder is followed by a re-prime; a good figure changes nothing.
+/// Runtime detection (plans 3c-0, 3c-1b and 3c-1c): the first interpretation after a reminder
+/// must have read at least 75 % of the prefix from the cache. Too little, no figure at all, an
+/// expiry or a transport failure make reminders unavailable for the rest of the generation, on
+/// both paths, with the reason and without a re-prime; a good figure changes nothing.
 #[tokio::test(start_paused = true)]
 async fn a_cache_that_did_not_restore_the_prefix_makes_reminders_unavailable() {
     #[derive(Clone, Copy, Debug)]
@@ -1890,10 +1809,10 @@ async fn a_cache_that_did_not_restore_the_prefix_makes_reminders_unavailable() {
         (Case::Expires, Path::Cpu, false),
         (Case::Transport, Path::Cpu, false),
         (Case::Cached(Some(1200)), Path::Cpu, true),
-        (Case::Cached(Some(100)), Path::Gpu, true),
-        (Case::Cached(None), Path::Gpu, true),
-        (Case::Expires, Path::Gpu, true),
-        (Case::Transport, Path::Gpu, true),
+        (Case::Cached(Some(100)), Path::Gpu, false),
+        (Case::Cached(None), Path::Gpu, false),
+        (Case::Expires, Path::Gpu, false),
+        (Case::Transport, Path::Gpu, false),
         (Case::Cached(Some(1200)), Path::Gpu, true),
     ] {
         let stub = Arc::new(StubInterpreter::answering([
@@ -1927,26 +1846,12 @@ async fn a_cache_that_did_not_restore_the_prefix_makes_reminders_unavailable() {
         }
         assert!(matches!(assistant.poll(2, 2, job), Poll::Done(_)));
         assert_eq!(assistant.reminders_effective(), stays, "{case:?} {path:?}");
-        if path == Path::Gpu {
-            // Reminders stay; after a failed check the next one is followed by a re-prime.
-            let good = matches!(case, Case::Cached(Some(1200)));
-            stub.answers
-                .lock()
-                .unwrap()
-                .push_back(Ok(REMINDER_REPLY.to_owned()));
-            let before = kinds(&stub).len();
-            start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 6)).unwrap();
-            for _ in 0..40 {
-                tokio::time::advance(Duration::from_secs(5)).await;
-                settle().await;
-            }
-            assert_eq!(
-                kinds(&stub)[before..].contains(&"reprime"),
-                !good,
-                "{case:?}: {:?}",
-                kinds(&stub)
-            );
-        }
+        // Neither path sends a re-prime: only the reminder and the interpretation.
+        assert_eq!(
+            kinds(&stub),
+            ["reminder", "interpretation"],
+            "{case:?} {path:?}"
+        );
         if !stays {
             let Some((_, Reminders::Unavailable(why))) = assistant.reminder_generation() else {
                 panic!("the page states the reason")
@@ -1997,15 +1902,14 @@ async fn a_queued_reminder_does_not_run_after_the_cache_check_turned_reminders_o
 }
 
 /// An interpretation right after a reminder does not expire when the server first spends the
-/// prefix's time, with R and the restore taken from the reminder budgets of a calibrated
-/// generation: on both paths the cache restore inside the request, covered by R's margin; on the
-/// GPU path after a failed cache check the re-prime (prefix-sized), which the worker awaits
-/// before the job starts. A request that is slower by more than the margin does expire, on
-/// either path (so the restore term is what the request carries).
+/// cache restore inside its request, with R and the restore taken from the reminder budgets of a
+/// calibrated generation: on both paths the restore is covered by R's margin. A request that is
+/// slower by more than the margin does expire, on either path (so the restore term is what the
+/// request carries).
 #[tokio::test(start_paused = true)]
 async fn an_interpretation_after_a_reminder_does_not_expire_on_either_path() {
     use super::super::runtime::reminder_budgets::{derive, tests::make};
-    for (path, fallback) in [(Path::Gpu, false), (Path::Cpu, false), (Path::Gpu, true)] {
+    for path in [Path::Gpu, Path::Cpu] {
         let inputs = make(path);
         let allowed = derive(&inputs).unwrap();
         let (r, estimate) = (inputs.derived.budgets.run, inputs.derived.estimate_s);
@@ -2016,14 +1920,9 @@ async fn an_interpretation_after_a_reminder_does_not_expire_on_either_path() {
             allowed.restore.seconds <= margin,
             "derive keeps the restore in R on both paths"
         );
-        assert!(
-            allowed.reprime > Duration::from_secs(60),
-            "the fallback re-prime is much longer than the restore"
-        );
         for over in [false, true] {
             let stub = Arc::new(StubInterpreter::answering([
                 Ok(REMINDER_REPLY.to_owned()),
-                Ok(HEAL.to_owned()),
                 Ok(HEAL.to_owned()),
             ]));
             let assistant = Assistant::new();
@@ -2035,24 +1934,23 @@ async fn an_interpretation_after_a_reminder_does_not_expire_on_either_path() {
                 interpreter: Arc::clone(&stub) as _,
                 path,
                 reminders: Reminders::Available(allowed),
+                prepared: Prepared::default(),
             });
             assistant.set_reminder_choice(Some(true));
-            if fallback {
-                assistant.fail_cache_for_tests();
-            }
             tokio::spawn(Arc::clone(&assistant).work());
             let slower = Duration::from_secs_f64(margin + 5.0);
-            // The reminder takes no time; then, in order, the requests after it. GPU: the
-            // re-prime takes the restore time, the interpretation its normal time. CPU: the
-            // interpretation's request carries the restore.
-            let mut delays = vec![Duration::ZERO];
-            match (fallback, over) {
-                (true, _) => delays.extend([allowed.reprime, normal]),
-                (false, false) => delays.push(normal + restore),
-                (false, true) => delays.push(normal + slower),
-            }
+            // The reminder takes no time; then the interpretation's request carries the
+            // restore (or is slower by more than the margin).
+            let delays = [
+                Duration::ZERO,
+                if over {
+                    normal + slower
+                } else {
+                    normal + restore
+                },
+            ];
             stub.delays.lock().unwrap().extend(delays);
-            *stub.cached_tokens.lock().unwrap() = Some(1500);
+            *stub.cached_tokens.lock().unwrap() = Some(1800);
             let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
             assert!(matches!(
                 until_done(&assistant, 1, 1, id).await,
@@ -2064,16 +1962,8 @@ async fn an_interpretation_after_a_reminder_does_not_expire_on_either_path() {
                 tokio::time::advance(Duration::from_secs(5)).await;
                 settle().await;
             }
-            let expected_expiry = !fallback && over;
-            // A GPU interpretation that expires fails the check and leaves the slot cold.
-            assert_eq!(
-                kinds(&stub).contains(&"reprime"),
-                fallback || (path == Path::Gpu && over),
-                "{path:?} fallback {fallback}: {:?}",
-                kinds(&stub)
-            );
             let poll = assistant.poll(2, 2, job);
-            if expected_expiry {
+            if over {
                 assert_eq!(poll, Poll::Done(Answer::AskAgain), "{path:?} over");
             } else {
                 assert!(
@@ -2086,11 +1976,12 @@ async fn an_interpretation_after_a_reminder_does_not_expire_on_either_path() {
 }
 
 /// A scribble reading behind a reminder's busy time waits that time and the reading ahead of it:
-/// the time arithmetic counts every job waiting, though the first does not count toward D.
+/// the time arithmetic counts every job waiting, though the first does not count toward D, and
+/// the allowance is Q and the reminder's busy term (3c-1c): R 85 s and a term of 20 s make the
+/// second reading wait 105 s, within Q + 20 s from a Q of 85 s.
 #[tokio::test(start_paused = true)]
-async fn admission_counts_the_busy_time_and_the_job_ahead_in_the_wait() {
-    // R is 85 s, the reminder busy term 20 s: the second reading waits 105 s.
-    for (queue_s, admitted) in [(105, true), (104, false)] {
+async fn admission_counts_the_busy_time_and_the_job_ahead_against_q_and_the_term() {
+    for (queue_s, admitted) in [(85, true), (84, false)] {
         let (stub, gate) = gated(4);
         let assistant = reminders_queue(Arc::clone(&stub), Path::Cpu, (20, queue_s));
         start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
@@ -2103,40 +1994,6 @@ async fn admission_counts_the_busy_time_and_the_job_ahead_in_the_wait() {
         );
         gate.add_permits(4);
     }
-}
-
-/// The re-prime is presumed to keep the server busy for the restore time the Ready rules count,
-/// no longer; the worker awaits it anyway, so a job queued behind it starts only once it is done.
-#[tokio::test(start_paused = true)]
-async fn the_reprime_is_presumed_busy_for_the_restore_time_and_awaited() {
-    let (stub, gate) = gated(0);
-    stub.answers.lock().unwrap().extend([
-        Ok(REMINDER_REPLY.to_owned()),
-        Ok(HEAL.to_owned()),
-        Ok(HEAL.to_owned()),
-    ]);
-    let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    assistant.fail_cache_for_tests();
-    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
-    gate.add_permits(1);
-    settle().await;
-    assert_eq!(kinds(&stub), ["reminder", "reprime"]);
-    // The re-prime is 5 s (`reminders_queue`): not the 2 x 5 + 10 s bound of the wait.
-    assert_eq!(assistant.busy_for_tests(), Duration::from_secs(5));
-    let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
-    tokio::time::advance(Duration::from_secs(8)).await;
-    settle().await;
-    assert_eq!(
-        assistant.poll(2, 2, job),
-        Poll::Queued,
-        "awaits the re-prime"
-    );
-    gate.add_permits(2);
-    settle().await;
-    assert!(matches!(
-        until_done(&assistant, 2, 2, job).await,
-        Poll::Done(_)
-    ));
 }
 
 /// Third prompt kinds beside interpretations: a cancelled reminder then an interpretation, a
@@ -2163,17 +2020,13 @@ async fn mixed_prompt_kinds_keep_their_order_and_busy_terms() {
         Poll::Done(_) | Poll::Running
     ));
 
-    // Reminders of two accounts run one after the other, each followed on the GPU path (after a
-    // failed cache check) by one re-prime, and an interpretation queued meanwhile goes first.
+    // Reminders of two accounts run one after the other, with no re-prime between them.
     let (stub, gate) = gated(0);
-    stub.answers.lock().unwrap().extend([
-        Ok(REMINDER_REPLY.to_owned()),
-        Ok(HEAL.to_owned()),
-        Ok(REMINDER_REPLY.to_owned()),
-        Ok(HEAL.to_owned()),
-    ]);
+    stub.answers
+        .lock()
+        .unwrap()
+        .extend([Ok(REMINDER_REPLY.to_owned()), Ok(REMINDER_REPLY.to_owned())]);
     let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
-    assistant.fail_cache_for_tests();
     start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
     start_reminder(&assistant, 2, reminder_origin(2, "field:hp", 5)).unwrap();
     gate.add_permits(10);
@@ -2181,48 +2034,269 @@ async fn mixed_prompt_kinds_keep_their_order_and_busy_terms() {
         tokio::time::advance(Duration::from_secs(30)).await;
         settle().await;
     }
-    assert_eq!(kinds(&stub), ["reminder", "reprime", "reminder", "reprime"]);
+    assert_eq!(kinds(&stub), ["reminder", "reminder"]);
 }
 
-/// GPU path: when the failed cache check leaves the slot cold (no figure, an expiry or a
-/// transport failure of the interpretation), one re-prime follows at once so the next
-/// interpretation is not cold; a low figure (the interpretation evaluated the prefix itself)
-/// needs none.
+// --- Reminders that fit (plan 3c-1c) --------------------------------------------------------
+
+/// Sends Ready again for generation 1 with the reminder prime done, as the manager does.
+fn primed(assistant: &Arc<Assistant>, stub: &Arc<StubInterpreter>, path: Path, busy: Duration) {
+    assistant.event(RuntimeEvent::Ready {
+        generation: 1,
+        budgets: budgets(),
+        interpreter: Arc::clone(stub) as _,
+        path,
+        reminders: Reminders::Available(reminder_budgets(20)),
+        prepared: Prepared {
+            primed: busy.is_zero(),
+            busy,
+        },
+    });
+}
+
+/// A scribble reading admitted behind a reminder gets an allowance of Q and the reminder's busy
+/// term, expires against it, not against Q; the boundary (the term, R and nothing else equal to
+/// Q plus the term) is neither refused nor expired.
 #[tokio::test(start_paused = true)]
-async fn a_failed_gpu_check_that_leaves_the_slot_cold_reprimes_at_once() {
-    for (cached, transport, reprimes) in [
-        (None, false, true),
-        (None, true, true),
-        (Some(100), false, false),
-        (Some(1200), false, false),
-    ] {
+async fn a_reading_behind_a_reminder_at_the_boundary_is_neither_refused_nor_expired() {
+    // R is 85 s and the busy term 20 s: the second reading waits 105 s = Q (85) + 20.
+    let (stub, gate) = gated(0);
+    stub.answers
+        .lock()
+        .unwrap()
+        .extend([Ok(HEAL.to_owned()), Ok(HEAL.to_owned())]);
+    let assistant = reminders_queue(Arc::clone(&stub), Path::Cpu, (20, 85));
+    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    let (first, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    let (second, _) = start(&assistant, 3, origin(3, "field:hp", 5)).unwrap();
+    assert_eq!(
+        assistant.allowance_for_tests(second),
+        Some(Duration::from_secs(105))
+    );
+    // The first starts when the busy time is over and expires at its run deadline, 85 s later:
+    // the second then waited exactly 105 s.
+    // The worker sees the cancel: the busy time stays the 20 s set at admission.
+    settle().await;
+    assert_eq!(assistant.busy_for_tests(), Duration::from_secs(20));
+    tokio::time::advance(Duration::from_secs(20)).await;
+    settle().await;
+    assert_eq!(assistant.poll(2, 2, first), Poll::Running);
+    tokio::time::advance(Duration::from_secs(85)).await;
+    settle().await;
+    assert_eq!(assistant.poll(2, 2, first), Poll::Done(Answer::AskAgain));
+    assert_eq!(assistant.poll(3, 3, second), Poll::Running);
+    gate.add_permits(2);
+}
+
+/// Without a reminder counted a reading keeps Q; behind one it gets Q and the term, and keeps
+/// it when reminders are switched off later, and also when they are switched off before the
+/// admission while the reminder's busy time is counted.
+#[tokio::test(start_paused = true)]
+async fn the_allowance_is_q_without_a_reminder_and_q_plus_the_term_behind_one() {
+    let (stub, gate) = gated(2);
+    let assistant = reminders_running(Arc::clone(&stub), Path::Cpu, 20);
+    let (plain, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    assert_eq!(
+        assistant.allowance_for_tests(plain),
+        Some(Duration::from_secs(35))
+    );
+    gate.add_permits(2);
+    for _ in 0..5 {
+        settle().await;
+    }
+
+    let (stub, gate) = gated(2);
+    let assistant = reminders_running(Arc::clone(&stub), Path::Cpu, 20);
+    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    let (behind, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    assert_eq!(
+        assistant.allowance_for_tests(behind),
+        Some(Duration::from_secs(55))
+    );
+    assistant.set_reminder_choice(Some(false));
+    assert_eq!(
+        assistant.allowance_for_tests(behind),
+        Some(Duration::from_secs(55)),
+        "kept when reminders are switched off later"
+    );
+    gate.add_permits(2);
+
+    // The owner switches reminders off while a reminder's busy time is counted: the busy time
+    // is real whatever the setting, so the reading is still admitted with Q and the term.
+    let (stub, gate) = gated(2);
+    let assistant = reminders_running(Arc::clone(&stub), Path::Cpu, 20);
+    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    assistant.set_reminder_choice(Some(false));
+    let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    assert_eq!(
+        assistant.allowance_for_tests(job),
+        Some(Duration::from_secs(55))
+    );
+    gate.add_permits(2);
+}
+
+/// The unverified busy term counts until a reminder of the generation has completed with its
+/// system message read from the cache, and again after a cancelled reminder.
+#[tokio::test(start_paused = true)]
+async fn the_unverified_term_applies_before_the_first_verifying_reminder_and_after_a_cancelled_one()
+{
+    let (stub, gate) = gated(0);
+    stub.answers.lock().unwrap().extend([
+        Ok(HEAL.to_owned()),
+        Ok(REMINDER_REPLY.to_owned()),
+        Ok(HEAL.to_owned()),
+    ]);
+    // Y 40 s, X 10 s.
+    let assistant = reminders_running(Arc::clone(&stub), Path::Cpu, 40);
+    assert!(!assistant.reminder_verified_for_tests());
+    // A cancelled reminder, never verified: its whole prompt.
+    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
+    settle().await;
+    start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+    assert_eq!(assistant.busy_for_tests(), Duration::from_secs(40));
+    settle().await;
+    gate.add_permits(1);
+    tokio::time::advance(Duration::from_secs(41)).await;
+    for _ in 0..5 {
+        settle().await;
+    }
+    // A reminder that completes with its system message cached verifies.
+    gate.add_permits(1);
+    let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 6)).unwrap();
+    assert!(matches!(
+        until_done(&assistant, 1, 1, id).await,
+        Poll::Done(_)
+    ));
+    assert!(assistant.reminder_verified_for_tests());
+    // Cancelled now: the verified term, and the next one counts the whole prompt again.
+    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 7)).unwrap();
+    settle().await;
+    start(&assistant, 2, origin(2, "field:hp", 6)).unwrap();
+    assert_eq!(assistant.busy_for_tests(), Duration::from_secs(10));
+    settle().await;
+    assert!(!assistant.reminder_verified_for_tests());
+    gate.add_permits(1);
+    tokio::time::advance(Duration::from_secs(11)).await;
+    for _ in 0..5 {
+        settle().await;
+    }
+    start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 8)).unwrap();
+    settle().await;
+    start(&assistant, 2, origin(2, "field:hp", 7)).unwrap();
+    assert_eq!(assistant.busy_for_tests(), Duration::from_secs(40));
+    gate.add_permits(1);
+}
+
+/// A completed reminder that read less than 75 % of its system message from the cache, or shows
+/// no figure, switches reminders off for the generation with the reason, without clearing the
+/// armed interpretation check; if the interpretation check fails too, the first reason stays.
+#[tokio::test(start_paused = true)]
+async fn a_low_or_missing_reminder_figure_switches_reminders_off_and_keeps_the_interpretation_check()
+ {
+    for (cached, text) in [(Some(10), "10 of 1500"), (None, "no cached-token figure")] {
         let stub = Arc::new(StubInterpreter::answering([
             Ok(REMINDER_REPLY.to_owned()),
-            if transport {
-                Err(Failure::Transport)
-            } else {
-                Ok(HEAL.to_owned())
-            },
             Ok(HEAL.to_owned()),
         ]));
         let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
+        primed(&assistant, &stub, Path::Gpu, Duration::ZERO);
+        assert!(assistant.cache_check_armed_for_tests());
+        *stub.cached_tokens.lock().unwrap() = cached;
         let id = start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)).unwrap();
         assert!(matches!(
             until_done(&assistant, 1, 1, id).await,
             Poll::Done(_)
         ));
+        let first = assistant.cache_off_for_tests().expect("switched off");
+        assert!(
+            first.contains("reminder prompt") && first.contains(text),
+            "{first}"
+        );
+        assert!(!assistant.reminders_effective());
+        assert!(
+            assistant.cache_check_armed_for_tests(),
+            "the interpretation check is still armed"
+        );
+        // The interpretation check then fails too: the first reason is kept.
+        let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
+        assert!(matches!(
+            until_done(&assistant, 2, 2, job).await,
+            Poll::Done(_)
+        ));
+        assert!(!assistant.cache_check_armed_for_tests());
+        assert_eq!(assistant.cache_off_for_tests(), Some(first));
+    }
+}
+
+/// The first interpretation after the reminder prime verifies the interpretation entry's
+/// restore: a good figure disarms the check, a miss switches reminders off with the reason.
+#[tokio::test(start_paused = true)]
+async fn the_first_interpretation_after_the_prime_verifies_the_restore() {
+    for (cached, off) in [(Some(1800), false), (Some(0), true)] {
+        let stub = Arc::new(StubInterpreter::answering([Ok(HEAL.to_owned())]));
+        let assistant = reminders_running(Arc::clone(&stub), Path::Gpu, 20);
+        primed(&assistant, &stub, Path::Gpu, Duration::ZERO);
         *stub.cached_tokens.lock().unwrap() = cached;
         let (job, _) = start(&assistant, 2, origin(2, "field:hp", 5)).unwrap();
-        for _ in 0..40 {
-            tokio::time::advance(Duration::from_secs(5)).await;
-            settle().await;
+        assert!(matches!(
+            until_done(&assistant, 2, 2, job).await,
+            Poll::Done(_)
+        ));
+        assert!(!assistant.cache_check_armed_for_tests());
+        assert_eq!(assistant.reminders_effective(), !off);
+        if off {
+            let why = assistant.cache_off_for_tests().unwrap();
+            assert!(why.contains("interpretation prefix"), "{why}");
+            // The GPU path has no re-prime: the one interpretation is the only request.
+            assert_eq!(kinds(&stub), ["interpretation"]);
         }
-        assert!(matches!(assistant.poll(2, 2, job), Poll::Done(_)));
-        assert_eq!(
-            kinds(&stub).contains(&"reprime"),
-            reprimes,
-            "{cached:?} {transport}: {:?}",
-            kinds(&stub)
-        );
     }
+}
+
+/// A prime that timed out leaves the server presumed busy for its bound: the first admission
+/// counts it (a reading is refused when it is more than Q).
+#[tokio::test(start_paused = true)]
+async fn a_timed_out_prime_makes_the_server_presumed_busy_at_ready() {
+    for (busy_s, admitted) in [(30, true), (40, false)] {
+        let stub = Arc::new(StubInterpreter::answering([Ok(HEAL.to_owned())]));
+        let assistant = reminders_running(Arc::clone(&stub), Path::Cpu, 20);
+        primed(&assistant, &stub, Path::Cpu, Duration::from_secs(busy_s));
+        assert_eq!(assistant.busy_for_tests(), Duration::from_secs(busy_s));
+        // Q is 35 s.
+        assert_eq!(
+            start(&assistant, 2, origin(2, "field:hp", 5)).is_ok(),
+            admitted,
+            "{busy_s} s"
+        );
+        assert!(!assistant.cache_check_armed_for_tests(), "nothing primed");
+    }
+}
+
+/// A generation that is not prepared (a CPU start with reminders off) counts as off whatever the
+/// setting says now.
+#[tokio::test]
+async fn a_generation_that_is_not_prepared_has_no_reminders() {
+    let assistant = Assistant::new();
+    assistant.event(RuntimeEvent::GenerationStarted { generation: 1 });
+    assistant.event(RuntimeEvent::Ready {
+        generation: 1,
+        budgets: budgets(),
+        interpreter: Arc::new(StubInterpreter::default()),
+        path: Path::Cpu,
+        reminders: Reminders::NotPrepared,
+        prepared: Prepared::default(),
+    });
+    assistant.set_reminder_choice(Some(true));
+    assert!(!assistant.reminders_effective());
+    assert_eq!(
+        start_reminder(&assistant, 1, reminder_origin(1, "field:hp", 5)),
+        Err(ReminderRefusal::NotAvailable)
+    );
+    assert_eq!(
+        assistant.reminder_generation(),
+        Some((Path::Cpu, Reminders::NotPrepared))
+    );
 }

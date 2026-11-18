@@ -1,7 +1,6 @@
 use super::*;
-use crate::assistant::jobs::Budgets;
-use crate::assistant::request::Bounds;
 use crate::assistant::runtime::budgets::{SAMPLE_TOKENS, Sample};
+use crate::assistant::runtime::launch::entry_mib;
 
 /// A sample at 88 ms per prompt token and 213 ms per generated token (the CPU container's).
 fn sample() -> Sample {
@@ -29,15 +28,68 @@ pub(crate) fn make(path: Path) -> Inputs {
     Inputs {
         measured,
         derived,
-        primed: Primed::of(1460.0, 88.0),
         system_tokens: 1800.0,
         reply_tokens: 200,
         entry_mib: 120.0,
+        reminder_entry_mib: 100.0,
+    }
+}
+
+/// A calibration sample at `p_ms` per prompt token and `g_ms` per generated token whose
+/// filler is `filler` tokens (a tail of 100 tokens beyond it, 0.5 s of overhead).
+fn measured_sample(p_ms: f64, g_ms: f64, filler: f64, cached: f64) -> Sample {
+    let prompt_n = filler + 100.0;
+    Sample {
+        wall_ms: p_ms * prompt_n + g_ms * 64.0 + 500.0,
+        prompt_n,
+        prompt_ms: p_ms * prompt_n,
+        cached_n: cached,
+        predicted_n: f64::from(SAMPLE_TOKENS),
+        predicted_ms: g_ms * 64.0,
+        filler_tokens: filler,
+    }
+}
+
+/// The development host as 3c-1b measured it (`docs/results.md`): the GPU (5.17 ms per prompt
+/// token, B 4,096, N(B) 1,128, R 105 s, D 1, Q 111 s) or the CPU (about 42 ms per prompt
+/// token, 130 ms per token, N(B) 280).
+fn dev_host(path: Path, system_tokens: f64) -> Inputs {
+    let (p, g, filler, prefix, cached) = match path {
+        Path::Gpu => (5.17, 72.0, 1128.0, 1810.0, 1810.0),
+        Path::Cpu => (42.0, 130.0, 280.0, 1460.0, 1400.0),
+    };
+    let samples = [
+        measured_sample(p, g, filler, cached),
+        measured_sample(p, g, filler + 5.0, cached),
+    ];
+    let measured = Measured {
+        path,
+        max_tokens: 1024,
+        prefix_tokens: prefix,
+        samples,
+    };
+    let derived = crate::assistant::runtime::budgets::derive(&measured).unwrap();
+    let (sha, size) = match path {
+        Path::Gpu => (
+            crate::assistant::model::GPU_DEFAULT_MODEL_SHA256,
+            5_680_522_464,
+        ),
+        Path::Cpu => (crate::assistant::model::DEFAULT_MODEL_SHA256, 2_244_011_552),
+    };
+    let n = f64::from(u32::try_from(derived.budgets.bounds.tokens).unwrap());
+    let reply = 900.0;
+    Inputs {
+        measured,
+        derived,
+        system_tokens,
+        reply_tokens: 900,
+        entry_mib: entry_mib(sha, size, prefix + n + 1024.0),
+        reminder_entry_mib: entry_mib(sha, size, system_tokens + n + reply),
     }
 }
 
 #[test]
-fn a_reminder_has_its_own_deadline_busy_term_and_extra_wait() {
+fn a_reminder_has_its_own_deadline_and_two_busy_terms() {
     let inputs = make(Path::Cpu);
     let budgets = derive(&inputs).unwrap();
     // 88 ms x (1,800 + N(B)) of prompt, 200 tokens of reply at 213 ms, 1 s of overhead.
@@ -47,31 +99,72 @@ fn a_reminder_has_its_own_deadline_busy_term_and_extra_wait() {
     assert!((budgets.estimate_s - (1.0 + prompt + reply)).abs() < 1e-6);
     assert_eq!(budgets.run.as_secs() % 5, 0);
     assert!(budgets.run.as_secs_f64() >= 1.25 * budgets.estimate_s);
-    assert_eq!(budgets.busy, Duration::from_secs_f64(prompt.ceil()));
+    // Unverified: the whole prompt and the interpretation's restore, rounded up.
+    let restore = 120.0 * RESTORE_S_PER_MIB;
+    assert_eq!(
+        budgets.busy_unverified,
+        Duration::from_secs_f64((prompt + restore).ceil())
+    );
+    // Verified: the reminder's own restore, the variable part with the template's tail, and
+    // the interpretation's restore.
+    let variable = 0.088 * (n + TEMPLATE_MARGIN_TOKENS);
+    let verified = 100.0 * RESTORE_S_PER_MIB + variable + restore;
+    assert_eq!(
+        budgets.busy_verified,
+        Duration::from_secs_f64(verified.ceil())
+    );
+    assert!(budgets.busy_verified < budgets.busy_unverified);
     // CPU: the cache entry's load, labelled as the dev host's constant.
     assert!(budgets.restore.dev_host_constant);
     assert!(budgets.restore.seconds < 1.0);
-    assert!(budgets.extra_wait >= budgets.busy);
+    assert_eq!(budgets.system_tokens, 1800);
     // Never the interpretation's budgets.
     assert_ne!(budgets.run, inputs.derived.budgets.run);
 }
 
 #[test]
-fn the_gpu_restore_is_the_entry_load_cost_and_the_fallback_reprime_is_priming_time() {
+fn the_gpu_restore_is_the_entry_load_cost() {
     let mut inputs = make(Path::Gpu);
-    inputs.primed = Primed::of(1460.0, 10.0);
     inputs.entry_mib = 260.0;
     let budgets = derive(&inputs).unwrap();
     // 0.53 ms per MiB of entry plus 10 ms, a figure from the development host.
     assert!(budgets.restore.dev_host_constant);
     assert!((budgets.restore.seconds - (260.0 * 0.00053 + 0.010)).abs() < 1e-9);
     assert!(budgets.restore.seconds < 0.2);
-    // The priming time is only the fallback's.
-    assert!((budgets.reprime.as_secs_f64() - 14.6).abs() < 1e-6);
-    // Without priming's time, the measured prompt rate times the prefix.
-    inputs.primed.prompt_ms = f64::NAN;
+}
+
+/// The dev host's GPU, which the 3c-1b live run found unavailable ("could wait 129 s, more than
+/// the 111 s it may"): with the real cost shown as an extra wait it is available, the verified
+/// extra wait is at most 7 s and the unverified one stays within a running interpretation's.
+#[test]
+fn the_dev_hosts_gpu_has_reminders_with_a_small_verified_extra_wait() {
+    let inputs = dev_host(Path::Gpu, 1820.0);
+    // The figures the live run saw: B 4,096, N(B) 1,128, R 105 s, D 1, Q 111 s.
+    assert_eq!(inputs.derived.budgets.bounds.tokens, 1128);
+    assert_eq!(inputs.derived.budgets.run.as_secs(), 105);
+    assert_eq!(inputs.derived.budgets.depth, 1);
+    assert!((111..=112).contains(&inputs.derived.budgets.queue_wait.as_secs()));
     let budgets = derive(&inputs).unwrap();
-    assert!((budgets.reprime.as_secs_f64() - 0.088 * 1460.0).abs() < 1e-6);
+    assert!(
+        budgets.busy_verified.as_secs() <= 7,
+        "{:?}",
+        budgets.busy_verified
+    );
+    let y = budgets.busy_unverified.as_secs();
+    assert!((13..=16).contains(&y), "{y}");
+    let interpretation =
+        (inputs.derived.budgets.run + inputs.derived.budgets.busy_after_expiry).as_secs();
+    assert!(y <= interpretation);
+}
+
+/// The dev host's CPU: the whole reminder prompt about 68 s, shown as the unverified extra wait.
+#[test]
+fn the_dev_hosts_cpu_has_reminders_with_the_whole_prompt_as_the_unverified_term() {
+    let inputs = dev_host(Path::Cpu, 1410.0);
+    let budgets = derive(&inputs).unwrap();
+    let y = budgets.busy_unverified.as_secs();
+    assert!((64..=75).contains(&y), "{y}");
+    assert!(budgets.busy_verified.as_secs() < 20);
 }
 
 #[test]
@@ -88,32 +181,16 @@ fn a_deadline_over_the_ceiling_makes_reminders_unavailable_with_the_reason() {
     assert!(error.describe(Path::Cpu).contains("600 s ceiling"));
 }
 
+/// A queue wait shorter than a reminder's busy term no longer makes reminders unavailable:
+/// the term is added to a reading's allowance and shown.
 #[test]
-fn a_reminder_that_could_make_a_scribble_reading_refused_is_unavailable() {
+fn a_short_queue_wait_does_not_make_reminders_unavailable() {
     let mut inputs = make(Path::Cpu);
-    // The busy term plus the restore must be at most Q.
-    inputs.derived.budgets = Budgets {
-        queue_wait: Duration::from_secs(5),
-        bounds: Bounds {
-            bytes: 1024,
-            tokens: 293,
-        },
-        ..inputs.derived.budgets
-    };
-    let error = derive(&inputs).unwrap_err();
-    assert!(
-        matches!(error, Unavailable::BeyondQueue { .. }),
-        "{error:?}"
-    );
-    // At exactly Q it is available.
-    let mut inputs = make(Path::Cpu);
-    inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
-    let needed =
-        derive(&inputs).unwrap().extra_wait.as_secs() + inputs.derived.budgets.run.as_secs();
-    inputs.derived.budgets.queue_wait = Duration::from_secs(needed);
+    inputs.derived.budgets.queue_wait = Duration::from_secs(5);
     assert!(derive(&inputs).is_ok());
-    inputs.derived.budgets.queue_wait = Duration::from_secs(needed - 1);
-    assert!(derive(&inputs).is_err());
+    let mut inputs = make(Path::Gpu);
+    inputs.derived.budgets.queue_wait = Duration::from_secs(5);
+    assert!(derive(&inputs).is_ok());
 }
 
 #[test]
@@ -127,22 +204,16 @@ fn a_restore_beyond_the_interpretations_margin_is_unavailable_on_both_paths() {
 }
 
 #[test]
-fn an_unavailable_reason_says_reminders_are_off_and_what_helps() {
+fn an_unavailable_reason_says_what_helps_on_the_cpu() {
     let error = Unavailable::OverCeiling { needed_s: 700 };
     let cpu = error.describe(Path::Cpu);
-    assert!(
-        cpu.starts_with("reminders are off for this generation"),
-        "{cpu}"
-    );
+    assert!(!cpu.starts_with("reminders are off"), "{cpu}");
     assert!(
         cpu.contains("more threads") && cpu.contains("GPU path"),
         "{cpu}"
     );
     let gpu = error.describe(Path::Gpu);
-    assert!(
-        gpu.starts_with("reminders are off for this generation"),
-        "{gpu}"
-    );
+    assert!(!gpu.starts_with("reminders are off"), "{gpu}");
     assert!(!gpu.contains("more threads"), "{gpu}");
 }
 
@@ -176,11 +247,12 @@ fn a_reminder_that_does_not_fit_the_context_is_unavailable_with_the_reason() {
 
 #[test]
 fn a_reminder_worse_than_a_running_interpretation_is_unavailable() {
-    // A scribble reading right after a reminder may wait for the reminder's busy time plus the
-    // restore; a running interpretation makes it wait R plus its busy term, no more is allowed.
+    // A scribble reading right after a cancelled, unverified reminder may wait for its whole
+    // prompt and the restore; a running interpretation makes it wait R plus its busy term, no
+    // more is allowed.
     let mut inputs = make(Path::Gpu);
     inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
-    let needed = derive(&inputs).unwrap().extra_wait.as_secs();
+    let needed = derive(&inputs).unwrap().busy_unverified.as_secs();
     inputs.derived.budgets.busy_after_expiry = Duration::ZERO;
     // R's margin over the estimate is not what this is about.
     inputs.derived.estimate_s = 0.0;
@@ -195,60 +267,4 @@ fn a_reminder_worse_than_a_running_interpretation_is_unavailable() {
     // Its busy term counts as the interpretation's.
     inputs.derived.budgets.busy_after_expiry = Duration::from_secs(1);
     assert!(derive(&inputs).is_ok());
-}
-
-#[test]
-fn a_reading_behind_a_reminder_must_still_fit_q_after_the_reading_ahead_of_it() {
-    // CPU: busy + restore + R (the one reading that may wait behind the reminder) at most Q.
-    let mut inputs = make(Path::Cpu);
-    inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
-    inputs.derived.budgets.run = Duration::from_mins(50);
-    let needed = derive(&inputs).unwrap().extra_wait.as_secs();
-    inputs.derived.budgets.queue_wait = Duration::from_secs(needed + 3_000);
-    assert!(derive(&inputs).is_ok());
-    inputs.derived.budgets.queue_wait = Duration::from_secs(needed + 2_999);
-    assert!(matches!(
-        derive(&inputs),
-        Err(Unavailable::BeyondQueue { .. })
-    ));
-    // GPU: R for each of the D readings that may wait.
-    let mut inputs = make(Path::Gpu);
-    inputs.derived.budgets.queue_wait = Duration::from_secs(100_000);
-    inputs.derived.budgets.run = Duration::from_mins(50);
-    inputs.derived.budgets.depth = 3;
-    let needed = derive(&inputs).unwrap().extra_wait.as_secs();
-    inputs.derived.budgets.queue_wait = Duration::from_secs(needed + 9_000);
-    assert!(derive(&inputs).is_ok());
-    inputs.derived.budgets.queue_wait = Duration::from_secs(needed + 8_999);
-    assert!(matches!(
-        derive(&inputs),
-        Err(Unavailable::BeyondQueue { .. })
-    ));
-}
-
-/// On the GPU path the fallback re-prime follows a reminder after a failed cache check, and
-/// admission adds its time to the wait, so the availability checks count the longer of the
-/// restore and the re-prime.
-#[test]
-fn the_gpu_availability_checks_count_the_fallback_reprime() {
-    let mut inputs = make(Path::Gpu);
-    inputs.primed = Primed::of(1460.0, 88.0);
-    inputs.derived.budgets.queue_wait = Duration::from_secs(10_000);
-    let open = derive(&inputs).unwrap();
-    assert!(
-        open.extra_wait.as_secs_f64() >= open.busy.as_secs_f64() + open.reprime.as_secs_f64() - 1.0
-    );
-    let ahead =
-        inputs.derived.budgets.run.as_secs() * u64::try_from(inputs.derived.budgets.depth).unwrap();
-    inputs.derived.budgets.queue_wait = Duration::from_secs(ahead + open.busy.as_secs() + 1);
-    assert!(matches!(
-        derive(&inputs),
-        Err(Unavailable::BeyondQueue { .. })
-    ));
-    // The CPU path has no re-prime.
-    let mut cpu = make(Path::Cpu);
-    cpu.primed = Primed::of(1460.0, 88.0);
-    cpu.derived.budgets.queue_wait = Duration::from_secs(10_000);
-    let open = derive(&cpu).unwrap();
-    assert!(open.extra_wait.as_secs_f64() < open.busy.as_secs_f64() + 2.0);
 }

@@ -185,6 +185,7 @@ async fn rig_with(slow: Duration) -> Rig {
             device_default: false,
             older_prompt: crate::assistant::runtime::models::OlderPrompt::default(),
         },
+        None,
     )
     .with_downloads(Arc::clone(&downloads));
     let runtime = handle.runtime.clone().unwrap();
