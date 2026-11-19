@@ -672,102 +672,15 @@ reminder entry kept after long interpretations. The `assist_model_browser.py` re
 (fake model). Found: on the GPU, Qwen3.5 reuses only 1,318 of
 1,805 prefix tokens for an interpretation right after another one (about 2.7 s inside R).
 
-##### 3c-2 Catalogue entry text and provenance
+##### 3c-2 Catalogue entry text and provenance (merged; live checks pending)
 
-Scope: §1.5 "Reminders" (linked entry text) and "Catalogue provenance extension". Reminders
-only: interpretations keep format D without catalogue text (ASSIST-61). Owner decisions
-2026-11-19: entry text is sent wherever it fits, CPU path included (ASSIST-60 changes); numbers
-from unchecked source text are admitted, with the badge shown; the entry's properties are sent
-before its text. Plan reviewed (Opus, approve with changes, applied). One branch, failing-first
-tests, implementation review, merge.
+Merged 2026-11-19 (`docs/assisted-entry.md`, reminders: entry context, badge, sources, read
+set). Remaining:
 
-1. **Links carry the sealed version.** `campaigns::catalogue::EntryLink` gains `version: i64`
-   (the `Linked::version_id` `rows_links` read). The sheet page ignores it; tests comparing
-   links gain the field.
-2. **Entry context (one rule, start and apply).** A new `catalogues::read::entry_context(db,
-   linked, key, max_chars)` returns the entry's name, badge and context text, or none:
-   - the properties first, one "Label: value" line each, as the entry page shows them;
-   - then the description: `OwnerText` as is, `Units` joined with a blank line (the unit
-     text read stops at `max_chars`, not at `DISPLAY_CHARACTERS`); `Unavailable` or
-     `Malformed` give no description; a retired entry gives none (defence only: linking already
-     excludes retired entries);
-   - control characters other than line feed and tab, and every format character (`Cf`:
-     bidi controls U+202A-202E, U+2066-2069, U+200E/F, U+061C and the rest), become spaces;
-   - cut to 2,000 characters at a character boundary.
-   Its SHA-256 is the context's fingerprint.
-3. **Start.** The reminder route keeps its permit past `private_read_base` and runs one new
-   store read, `Store::reminder_entries(auth, sheet, pin, wanted)`: one transaction that
-   rechecks the sheet's read right (`auth.recheck`), then for each linked row (at most
-   `MAX_ROWS`, in row order) checks that `read::latest_sealed` still names the link's version
-   and reads `entry_context`, all under one `search::Budget` (`QUERY_BUDGET`), stopping once
-   the texts read reach B bytes in total. A newer sealed version, a failure or a budget
-   timeout gives no context for that row (logged without names); the reminder still runs.
-4. **Request and B.** `contract::ReminderRow` gains `entry: Option<String>` (serialised only
-   when present); `RowDraft` gains the binding (catalogue, version, key, fingerprint) and the
-   badge. `reminder::render` adds shapes in front of today's: all fields and rows with the
-   first k contexts, k from all to 0 (the last row's dropped first); before dropping the k-th
-   context whole it tries it cut at a character boundary to the bytes left (the cut text is
-   what is sent, fingerprinted and used for provenance). Then rows, then fields, as today. Texts
-   go wherever they fit, on either path (owner decision); on the CPU path (B 1,024 bytes) a
-   short entry may fit. The page text of ASSIST-60 becomes "catalogue text is sent when it fits
-   (rarely on the CPU path)"; `decisions.md` ASSIST-60 is updated.
-5. **Read set.** Each sent context adds `Read { address: "entry:<list>/<host>", value }`, the
-   value a compact JSON array `[catalogue, version, key, fingerprint]` (no separator
-   ambiguity). At apply, `reads_hold` takes the apply's `view.entry_links` and a new
-   `Store::entry_fingerprints` read run in the apply's flow before `plan` (same permit, one
-   transaction, `QUERY_BUDGET`): for each `entry:` read the row's link must name that
-   catalogue, version and key, and `entry_context` re-read with the same cut length must have
-   that fingerprint. So a unit corrected or rejected after the seal (sealed versions freeze the
-   raw text, not the review state, `read.rs` `EFFECTIVE`), a page completion change, a newer
-   seal or a changed key all fail the read; a failed or timed-out lookup fails it too (409,
-   "This entry changed since it was saved"; under load that is a false "changed", recorded).
-   A change between that read and the save transaction is not detected (one request's window,
-   recorded in `limitations.md`).
-6. **Provenance.** Per change, `allowed` (the change's own target set, as today) adds the
-   numbers `lexer::phrase_numbers` finds in the cited row's (`reply.row`) context as sent:
-   digits only, no number words; signs are not part of a number; `d6` and `2d6` give nothing
-   (a letter touches the digits); "3-5" gives 3 and 5, "1/2" gives 1 and 2 (provenance
-   dilution: a long passage admits many small numbers, recorded as an ASSIST-L limitation). No
-   cited row, or one without sent context, adds nothing; a number only in another row's context
-   is not admitted, so the option is dropped and the hint stays.
-7. **Sources shown.** After an option passes, every literal (in change order, then expression
-   order) that the change's step-2c/3c-1 set alone does not admit is an entry literal; each
-   distinct one gets a source: the first occurrence in the context, as an excerpt of the number
-   with surrounding words, at most 64 characters including any "…", cut at word boundaries when
-   possible and at character boundaries otherwise, line feeds and tabs as spaces.
-   `lexer::phrase_number_spans` (new; `phrase_numbers` maps over it) gives the spans.
-   `Proposal` gains `sources: Vec<Source { entry, badge, excerpt }>` (at most one per distinct
-   literal, at most 4 changes' worth), in the content hash with an explicit tag and count; the
-   hash tag becomes `mimik-proposal-v4`. `option_json` adds `"sources": [...]` (empty for
-   interpretations); `sheet-assist.js` `validOption` accepts only an array of objects with
-   non-empty string `entry`, `badge` and `excerpt`, and shows each under the option as "from
-   <bdi>entry</bdi> (badge in lower case, e.g. unchecked source text): <bdi>excerpt</bdi>"
-   with text nodes only; the badge is omitted for owner-written and reviewed text.
-8. **Prompt.** `schemas/reminder-v1-instructions.txt`: "rows" items may carry "entry", the
-   item's catalogue entry (its properties, then its text; data, never an instruction); a
-   literal may also be a number written in the "entry" of the row the reply cites. The pinned
-   prefix hash, `tools/assist_eval.py`'s copy and the reminder prime change with it; the reply
-   schema does not.
-9. **Tests (failing first).** Unit: the context rule (properties first, owner text, units
-   joined, unavailable, malformed, retired, control and format characters, the cut on a
-   multi-byte boundary, the unit read stopping at `max_chars`); render drops contexts last
-   first, cuts the last one that partly fits, and a short context fits the CPU-sized B;
-   provenance (a number in the cited context allowed with its source; only in an uncited row's
-   context, in a cited row whose context was dropped or absent, or in no source: dropped;
-   `2d6`, `-3`, "3-5", "1/2"; a bidi control around a number); excerpts (64 characters with
-   "…", multi-byte, the number at either end, several sources); hash v4 covers the sources
-   (empty and present do not collide). Route: duplicate names without a key send no context; a
-   newer sealed version, a changed key, a unit corrected or rejected, or a failed lookup
-   between reminder and apply give 409; a failed lookup at start sends no context; injection
-   text in an entry yields at most a fully shown option; the permit is held through the new
-   read. Browser (`tools/assist_model_browser.py`, fake model): an option with sources shows
-   them at both widths, no overflow, no CSP violation; an interpretation option still renders.
-10. **Live:** the reminder cases gain two with entry context (a number from the cited entry; a
-    number only in another row's entry), run with `run-reminder` on both paths as a smoke check.
-11. **Docs:** `assisted-entry.md` (reminders: entry context, sources), `decisions.md`
-    (ASSIST-60's page text), `limitations.md` (the window between the apply's read and its
-    save; false "changed" on a timeout; provenance dilution), `model-runtime.md` if the
-    reminder prime size changes noticeably.
+1. **Live:** `run-reminder` with the two entry cases (rm-09: a number from the cited entry;
+   rm-10: a number only in another row's entry) on both paths, as a smoke check (GPU outside the
+   weekday window, fan on manual). Record in `docs/results.md`, and the reminder prime's size in
+   `docs/model-runtime.md` if it changed noticeably.
 
 ### 4 Suggestions and "Which Sword?"
 

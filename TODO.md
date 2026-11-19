@@ -15,10 +15,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   no level 2 (ASSIST-48). Owed for 2d-2: live checks 4 (browser, Downloads panel) and 5 (certificate
   outside the system store, clean machine) (`docs/assisted-sheet-plan.md`, "2d-2"). Checks 1-3
   ran (`docs/results.md`). Steps 3a (catalogue member, linking on view), 3b (bundles), 3c-0's CPU part
-  (prompt cache), 3c-1 (reminders with item names), 3c-1b (the cache on the GPU path) and 3c-1c
-  (reminders that fit) are merged; next: their live checks (plan), then 3c-2 (catalogue entry
-  text). Level 3's return is its
-  own later step (plan, "Level 3 behind an owner opt-in").
+  (prompt cache), 3c-1 (reminders with item names), 3c-1b (the cache on the GPU path), 3c-1c
+  (reminders that fit) and 3c-2 (catalogue entry text, sources, apply recheck; 2026-11-19) are
+  merged; owed: 3c-2's live `run-reminder` with rm-09/rm-10 on both paths (plan), then step 4.
+  Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
   22–39 extracted with Marker and forced OCR (`docs/results.md`, extractor screen), bundle
