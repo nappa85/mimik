@@ -9,7 +9,10 @@ ambiguous reply shows readings without Use; a newer save supersedes a job still 
 no CSP violation, no console error, no horizontal overflow. A second run with the stored
 reminder setting on (step 3c-1) saves a decrease: the reminder shows its hint as text with Use
 and Dismiss, Use writes a field the asking field is not among (which is not redrawn), Dismiss
-and a newer save hide it.
+and a newer save hide it. The poll answer is then rewritten in the browser to carry sources
+(step 3c-2): an unchecked-source line with its badge and an owner-written one without, markup
+shown as text, no overflow, no CSP violation; an option without sources (interpretations) still
+renders.
 
 Run inside the browser container (containers/browser.Dockerfile):
   python3 tools/assist_model_browser.py <dev-endpoint mimik> --fixture <source_fixture out>
@@ -463,12 +466,50 @@ def reminder_scenario(page, sheet):
     hp.fill("65")
     hp.press("Enter")
     until(page, "!document.querySelector('#remind-0')", "the older reminder to go")
+    sources_scenario(page, hp)
     require(
         page.evaluate("window.__csp.length") == 0,
         f"CSP violations: {page.evaluate('window.__csp')}",
     )
     require(not errors, f"Console errors: {errors}")
     no_overflow(page, "after reminders")
+
+
+def sources_scenario(page, hp):
+    """Step 3c-2: a reminder option that carries sources shows each under the option as text,
+    the badge only for unchecked text."""
+    sources = [
+        {
+            "entry": f"Potion {MARKUP}",
+            "badge": "Unchecked source text",
+            "excerpt": f"heals 7 {MARKUP}",
+        },
+        {"entry": "Rope", "badge": "Owner-written", "excerpt": "\u2026holds 40 " + "x" * 40},
+    ]
+
+    def rewrite(route):
+        response = route.fetch()
+        answer = response.json()
+        if answer.get("state") == "reminder" and answer.get("options"):
+            answer["options"][0]["sources"] = sources
+        route.fulfill(response=response, json=answer)
+
+    page.route("**/interpretations/*", rewrite)
+    hp.fill("40")
+    hp.press("Enter")
+    until(page, "!!document.querySelector('#remind-0 .assist-source')", "the sources")
+    box = page.locator("#remind-0")
+    shown = box.inner_text()
+    require(
+        f"from Potion {MARKUP} (unchecked source text): heals 7 {MARKUP}" in shown,
+        f"The unchecked source differs: {shown}",
+    )
+    require("from Rope: \u2026holds 40" in shown, f"The owner-written source differs: {shown}")
+    require(box.locator(".assist-source").count() == 2, "Not every source is shown")
+    require(box.locator("img").count() == 0, "Source text became markup")
+    no_overflow(page, "reminder sources")
+    page.unroute("**/interpretations/*")
+    box.locator(".remind-dismiss").click()
 
 
 def stalled_use(page, sheet, stall_url):

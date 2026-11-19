@@ -212,3 +212,19 @@ fn every_number_word_has_its_value() {
         assert_eq!(number_words(word), [*value], "{word}");
     }
 }
+
+/// The spans are character offsets (not bytes) of the digits, in order, whatever precedes
+/// them; rejected runs have none.
+#[test]
+fn number_spans_are_character_offsets_of_the_accepted_runs() {
+    assert_eq!(
+        phrase_number_spans("\u{e8} 3-5 e 2d6 e \u{ff11}\u{ff15}"),
+        [(3, 2, 3), (5, 4, 5), (15, 14, 16)]
+    );
+    assert_eq!(phrase_number_spans("1/2"), [(1, 0, 1), (2, 2, 3)]);
+    assert_eq!(phrase_number_spans("x\u{2212}7"), [(7, 2, 3)]);
+    assert_eq!(phrase_number_spans("d6 2d6 1.5 \u{202e}"), []);
+    let text = "ab 12 cd 12";
+    let values: Vec<u64> = phrase_number_spans(text).iter().map(|s| s.0).collect();
+    assert_eq!(values, phrase_numbers(text));
+}

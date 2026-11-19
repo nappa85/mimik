@@ -57,7 +57,7 @@
 {% if let Some(generation) = view.reminders.generation %}<p>This generation: {{ generation }}.{% if let Some(estimate) = view.reminders.estimate %} A reminder takes about {{ estimate }}.{% endif %}{% if let Some(wait) = view.reminders.extra_wait %} {{ wait }}{% endif %}</p>
 {% if let Some(note) = view.reminders.restart_note %}<p>{{ note }}</p>{% endif %}
 {% if let Some(why) = view.reminders.unavailable %}<p class="form-error" role="alert">Reminders are off for this generation: {{ why }}.</p>{% endif %}
-{% if view.reminders.names_only %}<p>Item names only: catalogue text does not fit.</p>{% endif %}
+{% if let Some(text) = view.reminders.catalogue_text %}<p>{{ text }}</p>{% endif %}
 {% else %}<p>The numbers appear once the model is measured.</p>{% endif %}</section>
 {% if let Some(d) = downloads %}
 <section class="panel" id="downloads"><h2>Downloads</h2>

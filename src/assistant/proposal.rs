@@ -96,12 +96,27 @@ pub(crate) struct Read {
     pub value: String,
 }
 
+/// Where a literal of an option came from when it is neither in the decrease's phrase nor a
+/// sheet value (plan 3c-2, step 7): a number the cited catalogue entry's text spells.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Source {
+    /// The entry's name.
+    pub entry: String,
+    /// The badge's label as the entry page shows it.
+    pub badge: String,
+    /// The number with its surrounding words, at most 64 characters.
+    pub excerpt: String,
+}
+
 /// A validated option with its bound read/write set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Proposal {
     pub changes: Vec<Change>,
     /// Every value the job sent (empty for interpretations), in the content hash.
     pub reads: Vec<Read>,
+    /// The entry text behind the option's literals (empty for interpretations), in the
+    /// content hash.
+    pub sources: Vec<Source>,
     /// The model's explanation, shown in full next to the changes.
     pub explanation: String,
     /// SHA-256 of the bound content.
@@ -119,16 +134,24 @@ pub(crate) fn bind(
     changes: Vec<Change>,
     explanation: String,
 ) -> Option<Proposal> {
-    bind_with_reads(id, n, origin, changes, Vec::new(), explanation)
+    bind_with_reads(
+        id,
+        n,
+        origin,
+        changes,
+        (Vec::new(), Vec::new()),
+        explanation,
+    )
 }
 
-/// [`bind`] for a job that sent values the option depends on ([`Read`]).
+/// [`bind`] for a job that sent values the option depends on ([`Read`]) and whose literals
+/// may come from catalogue entry text ([`Source`]).
 pub(crate) fn bind_with_reads(
     id: JobId,
     n: usize,
     origin: &Origin,
     changes: Vec<Change>,
-    reads: Vec<Read>,
+    (reads, sources): (Vec<Read>, Vec<Source>),
     explanation: String,
 ) -> Option<Proposal> {
     let targets: BTreeSet<&str> = changes
@@ -149,10 +172,11 @@ pub(crate) fn bind_with_reads(
     {
         return None;
     }
-    let hash = content_hash(id, n, origin, &changes, &reads, &explanation)?;
+    let hash = content_hash(id, n, origin, (&changes, &reads, &sources), &explanation)?;
     Some(Proposal {
         changes,
         reads,
+        sources,
         explanation,
         hash,
     })
@@ -172,8 +196,7 @@ pub(crate) fn verify(id: JobId, n: usize, origin: &Origin, proposal: &Proposal) 
         id,
         n,
         origin,
-        &proposal.changes,
-        &proposal.reads,
+        (&proposal.changes, &proposal.reads, &proposal.sources),
         &proposal.explanation,
     ) == Some(proposal.hash)
 }
@@ -182,12 +205,11 @@ fn content_hash(
     id: JobId,
     n: usize,
     origin: &Origin,
-    changes: &[Change],
-    reads: &[Read],
+    (changes, reads, sources): (&[Change], &[Read], &[Source]),
     explanation: &str,
 ) -> Option<[u8; 32]> {
     let mut hash = Sha256::new();
-    hash.update(b"mimik-proposal-v3\0");
+    hash.update(b"mimik-proposal-v4\0");
     let mut field = |bytes: &[u8]| {
         hash.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
         hash.update(bytes);
@@ -236,6 +258,17 @@ fn content_hash(
     for read in reads {
         field(read.address.as_bytes());
         field(read.value.as_bytes());
+    }
+    field(b"sources");
+    field(
+        &u64::try_from(sources.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for source in sources {
+        field(source.entry.as_bytes());
+        field(source.badge.as_bytes());
+        field(source.excerpt.as_bytes());
     }
     field(explanation.as_bytes());
     Some(hash.finalize().into())

@@ -13,9 +13,10 @@ use super::contract::{
 use super::interpreter::{Completion, Interpreter, RequestKind};
 use super::lexer;
 use super::output::{self, Checks, Invalid, Supplied};
-use super::proposal::{Change, Edit, Read};
+use super::proposal::{Change, Edit, Read, Source};
 use super::request::{Bounds, NotRendered};
 use crate::campaigns::NoteValue;
+use crate::catalogues::read::cut_text;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,12 +53,70 @@ impl FieldDraft {
     }
 }
 
+/// The catalogue entry a row is linked to (plan 3c-2): the sealed version the link named when
+/// the reminder started and the key, with the entry's name and badge label once its text is
+/// attached ([`RowDraft::attach`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntryBinding {
+    pub catalogue: String,
+    pub version: i64,
+    pub key: String,
+    /// The entry's name, shown with its sources.
+    pub name: String,
+    /// The badge's label as the entry page shows it.
+    pub badge: String,
+    /// Whether the text sent is shorter than the entry's whole context (an excerpt that reaches
+    /// its end then shows "…").
+    pub cut: bool,
+}
+
 /// One catalogue-linked row: its request ID (`r<n>`), list label, name as quoted data and the
-/// typed address `row:<list>/<host>` its name is re-read by.
+/// typed address `row:<list>/<host>` its name is re-read by. `entry` is the row's catalogue
+/// link; `row.entry` holds that entry's text when it is sent (always with a binding).
 #[derive(Clone, Debug)]
 pub(crate) struct RowDraft {
     pub row: ReminderRow,
     pub address: String,
+    pub entry: Option<EntryBinding>,
+}
+
+impl RowDraft {
+    /// Attaches what the entry read gave: the text (sent as the row's `entry`) with the entry's
+    /// name and badge, or nothing, which drops the binding (the row stays, with its name only).
+    pub(crate) fn attach(&mut self, context: Option<(String, String, String)>) {
+        self.attach_cut(context, false);
+    }
+
+    /// [`attach`](Self::attach) with whether the text is cut ([`EntryContext::cut`]).
+    ///
+    /// [`EntryContext::cut`]: crate::catalogues::read::EntryContext::cut
+    pub(crate) fn attach_cut(&mut self, context: Option<(String, String, String)>, cut: bool) {
+        match (context, self.entry.as_mut()) {
+            (Some((name, badge, text)), Some(binding)) if !text.is_empty() => {
+                binding.name = name;
+                binding.badge = badge;
+                binding.cut = cut;
+                self.row.entry = Some(text);
+            }
+            _ => {
+                self.entry = None;
+                self.row.entry = None;
+            }
+        }
+    }
+
+    /// The text this row sends, with its binding.
+    fn context(&self) -> Option<(&EntryBinding, &str)> {
+        self.entry.as_ref().zip(self.row.entry.as_deref())
+    }
+
+    /// The entry read's address: `entry:<list>/<host>`.
+    fn entry_address(&self) -> String {
+        format!(
+            "entry:{}",
+            self.address.strip_prefix("row:").unwrap_or(&self.address)
+        )
+    }
 }
 
 /// Everything a reminder could carry, in the order it is sent: the decrease, the fields, the
@@ -102,6 +161,44 @@ impl ReminderRequest {
         }
     }
 
+    /// The request with only the first `k` contexts (in row order); the others lose their text
+    /// and binding. With `cut` the `k`-th keeps its first `cut` characters, and with `whole_words`
+    /// too ends where [`cut_text`] puts the cut (never inside a number).
+    fn with_contexts(&self, k: usize, cut: Option<usize>, whole_words: bool) -> Self {
+        let mut seen = 0;
+        let mut rows = self.rows.clone();
+        for row in &mut rows {
+            if row.context().is_none() {
+                continue;
+            }
+            seen += 1;
+            if seen > k {
+                row.entry = None;
+                row.row.entry = None;
+            } else if let (true, Some(cut), Some(text), Some(binding)) =
+                (seen == k, cut, row.row.entry.as_mut(), row.entry.as_mut())
+            {
+                if whole_words {
+                    *text = cut_text(text, cut).0;
+                } else {
+                    *text = text.chars().take(cut).collect();
+                }
+                binding.cut = true;
+            }
+        }
+        Self {
+            rows,
+            ..self.clone()
+        }
+    }
+
+    fn contexts(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|row| row.context().is_some())
+            .count()
+    }
+
     fn envelope(&self) -> ReminderEnvelope {
         ReminderEnvelope {
             decrease: self.decrease.clone(),
@@ -123,6 +220,25 @@ impl ReminderRequest {
         reads.extend(self.rows.iter().map(|row| Read {
             address: row.address.clone(),
             value: row.row.name.clone(),
+        }));
+        // What each sent entry text is bound to: catalogue, sealed version, key, badge, the
+        // text's fingerprint, its length in characters and whether it was cut (the apply reads
+        // the entry again and cuts it alike).
+        reads.extend(self.rows.iter().filter_map(|row| {
+            let (binding, text) = row.context()?;
+            Some(Read {
+                address: row.entry_address(),
+                value: serde_json::json!([
+                    binding.catalogue,
+                    binding.version,
+                    binding.key,
+                    binding.badge,
+                    crate::catalogues::read::context_fingerprint(text),
+                    text.chars().count(),
+                    binding.cut,
+                ])
+                .to_string(),
+            })
         }));
         reads
     }
@@ -199,8 +315,9 @@ impl ReminderRequest {
     /// The literal magnitudes provenance admits for a change of `target` (plan 3c-1, "Reply"):
     /// the 2c rule with the decrease's phrase as the phrase (its numbers and number words, with
     /// a fraction or percent word 2, 3, 4 and 100), plus the decrease's `before`, `after` and
-    /// their difference, and the target's own value.
-    fn allowed(&self, target: &Target<'_>) -> BTreeSet<u64> {
+    /// their difference, and the target's own value; with `context` (the cited row's entry text
+    /// as sent), also the numbers it spells in digits (plan 3c-2, step 6).
+    fn allowed(&self, target: &Target<'_>, context: Option<&str>) -> BTreeSet<u64> {
         let phrase = &self.decrease.phrase;
         let mut allowed: BTreeSet<u64> = lexer::phrase_numbers(phrase).into_iter().collect();
         allowed.extend(lexer::number_words(phrase));
@@ -213,13 +330,19 @@ impl ReminderRequest {
         if lexer::has_fraction_word(phrase) {
             allowed.extend(lexer::FRACTION_LITERALS);
         }
+        if let Some(context) = context {
+            allowed.extend(lexer::phrase_numbers(context));
+        }
         allowed
     }
 }
 
 /// Renders `request` within `bounds`, counting tokens with `interpreter` only for shapes that
-/// already fit the byte bound: rows are dropped first (the last first), then fields (the last
-/// first); the decrease never. `reply_tokens` is the reminder reply bound.
+/// already fit the byte bound. The shapes in order (plan 3c-2, step 4): every field and row
+/// with the first k entry texts, k from all to 1, the k-th, before it is dropped whole, cut at
+/// a character boundary to the bytes left; then, as in 3c-1, rows dropped (the last first) and
+/// then fields (the last first), with no text; the decrease never. `reply_tokens` is the
+/// reminder reply bound.
 ///
 /// # Errors
 ///
@@ -231,23 +354,17 @@ pub(crate) async fn render(
     reply_tokens: u32,
     interpreter: &dyn Interpreter,
 ) -> Result<Rendered, NotRendered> {
-    let (fields, rows) = (request.fields.len(), request.rows.len());
-    let shapes = (0..=rows)
-        .rev()
-        .map(|kept| (fields, kept))
-        .chain((0..fields).rev().map(|kept| (kept, 0)));
-    for (kept_fields, kept_rows) in shapes {
-        let kept = request.kept(kept_fields, kept_rows);
+    let fit = |kept: ReminderRequest| async move {
         let dynamic = reminder_envelope(&kept.envelope());
         if dynamic.len() > bounds.bytes {
-            continue;
+            return Ok(None);
         }
         let tokens = interpreter
             .tokens(&dynamic)
             .await
             .map_err(NotRendered::Tokenizer)?;
-        if tokens <= bounds.tokens {
-            return Ok(Rendered {
+        Ok(if tokens <= bounds.tokens {
+            Some(Rendered {
                 completion: Completion {
                     dynamic,
                     ref_ids: kept.references(),
@@ -259,10 +376,77 @@ pub(crate) async fn render(
                 },
                 reads: kept.read_set(),
                 kept,
-            });
+            })
+        } else {
+            None
+        })
+    };
+    for k in (1..=request.contexts()).rev() {
+        let whole = request.with_contexts(k, None, false);
+        if reminder_envelope(&whole.envelope()).len() <= bounds.bytes {
+            // It fits the bytes: only the tokens failed. As planned, a text is cut only to
+            // the bytes left, never to fit the tokens, so the k-th is dropped whole.
+            if let Some(rendered) = fit(whole).await? {
+                return Ok(rendered);
+            }
+            continue;
+        }
+        if let Some(cut) = cut_to_fit(request, k, bounds.bytes) {
+            let kept = request.with_contexts(k, Some(cut), true);
+            let sends = kept
+                .rows
+                .iter()
+                .filter_map(|row| row.row.entry.as_deref())
+                .nth(k - 1)
+                .is_some_and(|text| !text.is_empty());
+            if sends && let Some(rendered) = fit(kept).await? {
+                return Ok(rendered);
+            }
+        }
+    }
+    let bare = request.with_contexts(0, None, false);
+    let (fields, rows) = (bare.fields.len(), bare.rows.len());
+    let shapes = (0..=rows)
+        .rev()
+        .map(|kept| (fields, kept))
+        .chain((0..fields).rev().map(|kept| (kept, 0)));
+    for (kept_fields, kept_rows) in shapes {
+        if let Some(rendered) = fit(bare.kept(kept_fields, kept_rows)).await? {
+            return Ok(rendered);
         }
     }
     Err(NotRendered::TooLong)
+}
+
+/// The most characters the `k`-th text may keep for the request to fit `bytes`, at least one;
+/// `None` when not even one character fits. The escaped length never shrinks as text is added,
+/// so the largest fitting length is found by bisection; the caller then ends it at a word
+/// ([`cut_text`]), which only shortens it.
+fn cut_to_fit(request: &ReminderRequest, k: usize, bytes: usize) -> Option<usize> {
+    let longest = request
+        .with_contexts(k, None, false)
+        .rows
+        .iter()
+        .filter_map(|row| row.row.entry.as_deref())
+        .nth(k - 1)?
+        .chars()
+        .count();
+    let fits = |cut: usize| {
+        reminder_envelope(&request.with_contexts(k, Some(cut), false).envelope()).len() <= bytes
+    };
+    if !fits(1) {
+        return None;
+    }
+    let (mut low, mut high) = (1, longest);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Some(low)
 }
 
 /// What a valid reply says.
@@ -274,10 +458,19 @@ pub(crate) enum Reading {
         hint: String,
         /// The cited row's name.
         row: Option<String>,
-        /// The option's changes and explanation, when it passed every check; an option that
-        /// fails one is dropped alone and the hint stays.
-        option: Option<(Vec<Change>, String)>,
+        /// The option's changes, explanation and sources, when it passed every check; an
+        /// option that fails one is dropped alone and the hint stays.
+        option: Option<Advice>,
     },
+}
+
+/// A reminder's option that passed every check: its changes, its explanation and where the
+/// literals that come from entry text come from (plan 3c-2, step 7).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Advice {
+    pub changes: Vec<Change>,
+    pub explanation: String,
+    pub sources: Vec<Source>,
 }
 
 #[derive(Deserialize)]
@@ -342,18 +535,20 @@ pub(crate) fn read(text: &str, request: &ReminderRequest) -> Result<Reading, Inv
     if !reply.relevant {
         return Ok(Reading::Nothing);
     }
-    let row = match reply.row {
+    let cited = match &reply.row {
         None => None,
         Some(id) => Some(
             request
                 .rows
                 .iter()
-                .find(|row| row.row.id == id)
-                .map(|row| row.row.name.clone())
+                .find(|row| &row.row.id == id)
                 .ok_or(Invalid::Decode)?,
         ),
     };
-    let option = reply.option.and_then(|option| change_set(request, option));
+    let row = cited.map(|row| row.row.name.clone());
+    let option = reply
+        .option
+        .and_then(|option| change_set(request, option, cited));
     Ok(Reading::Hint {
         hint: reply.hint,
         row,
@@ -362,10 +557,18 @@ pub(crate) fn read(text: &str, request: &ReminderRequest) -> Result<Reading, Inv
 }
 
 /// The option's changes, or `None` when any change fails a check (references, provenance,
-/// checked evaluation, an enum option the pin declares, a kind that suits the target).
-fn change_set(request: &ReminderRequest, option: RawOption) -> Option<(Vec<Change>, String)> {
+/// checked evaluation, an enum option the pin declares, a kind that suits the target). The
+/// numbers of the `cited` row's entry text, as sent, count as provenance; a literal that only
+/// they admit is given its source.
+fn change_set(
+    request: &ReminderRequest,
+    option: RawOption,
+    cited: Option<&RowDraft>,
+) -> Option<Advice> {
     let checks = request.checks();
+    let context = cited.and_then(|row| row.context());
     let mut changes = Vec::new();
+    let mut entry_literals: Vec<u64> = Vec::new();
     for raw in option.changes {
         changes.push(match raw {
             RawChange::Expr(raw) => {
@@ -373,7 +576,7 @@ fn change_set(request: &ReminderRequest, option: RawOption) -> Option<(Vec<Chang
                 if target.kind != ItemKind::Integer {
                     return None;
                 }
-                let allowed = request.allowed(&target);
+                let allowed = request.allowed(&target, context.map(|(_, text)| text));
                 let candidate = output::candidate(
                     serde_json::json!({"expr": raw.expr, "explanation": option.explanation}),
                     &checks,
@@ -386,6 +589,15 @@ fn change_set(request: &ReminderRequest, option: RawOption) -> Option<(Vec<Chang
                     value.map_or_else(|| label.to_owned(), |value| format!("{label} ({value})"))
                 };
                 let shown = output::render(&candidate.expr, &name);
+                if context.is_some() {
+                    let own = request.allowed(&target, None);
+                    for literal in output::literals(&candidate.expr) {
+                        let magnitude = literal.unsigned_abs();
+                        if !own.contains(&magnitude) && !entry_literals.contains(&magnitude) {
+                            entry_literals.push(magnitude);
+                        }
+                    }
+                }
                 Change {
                     address: target.address.to_owned(),
                     before: target.value,
@@ -408,7 +620,81 @@ fn change_set(request: &ReminderRequest, option: RawOption) -> Option<(Vec<Chang
             }
         });
     }
-    Some((changes, option.explanation))
+    let sources = context
+        .map(|(binding, text)| sources(binding, text, &entry_literals))
+        .unwrap_or_default();
+    Some(Advice {
+        changes,
+        explanation: option.explanation,
+        sources,
+    })
+}
+
+/// The most characters of an excerpt, "…" included.
+const EXCERPT_CHARACTERS: usize = 64;
+
+/// One source per literal of `literals`: the first place `text` spells it in digits.
+fn sources(binding: &EntryBinding, text: &str, literals: &[u64]) -> Vec<Source> {
+    let spans = lexer::phrase_number_spans(text);
+    literals
+        .iter()
+        .filter_map(|literal| {
+            let (_, start, end) = spans.iter().find(|(value, _, _)| value == literal)?;
+            Some(Source {
+                entry: binding.name.clone(),
+                badge: binding.badge.clone(),
+                excerpt: excerpt(text, *start, *end, binding.cut),
+            })
+        })
+        .collect()
+}
+
+/// The number at characters `start..end` of `text` with the words around it, at most 64
+/// characters including a "…" on each cut side (`cut`: the text itself goes on past its end):
+/// as many characters as fit, cut at word boundaries where one lies between the cut and the
+/// number and at a character otherwise; any whitespace as a space.
+fn excerpt(text: &str, start: usize, end: usize, cut: bool) -> String {
+    let chars: Vec<char> = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let length = chars.len();
+    let more = |to: usize| to < length || cut;
+    let cost = |from: usize, to: usize| (to - from) + usize::from(from > 0) + usize::from(more(to));
+    let (mut from, mut to) = (start, end);
+    loop {
+        let mut grew = false;
+        if from > 0 && cost(from - 1, to) <= EXCERPT_CHARACTERS {
+            from -= 1;
+            grew = true;
+        }
+        if to < length && cost(from, to + 1) <= EXCERPT_CHARACTERS {
+            to += 1;
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
+    let word_start = |at: usize| at == 0 || chars[at - 1] == ' ';
+    let word_end = |at: usize| at == length || chars[at] == ' ';
+    if !word_start(from)
+        && let Some(at) = (from..=start).find(|at| word_start(*at))
+    {
+        from = at;
+    }
+    if !word_end(to)
+        && let Some(at) = (end..=to).rev().find(|at| word_end(*at))
+    {
+        to = at;
+    }
+    let body: String = chars[from..to].iter().collect();
+    format!(
+        "{}{}{}",
+        if from > 0 { "\u{2026}" } else { "" },
+        body.trim(),
+        if more(to) { "\u{2026}" } else { "" }
+    )
 }
 
 #[cfg(test)]

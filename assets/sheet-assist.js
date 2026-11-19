@@ -936,9 +936,12 @@ function showReminder(unit, token, answer) {
   box.replaceChildren(...lines, ...(options.length > 0 ? [list] : []), dismiss);
 }
 
+const nonEmptyText = (value) => text(value) && value.length > 0;
+
 /** An option as an interpretation or a reminder offers it: one to four changes, each with its
- * target, the value now and the value it would write. An option whose shape is not exactly
- * that is not shown. */
+ * target, the value now and the value it would write, and the entry text behind its literals
+ * (an array, empty for an interpretation). An option whose shape is not exactly that is not
+ * shown. */
 function validOption(option) {
   return (
     record(option) &&
@@ -949,7 +952,28 @@ function validOption(option) {
     option.changes.length <= 4 &&
     option.changes.every(
       (change) => record(change) && [change.target, change.before, change.expression, change.after].every(text),
+    ) &&
+    Array.isArray(option.sources) &&
+    option.sources.every(
+      (source) => record(source) && [source.entry, source.badge, source.excerpt].every(nonEmptyText),
     )
+  );
+}
+
+/** The badges that need no warning: the entry text is the catalogue owner's or was reviewed. */
+const PLAIN_BADGES = new Set(['Owner-written', 'Reviewed extraction']);
+
+/** One source line: the entry a number of the option comes from and the words around it,
+ * with the badge unless the text is owner-written or reviewed. Text nodes only. */
+function sourceLine(source) {
+  const badge = PLAIN_BADGES.has(source.badge) ? '' : ` (${source.badge.toLowerCase()})`;
+  return element(
+    'span',
+    { class: 'assist-source' },
+    'from ',
+    element('bdi', {}, source.entry),
+    `${badge}: `,
+    element('bdi', {}, source.excerpt),
   );
 }
 
@@ -971,6 +995,7 @@ function optionItem(unit, token, option, reminder) {
   const item = element('li', {});
   lines.forEach((line, n) => item.append(n > 0 ? '; ' : '', line));
   item.append(' \u00b7 ', element('bdi', { class: 'assist-explanation' }, option.explanation), ' ', use);
+  option.sources.forEach((source) => item.append(element('br', {}), sourceLine(source)));
   return item;
 }
 
