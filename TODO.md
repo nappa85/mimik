@@ -144,10 +144,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- Remaining LAN and multi-device scope to support.
-- Exact editions for D&D, Pathfinder (remaster or not), Vampire and MÖRK BORG.
-- When that work starts: print/export priorities, UI and answer languages, acceptable latency,
-  situation input, first-release features, games after the POC.
+- When that work starts: print/export priorities, acceptable latency, situation input,
+  first-release features, games after the POC; the language model (PROD-24: one language per
+  table chosen by the owner, or per user).
 
 ## Other next actions
 
