@@ -633,7 +633,7 @@ stated, not the dev host's 1 s.
 
 Built; described in [assisted-entry.md](assisted-entry.md#reminders) and
 [model-runtime.md](model-runtime.md) ("Prompt cache and reminders"). Remaining, all live and none
-done: on both paths (CPU at 2 threads in the day; the GPU at night or the weekend, fan read
+done: on both paths (CPU any time; the GPU at night or the weekend, fan read
 first) run the reminder relevance class (`tools/assist_eval.py run-reminder`, 8 synthetic cases, a
 smoke check only) and compare the reminder time and the extra wait of a scribble reading right
 after one with the page's estimates; re-run calibration with `--cache-ram` on (the flag is in
@@ -672,8 +672,7 @@ counts its whole prompt until a completed one shows its system message cached an
 part afterwards, a scribble reading admitted behind a reminder may wait Q plus that term, and a
 failed cache check switches reminders off on both paths (the GPU re-prime is gone).
 
-Remaining (live; GPU outside the weekday window with the fan on manual, CPU at 2 threads allowed
-in the window):
+Remaining (live; GPU outside the weekday window with the fan on manual, CPU any time):
 
 - `calibrate` on both paths shows reminders available with the extra wait.
 - The cache tool with priming, samples, three or more interpretations with long replies, then a
