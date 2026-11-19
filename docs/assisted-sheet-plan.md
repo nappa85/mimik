@@ -635,7 +635,7 @@ Built; described in [assisted-entry.md](assisted-entry.md#reminders) and
 [model-runtime.md](model-runtime.md) ("Prompt cache and reminders"). Done live (`results.md`,
 3c-1c live checks): calibration with `--cache-ram` on both paths, the reply after a restore
 against a fresh one, calibration then a reminder then an interpretation, the reminder cases on
-the GPU. Remaining: the reminder cases on the CPU path; the CPU restore constant
+both paths. Remaining: the CPU restore constant
 (`RESTORE_S_PER_MIB`) from a measured entry load time (run the cache tool with `--verbosity`);
 RAM headroom (model plus the sized cache) on the documented minimum host (an Ubuntu 22.04 VM;
 the preflight counts the cache against `MemAvailable`, no process memory figure measured); a
