@@ -685,7 +685,9 @@ set). Remaining:
 ### 4 Suggestions and "Which Sword?"
 
 Scope: §1.6, linking rules 3 and 4, the suggest route and the combobox. One branch,
-failing-first tests, implementation review, merge. Draft 2026-11-19, under review.
+failing-first tests, implementation review, merge. Plan reviewed 2026-11-19 (Opus, approve with
+changes, applied). Owner decisions 2026-11-19: the substring tier matches in memory; the key
+is cleared when the name's norm changes; the choice among duplicates is stored on new rows too.
 
 **Built in 3a:** the `catalogue` member (`{id, entry_type?, key}`, `values::key_property`);
 `campaigns::catalogue::entry_links`/`rows_links` (rules 1 and 2) over `catalogue_entry_names`
@@ -693,119 +695,167 @@ and `names::eligible` (one query per list, `QUERY_BUDGET`); `text_fold::name_nor
 `read::latest_sealed`, browse and FTS search; `unit.link` and the module's `showLink`; the key
 property refused on every route (`rows::cell` 400) and kept by every save (`values::row_item`).
 
-**New:** rules 3 and 4 on the page and in the JSON answer; writing and clearing the key; the
-"Which one?" route; the suggest route and its name cache; the combobox.
+**New:** rules 3 and 4 on the page and in the JSON answer; writing and clearing the key (cell
+and new-row routes); the "Which one?" route; the suggest route and its caches; the combobox.
 
 1. **Linking outcome.** `rows_links` returns one outcome per row: `Linked(EntryLink)`,
    `Several` or `None`. `None` only when the lookup ran and found no eligible match; a failed
-   or timed-out lookup gives no outcome for the list (never "Not in the catalogue"). A key
-   that resolves to no eligible entry of an equal norm is ignored (dangling: no link, no warning
-   of its own) and rules 2-4 apply. `EntryLinks` stays as it is for reminders.
-2. **Page markup** (saved rows with a non-blank name, where linking runs; no name echoed). Rule
-   3: "Several catalogue entries have this name." with a "Which one?" link
-   (`.../cells/{f}/{r}/{p}/which`, editors only). Rule 4: "Not in the catalogue." with a Browse
-   link to the catalogue filtered by the member's entry type (new tab). Both tied to the
-   control by `aria-describedby`. A page-size fixture: the widest list with a member, every row
-   warned; the existing worst-case fixtures re-run. The JSON answer gains `unit.match`:
-   `{kind: "several", which}`, `{kind: "none", browse}` or `null`; the module checks both hrefs
-   against fixed patterns (as `ENTRY_PATH`).
+   or timed-out lookup, or no sealed version (`latest_sealed` `None`), gives no outcome for the
+   list (never "Not in the catalogue"). A key that resolves to no eligible entry of an equal
+   norm is ignored (dangling: no link, no warning of its own) and rules 2-4 apply.
+   `EntryLinks` stays as it is for reminders.
+2. **Page markup** (saved rows with a non-blank name, where linking runs; no name echoed).
+   Rule 3: "Several catalogue entries have this name." with a "Which one?" link
+   (`.../cells/{f}/{r}/{p}/which?base=<revision>`, editors only). Rule 4: "Not in the
+   catalogue." with a Browse link to the catalogue filtered by the member's entry type (new
+   tab); a name that matches only a retired entry or one of another type reads "No current
+   entry of this type has this name." Both are tied to the control by `aria-describedby`, and
+   the module's `describe()` keeps those IDs. A page-size fixture: the widest list with a
+   member, every row warned; the existing worst-case fixtures re-run. The JSON answer gains
+   `unit.match`: `{kind: "several", which}`, `{kind: "none", browse}` or `null`; the module
+   checks both hrefs against fixed patterns (as `ENTRY_PATH`).
 3. **Writing the key (D-R)** on `cells/{f}/{r}/{p}`: `Unit::keys` admits an optional `entry`
-   only on a catalogue-backed property (else 400); `entry` must be a registry slug (400). After
+   only on a catalogue-backed property (else 400); `Pairs::admit` is exact-count, so `entry`
+   is a second admitted key set; an optional name property also posts `set=present`, and
+   `entry` with `set=absent` is 400; `entry` must be a registry slug (400). After
    `private_read_base`, under the request's `JOBS` permit, one read transaction (auth recheck,
    `latest_sealed` of the pin's pair, `names::eligible` under `QUERY_BUDGET`) requires an
    eligible entry with that key whose norm equals `name_norm(value)`, else 422 "That entry no
    longer has this name in the catalogue." `rows::cell` sets name and key in one patch: one
-   revision, no note (D-T); equal name and key is "No change" (D-U); staleness compares name and
-   key between `base` and the latest. The key stays advisory: a seal between check and write
-   can leave it dangling, which only shows no link.
-4. **Clearing the key.** One helper, `keeps_key(saved_name, new_name)`, used by `rows::cell`
+   revision, no note (D-T); equal name and key is "No change" (D-U); staleness compares name
+   and key between `base` and the latest. The key stays advisory: a seal between check and
+   write can leave it dangling, which only shows no link.
+4. **New rows (owner decision).** The new-row route admits the same optional `entry` on lists
+   whose name property has a catalogue member, checked as in item 3 against the new row's name
+   (422 when it no longer matches); the row is created with name and key in one revision. The
+   route stays PRG (ASSIST-22). The quick-add line is out of scope ("3 torches" parsing).
+5. **Clearing the key.** One helper, `keeps_key(saved_name, new_name)`, used by `rows::cell`
    (without `entry`) and `values::row_item` (full form): a save whose name's norm differs from
    the saved name's removes the key in the same revision; recasing keeps it.
-   `every_save_keeps_the_stored_key_and_new_rows_leave_it_absent` is rewritten for the new rule
-   (a behaviour change, not a weakened test).
-5. **"Which one?" route** `GET /private-sheets/{id}/cells/{f}/{r}/{p}/which`, under the
+   `every_save_keeps_the_stored_key_and_new_rows_leave_it_absent` is rewritten for the new
+   rule (a behaviour change, not a weakened test).
+6. **"Which one?" route** `GET /private-sheets/{id}/cells/{f}/{r}/{p}/which?base=…`, under the
    `runtime` layer like the catalogue pages (`JOBS`, 503 when busy), reading the current
    revision as R6/R25 (two transactions, pin validation outside the mutex, a save in between
-   409). Editor right (403); a malformed address 400; other refusals the uniform catalogue 403
-   (D11); a row no longer under rule 3 answers 404 with a link back. Lists at most 50 eligible
-   candidates of that norm by (name, key) as "name · type · catalogue title", each a form
-   posting `csrf`, `base`, `value` (the saved name) and `entry` to the cell route, so it works
-   without JS; more than 50 shows Browse. With `Accept: application/json` it answers the list
-   and the module shows it inline under the warning; choosing posts through the unit's flight.
-   Strings escaped, in `<bdi>`.
-6. **Suggest route** `GET /private-sheets/{id}/suggest/{f}/{p}?q=…[&typo=1]`, JSON only (the
-   exact `Accept`, ASSIST-22), outside the `runtime` layer, inside `signed_in`, no `JOBS`.
-   Order: raw query ≤ 1 KiB; `q` trimmed to 2-64 scalars and ≤ 256 bytes, `f`/`p` in the index
-   grammar, unknown or repeated parameters refused (all 400, before the session); `SUGGEST`
-   (`Semaphore(4)`) `try_acquire`, 429 at saturation; request auth; `run_bounded_auth`
-   (`AUTH_WORKERS` busy: 503), one read transaction: recheck, `authorize_read`, the sheet's
-   identity (supported runtime pin, schema 1), the `definition_versions` row (id, version,
-   game, edition, hash) still matching, `latest_sealed`, recheck. Pin facts (per (f, p): the
-   member's catalogue id and entry type) come from a small LRU keyed by (pin id, content hash);
-   a miss validates the pin (`validate_for_write`) in `spawn_blocking`. A corrupt, native or
-   unsupported pin, (f, p) without a member, an unlinked catalogue, another pair or no sealed
-   version: one uniform 403 `{"status": "unavailable"}`. Answers carry the strict sheet CSP:
-   `{status: "ok", suggestions: [{name, key, type, duplicate}], more, cut}`, at most 8.
-7. **Name cache.** One process-wide LRU bounded at 32 MiB, keyed by (sealed version id,
-   content hash: `latest_sealed` gains the hash), so a new seal is a new key and old ones age
-   out; staleness is bounded by reading `latest_sealed` in every request. Value: an `Arc` of the
-   type labels and, per entry, key, name, `name_norm(name)`, its length in scalars, type index
-   and retired flag; no description text. A miss reads `catalogue_entries` of that version in
-   the same transaction (`QUERY_BUDGET`) and computes the norms in `spawn_blocking`. Bytes are
-   charged per entry (string capacities plus fixed overhead), least recently used evicted until
-   it fits; an entry over the budget serves the request and is not kept. A `std::sync::Mutex`
-   held only to get or insert an `Arc`; concurrent misses may both load (at most 4, the pool).
-8. **Matching** in `spawn_blocking`, outside the DB mutex; order: tier, then (norm, name, key).
+   409). The row index is mapped to its host at `base` (ASSIST-6); if that host is gone or its
+   name's norm changed since, 404 with a link back. Editor right (403); a malformed address
+   400; other refusals the uniform catalogue 403 (D11); a row no longer under rule 3 answers
+   404 with a link back. Lists at most 50 eligible candidates of that norm by (name, key).
+   Duplicates share name, catalogue and usually type, so each candidate shows what tells them
+   apart: its key, the first characters of its entry context (`read::entry_context`, cut by
+   `cut_text`) and an "Open entry" link (new tab, `rel=noopener`). Each is a form posting
+   `csrf`, `base`, `value` (the saved name), `set=present` when the property is optional, and
+   `entry` to the cell route, so it works without JS; more than 50 shows Browse. With `Accept:
+   application/json` it answers the list and the module shows it inline under the warning;
+   choosing posts through the unit's flight. Strings escaped, in `<bdi>`.
+7. **Suggest route** `GET /private-sheets/{id}/suggest/{f}/{p}?q=…[&typo=1]` (the new-row
+   name uses the same route with its list and property), JSON only (the exact `Accept`,
+   ASSIST-22), outside the `runtime` layer, inside `signed_in`. Order: raw query ≤ 1 KiB; `q`
+   trimmed to 2-64 scalars and ≤ 256 bytes, `f`/`p` in the index grammar, unknown or repeated
+   parameters refused (all 400, before the session); `SUGGEST` (`Semaphore(4)`)
+   `try_acquire`, 429 at saturation; request auth; `run_bounded_auth` (`AUTH_WORKERS` busy:
+   503), one read transaction that reads only the identity and pin columns (no raw sheet load
+   per keystroke): recheck, `authorize_read`, the sheet's identity (supported runtime pin,
+   schema 1), the `definition_versions` row (id, version, game, edition, hash) still matching,
+   `latest_sealed`, recheck. The owned `SUGGEST` permit moves into every `spawn_blocking`
+   closure the route starts (as `run_bounded_auth` does with its own), so an aborted request
+   holds it until its work ends.
+   - **Pin facts** (per (f, p): the member's catalogue id and entry type) come from a small
+     LRU keyed by the hash of the pin bytes validated. A hit runs without `JOBS`. A miss takes
+     the runtime permit with `definitions::admit()` (try only, 503 when busy, so R6 holds;
+     recorded in `decisions.md`) and validates the pin (`validate_for_write`) in
+     `spawn_blocking`.
+   - A corrupt, native or unsupported pin, (f, p) without a member, an unlinked catalogue,
+     another pair or no sealed version: one uniform 403 `{"status": "unavailable"}`.
+   - Answers carry the strict sheet CSP and an "explained" marker like `AssistantAnswer`, so
+     `auth::normalize` keeps their JSON bodies (429 keeps its `Retry-After`): `{status: "ok",
+     suggestions: [{name, key, type, duplicate, hint}], more, cut}`, at most 8 (`hint`: for a
+     duplicate, the first characters of its entry context).
+8. **Name cache.** One process-wide LRU bounded at 32 MiB, keyed by (sealed version id,
+   content hash; `latest_sealed` gains the hash), so a new seal is a new key and old ones age
+   out; staleness is bounded by reading `latest_sealed` in every request. Value: an `Arc` of
+   the type labels and, per entry, key, name, norm, its length in scalars, type index and
+   retired flag; no description text. A miss reads `catalogue_entries` joined with the stored
+   norms of `catalogue_entry_names` (the latest sealed version's, so suggestions agree with
+   linking), with the browse reads' `guarded(name, LABEL_BYTES)` guard, in the same
+   transaction (`QUERY_BUDGET`). Bytes are charged per entry (string capacities plus fixed
+   overhead), least recently used evicted until it fits; an entry over the budget serves the
+   request and is not kept. A `std::sync::Mutex` held only to get or insert an `Arc`;
+   concurrent misses may both load (at most 4, the pool).
+9. **Matching** in `spawn_blocking`, outside the DB mutex; order: tier, then (norm, name, key).
    Every tier keeps eligible entries only (not retired, of the member's entry type). `q` goes
    through `name_norm`, the linking rule: no new folding, no language-specific rule (PROD-24).
-   (a) the norm starts with `q`; (b) the norm contains `q` (question 1); (c) only with `typo=1`
-   and `q` of 3 or more scalars: norms within ±2 scalars of length, `strsim::osa_distance`
-   (transposition 1), distance ≤ 1 for 3-5 scalars and ≤ 2 from 6, at most 20,000 comparisons
-   and 20 ms (deadline checked every 256), either limit setting `cut`. `duplicate` is true when
-   more than one eligible entry shares the norm; picking one sends `entry` with the save.
-9. **Combobox** (`assets/sheet-assist.js`) on saved name cells of catalogue-backed properties:
-   the input gets `role="combobox"`, `aria-autocomplete="list"`, `aria-expanded`,
-   `aria-controls="suggest-{f}-{r}-{p}"`, `aria-activedescendant`, `autocomplete="off"`; a `ul
-   role="listbox"` of `li role="option"` with IDs `suggest-{f}-{r}-{p}-{i}` and `aria-selected`,
-   names in `<bdi>` by `textContent`. Arrow keys move; while open with an active option Enter
-   selects (`preventDefault`: fills the name, does not save), otherwise Enter saves as today;
-   Escape and Tab close; leaving still saves (D-AA). No request while composing (`isComposing`
-   or keyCode 229), a query on `compositionend`; 150 ms debounce; one `AbortController` per cell
-   aborted by the next query; a generation counter (an answer is drawn only for the current
-   generation and the current text); 5 s timeout; 429, 503 or a failure closes the list
-   silently. A duplicate pick holds `entry` (a hidden input) until the next save; typing drops
-   it. "Did you mean…?" (a button in the rule-4 warning and as the empty-list item) runs
-   `typo=1`. `ATTRIBUTES` and its Rust lint test gain the new attributes. Without JS: no
-   suggestions (D-G); the warnings, Browse and "Which one?" work.
-10. **Libraries** (no new crate in the release tree; a DEP entry): `strsim =0.11.1` (MIT, MSRV
-    1.56; already in the release tree through clap) for the distance; `hashlink =0.10.0` (MIT
-    OR Apache-2.0, MSRV 1.65; already there through rusqlite, moves with it) for the LRU
-    (`LruCache`, `remove_lru` for byte accounting). Not taken: `triple_accel` and `rapidfuzz`
-    (new, no gain at these sizes); `lru` (dev-only today, would add itself and `hashbrown`
-    0.17), `quick_cache` (new), `moka` (async, heavy).
+   The 2-64 scalar bound (3 or more for the typo pass) applies to the folded `q` too (NFKC
+   expands, invisibles vanish); an empty fold is 400. Tiers: (a) the norm starts with `q`; (b)
+   the norm contains `q` (owner decision: in memory, not FTS); (c) only with `typo=1`: norms
+   within ±2 scalars of length, `strsim::osa_distance` (transposition 1), distance ≤ 1 for 3-5
+   scalars and ≤ 2 from 6, within 20 ms (the deadline checked before every comparison, a clock
+   seam for tests), reaching it setting `cut`. No comparison cap: a version holds at most
+   6,144 entries (`MAX_ENTRIES`). `duplicate` is true when more than one eligible entry shares
+   the norm; picking one sends `entry` with the save.
+10. **Combobox** (`assets/sheet-assist.js`) on saved and new-row name cells of catalogue-backed
+    properties:
+    - Markup: the input gets `role="combobox"`, `aria-autocomplete="list"`, `aria-expanded`,
+      `aria-controls="suggest-{f}-{r}-{p}"`, `aria-activedescendant`, `autocomplete="off"`; a
+      `ul role="listbox"` of `li role="option"` with IDs `suggest-{f}-{r}-{p}-{i}` (by index,
+      never by key) and `aria-selected`, names in `<bdi>` by `textContent`; a duplicate's
+      accessible name includes its hint. A polite status line gives the count ("8
+      suggestions", "No suggestions"). `ATTRIBUTES` and its Rust lint test gain the new
+      attributes.
+    - Keys: arrows move; while open with an active option Enter selects (`preventDefault`:
+      fills the name, does not save), otherwise Enter saves as today; Escape and Tab close;
+      leaving still saves (D-AA).
+    - Pointer: options take `pointerdown` with `preventDefault`, so focus stays in the input
+      and the focusout save never sends the half-typed text.
+    - Requests: none while composing (`isComposing` or keyCode 229), a query on
+      `compositionend`; 150 ms debounce; one `AbortController` per cell, aborted by the next
+      query; a generation counter (an answer is drawn only for the current generation and the
+      current text); 5 s timeout; 429, 503 or a failure closes the list silently.
+    - A duplicate pick holds `entry` (a hidden input, never rendered empty) until the next
+      save; typing drops it; it is removed only on a 200 answer, and a 409 or 422 drops it
+      (the `entryKey`/`answerKey` acks account for it).
+    - "Did you mean…?" (a button in the rule-4 warning and as the empty-list item) runs
+      `typo=1`. Without JS: no suggestions (D-G); the warnings, Browse and "Which one?" work.
+11. **Libraries** (no new crate in the release tree; a DEP entry): `strsim =0.11.1` (MIT, MSRV
+    1.56; already in the release tree through clap) for the distance; `hashlink` 0.10 (MIT OR
+    Apache-2.0, MSRV 1.65; already there through rusqlite) for the LRUs (`LruCache`,
+    `remove_lru` for byte accounting), with a caret requirement so it follows rusqlite (a
+    duplicate is caught by `cargo deny`). Not taken: `triple_accel` and `rapidfuzz` (new, no
+    gain at these sizes); `lru` (dev-only today, would add itself and `hashbrown` 0.17),
+    `quick_cache` (new), `moka` (async, heavy).
 
 **Tests (failing first):**
 - Confinement: forged (f, p), a property without a member, an unlinked catalogue, the same
   catalogue id in another game, native, unsupported and corrupt pins: the uniform 403 on
-  suggest and "Which one?", 400 on the cell route's `entry`.
+  suggest and "Which one?", 400 on the cell and new-row routes' `entry`.
 - The type filter on prefix, substring, typo, "Which one?" and `entry`.
 - Queries: a 2-scalar prefix; distance 1 and 2 (substitution, transposition, length ±2; ±3
   excluded); diacritics and folding (é, ß→ss, full width, Hangul, a CJK substring).
-- Bounds: 1-scalar, 65-scalar and 257-byte queries 400; the comparison cap and the 20 ms cut
-  (a clock seam) set `cut`; cache bytes stay within budget under eviction, an oversized entry
-  is not kept.
-- Permits: with `JOBS` held suggest answers 200; a fifth concurrent request 429.
+- Bounds: 1-scalar, 65-scalar and 257-byte queries 400; a query that folds past 64 scalars or
+  to nothing 400; the 20 ms cut (clock seam) sets `cut`; cache bytes stay within budget under
+  eviction, an oversized entry is not kept.
+- Permits: with `JOBS` held, suggest answers 200 on a pin-facts hit and 503 on a miss; a fifth
+  concurrent request 429; a request aborted mid-typo-pass keeps its permit until the pass ends.
+- Cache keying: two sheets on different pins with the same (f, p) get different pin facts; a
+  version sealed between two requests is served from the new key.
+- Error bodies: the 403 and 429 JSON bodies survive `auth::normalize`.
 - Escaping: `<`, `"` and RTL controls in names, in JSON, page and DOM.
 - Duplicates: choosing stores the key and the link persists across reload, Move and Undo;
-  renaming (norm change) clears the key in one revision, recasing keeps it; a dangling key shows
-  no link and rules 2-4 apply.
-- Rules 3 and 4: a failed lookup shows no "Not in the catalogue"; `unit.match` in the answer.
-- Staleness: a version sealed between two requests is served from the new key.
+  renaming (norm change) clears the key in one revision, recasing keeps it; a dangling key
+  shows no link and rules 2-4 apply; an optional name property posts `set=present`, `entry`
+  with `set=absent` 400; a new row's duplicate pick creates it with its key in one revision, a
+  stale pick 422.
+- Rules 3 and 4: a failed lookup and no sealed version show no "Not in the catalogue"; a name
+  matching only a retired or other-type entry gets its own wording; `unit.match` in the
+  answer; `aria-describedby` keeps the warning IDs after `describe()`.
+- "Which one?": a stale `base` (a Move in another tab) answers 404, never another row's
+  candidates; duplicates are told apart (key, context, Open entry).
 - Browser (`tools/assist_model_browser.py` or a new `tools/suggest_browser.py` on
   `browser_smoke.py`), Chromium 1280 × 720 and 390 × 844, with and without JS: keyboard
-  selection, Enter not submitting while open, IME (CDP `Input.imeSetComposition`), abort on
-  fast typing, the "Which one?" page and the inline list, Did-you-mean, no CSP violation, no
-  overflow.
+  selection; mouse and touch picks (390 × 844) saving the picked name only; Enter not
+  submitting while open; the status line; IME (CDP `Input.imeSetComposition`); abort on fast
+  typing; the "Which one?" page and the inline list; a new-row duplicate pick; Did-you-mean; no
+  CSP violation, no overflow.
 - p95 ≤ 50 ms (prototype tier): `tools/suggest_profile.py` (with a self-test) seeds a synthetic
   catalogue of 6,144 entries through the CLI (names up to 100 scalars, shared prefixes, mixed
   scripts, several types) and times 1,000 warm requests per mix (2-scalar prefix, substring,
@@ -815,35 +865,27 @@ property refused on every route (`rows::cell` 400) and kept by every save (`valu
 
 **Docs:** `assisted-entry.md` "Catalogue links" (rules 3 and 4, the key written and cleared,
 routes, combobox); `catalogues.md` "Reading through a sheet" (suggest, "Which one?", the
-cache); `runtime-definition-contract.md` (the cell route writes the key); `decisions.md`
-(status orders, typo thresholds, clear on norm change, the DEP entry); `limitations.md` (CAT-L9
-replaced, the items below). §1.6 and this section are deleted at merge.
+caches); `runtime-definition-contract.md` (the cell and new-row routes write the key);
+`decisions.md` (status orders, typo thresholds, clear on norm change, R6 on pin-facts misses,
+the DEP entry); `limitations.md` (CAT-L9 replaced: a dangling key shows no link; the items
+below). §1.6 and this section are deleted at merge.
 
 **Limitations to record:** cache timing shows whether a catalogue version was read recently by
 another reader of the same (game, edition), possibly another campaign (low value, accepted); the
 pool of 4 has no per-account fairness (one player can starve others' suggestions; saves are
 unaffected); a key can dangle after a newer seal; the typo pass misses names more than 2
-scalars longer or shorter, and scripts where one typo spans several scalars; a new row's
-duplicate pick stores the name only ("Which one?" follows); the history diff shows the key
-change under the key property's label.
+scalars longer or shorter, and scripts where one typo spans several scalars; the history diff
+shows the key change under the key property's label.
 
-**Open questions (recommended default first):**
-1. Tier (b): an in-memory substring match on the cached norms (the linking fold, matches inside
-   scripts without spaces, keeps the DB mutex off the keystroke path) or the FTS name index as
-   §1.6 says (a second fold rule, word prefixes of 3+ letters only).
-2. "A different name" clears the key: a different norm, or a different string.
-3. The combobox on the new-row name: no `entry` on the new-row route (the name only), or also
-   there.
+**Differs from §1.6:** tier (b) matches in memory, not through FTS (owner decision); no-JS
+"Which one?" is its own GET page (the sheet page's size bound holds); a pin-facts cache lets
+suggest run without `JOBS` on hits (a miss takes it, R6); duplicates show key, context and an
+Open entry link; the new-row route takes `entry` too; CAT-L9 says an unknown key warns, §1.6
+that a dangling key shows no link (the plan follows §1.6).
 
-**Differs from §1.6:** tier (b) as above; no-JS "Which one?" is its own GET page (the sheet
-page's size bound holds); a pin-facts cache replaces per-request pin validation so the route
-runs without `JOBS`; CAT-L9 says an unknown key warns, §1.6 that a dangling key shows no link
-(the plan follows §1.6).
-
-**Not verified yet:** the cost of pin validation and of the raw sheet load per request (assumed
-milliseconds); `strsim` speed at 64 × 66 scalars (bounded by the deadline); whether
-`history_diff` renders the key change acceptably; CDP IME emulation in the pinned browser
-container.
+**Not verified yet:** the cost of pin validation on a miss (assumed milliseconds); `strsim`
+speed at 64 × 66 scalars (bounded by the deadline); whether `history_diff` renders the key
+change acceptably; CDP IME emulation in the pinned browser container.
 
 ### 5 Docs, release scope, gate
 
