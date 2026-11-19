@@ -183,6 +183,11 @@ interpretations, and an interpretation restored after a reminder answers exactly
   model thinks for 166-849 tokens (10-56 s) and scored 8 of 8: Mimik keeps reasoning off.
   CPU (Granite 4.2 3B, 5 threads, the same flags): relevance right 5 of 8 (it calls every case
   relevant), row right 5 of 8; 9.5-13.3 s per reminder, 70 s for the first (cold).
+- **Entry-text cases** (3c-2, 2026-11-19, CPU, same model and flags, 10 cases): relevance right
+  8 of 10, row right 6 of 10; 6.7-10.0 s warm, 71 s cold. rm-09 (a number in the cited entry)
+  cites the right row but proposes no option; rm-10 cites the wrong row (the one whose entry
+  has the decoy 40) and proposes no option. So on the CPU the model gives hints from entry
+  text but never turned an entry number into an option. GPU run pending.
 
 ## Prompt cache with the checkpoint cap and GPU start-up, GPU path (3c-1b, 2026-11-18)
 
