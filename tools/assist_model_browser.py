@@ -76,10 +76,16 @@ def reminder_reply(envelope):
     decrease = envelope["decrease"]
     lost = decrease["before"] - decrease["after"]
     other = next(
-        field
-        for field in envelope["fields"]
-        if field["type"] == "integer" and field["id"] not in {"max_hp", decrease["id"]}
+        (
+            field
+            for field in envelope["fields"]
+            if field["type"] == "integer" and field["id"] not in {"max_hp", decrease["id"]}
+        ),
+        None,
     )
+    if other is None:
+        # The reminder prime before Ready (3c-1c) sends a decrease without fields.
+        return {"relevant": False, "row": None, "hint": "-", "option": None}
     return {
         "relevant": True,
         "row": None,
@@ -97,6 +103,18 @@ def reminder_reply(envelope):
             ],
             "explanation": f"matching the {lost} lost {MARKUP}",
         },
+    }
+
+
+def stream_usage(system):
+    """The usage of a streamed reply: the system message counts as cached (the fake's
+    `/tokenize` counts a token per 3 characters plus one, so the figure covers it)."""
+    cached = len(system) // 3 + 1
+    return {
+        "prompt_tokens": cached + 10,
+        "completion_tokens": 5,
+        "total_tokens": cached + 15,
+        "prompt_tokens_details": {"cached_tokens": cached},
     }
 
 
@@ -203,7 +221,9 @@ class FakeModel(BaseHTTPRequestHandler):
         stop_chunk = {
             "object": "chat.completion.chunk",
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            # As llama.cpp b12110 (server-task.cpp): Mimik's cache check after a reminder reads
+            # `prompt_tokens_details.cached_tokens` (3c-1c) and switches reminders off without it.
+            "usage": stream_usage(text_of(body["messages"][0]["content"])),
         }
         self.wfile.write(f"data: {json.dumps(stop_chunk)}\n\ndata: [DONE]\n\n".encode())
 

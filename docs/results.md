@@ -181,6 +181,8 @@ interpretations, and an interpretation restored after a reminder answers exactly
   llama-server with Mimik's flags including `--reasoning off`): relevance right 6 of 8, row
   right 5 of 8; 1.7-13.4 s per reminder (the first one cold). Without `--reasoning off` the
   model thinks for 166-849 tokens (10-56 s) and scored 8 of 8: Mimik keeps reasoning off.
+  CPU (Granite 4.2 3B, 5 threads, the same flags): relevance right 5 of 8 (it calls every case
+  relevant), row right 5 of 8; 9.5-13.3 s per reminder, 70 s for the first (cold).
 
 ## Prompt cache with the checkpoint cap and GPU start-up, GPU path (3c-1b, 2026-11-18)
 
