@@ -48,10 +48,10 @@ def heavy_allowed(now=None):
     return now.weekday() >= 5 or not 9 <= now.hour < 18
 
 
-def window_allows(threads, now=None):
-    """The machine schedule for small CPU runs: any thread count outside the weekday window,
-    at most 2 threads inside it."""
-    return heavy_allowed(now) or threads <= 2
+def window_allows(threads, now=None):  # noqa: ARG001 (kept for callers)
+    """The machine schedule for CPU runs: no thread cap at any time (owner decision
+    2026-11-19; the weekday window now limits the GPU only)."""
+    return True
 
 
 GPU_CUTOFF = (8, 55)  # a weekday GPU run must have ended by 08:55 (heavy work stops at 09:00)
@@ -107,6 +107,14 @@ def calibrate(args):
     binary = args.binary.resolve(strict=True)
     directory = fresh_directory(args.data)
     create_accounts(binary, directory, demo_passwords())
+    if args.reminders_on:
+        # The owner's stored choice: the CPU path primes reminders only when it is on at start.
+        import sqlite3
+
+        with sqlite3.connect(directory / "smoke.sqlite3") as db:
+            db.execute(
+                "INSERT INTO assistant_reminders(id,enabled,changed_by,changed_at) VALUES(1,1,1,1)"
+            )
     command = [
         str(binary),
         "--loopback",
@@ -131,7 +139,8 @@ def calibrate(args):
         text=True,
     )
     processes = [process]
-    guard(processes)
+    # The CPU path runs at any time; a run that may use the GPU keeps the weekday cutoff.
+    guard(processes, (lambda: True) if args.device == "cpu" else gpu_allowed)
     lines = []
     try:
         for line in process.stdout:
@@ -446,7 +455,7 @@ def server(args):
     args.models_dir = args.models_dir.resolve(strict=True)
     run = Server(args)
     processes = [run.process]
-    guard(processes)
+    guard(processes, gpu_allowed if args.gpu_device else lambda: True)
     out = {"mode": "server", "threads": args.threads}
     try:
         prime = run.chat(assist_eval._envelope({"note": "prime"}), 1)
@@ -660,6 +669,53 @@ def cache_steps(run):
     def prime():
         return timed(run, PREFIX, assist_eval._envelope({"note": "prime"}), 1)
 
+    def long_interpretation(n):
+        return timed(
+            run, PREFIX, assist_eval._envelope({"note": f"long case {n}"}), 400, schema=True
+        )
+
+    if getattr(run, "sequence", "") == "restore":
+        # 3c-1: a real case's full reply fresh (after the prime) and again after a reminder
+        # restored the prefix from the host-RAM cache, for three cases.
+        cases = json.loads((Path(__file__).parent / "assist-eval" / "cases.json").read_text())
+        steps = [("prime", prime)]
+        for n, case in enumerate(cases["cases"][:3], 1):
+            user = assist_eval._build_request_v2(case, cases["sheet"], limit=1024)["user"]
+
+            def real(user=user):
+                return timed(run, PREFIX, user, 352, schema=True)
+
+            steps += [
+                (f"I{n} fresh", real),
+                (f"R{n}", lambda n=n: reminder(n)),
+                (f"I{n}r after R{n}", real),
+            ]
+        out = [{"step": name, **step()} for name, step in steps]
+        for record in out:
+            if "r after" in record["step"]:
+                fresh = next(
+                    o for o in out if o["step"] == record["step"].split("r ")[0] + " fresh"
+                )
+                record["same_reply_as_fresh"] = record["reply"] == fresh["reply"]
+        return out
+
+    if getattr(run, "sequence", "") == "kept":
+        # 3c-1c: Mimik's start-up order (interpretation prime, reminder prime, two calibration
+        # samples), three interpretations with long replies, then a reminder: does the
+        # reminder entry survive?
+        kept = (
+            ("prime", prime),
+            ("R prime", lambda: timed(run, reminder_system(), reminder_user(0), 1)),
+            ("I sample 1", lambda: interpretation(1)),
+            ("I sample 2", lambda: interpretation(2)),
+            ("I long 1", lambda: long_interpretation(1)),
+            ("I long 2", lambda: long_interpretation(2)),
+            ("I long 3", lambda: long_interpretation(3)),
+            ("R after long", lambda: reminder(1)),
+            ("I after R", lambda: interpretation(3)),
+        )
+        return [{"step": name, **step()} for name, step in kept]
+
     short = (
         ("I1 cold", lambda: interpretation(1)),
         ("R1", lambda: reminder(1)),
@@ -710,13 +766,20 @@ def cache_variant(args, cache_ram, rep, log_path):
         guard(processes, lambda: window_allows(args.threads))
     try:
         prefix_n = run.tokenize(PREFIX)
+        reminder_n = run.tokenize(reminder_system())
         steps = judge(cache_steps(run), prefix_n)
+        for step in steps:
+            if step["step"] == "R after long":
+                n = step.get("cache_n") or 0
+                step["reuse_of_reminder_system"] = round(reuse_fraction(n, reminder_n), 3)
+                step["pass"] = passes(n, reminder_n)
     finally:
         run.stop()
     return {
         "cache_ram": cache_ram,
         "rep": rep,
         "prefix_tokens": prefix_n,
+        "reminder_system_tokens": reminder_n,
         "steps": steps,
         "log": cache_log_lines(log_path),
     }
@@ -752,6 +815,9 @@ def main(argv=None):
     cal.add_argument("--model", help="a model file other than the default Granite one")
     cal.add_argument("--sha256", help="its SHA-256 (required with --model)")
     cal.add_argument("--device", choices=["cpu", "auto"], help="Mimik's device (default auto)")
+    cal.add_argument(
+        "--reminders-on", action="store_true", help="store the owner's reminder choice as on"
+    )
     srv = commands.add_parser("server")
     srv.add_argument("--models-dir", type=Path, required=True)
     srv.add_argument("--runtime", type=Path, required=True)
@@ -771,7 +837,9 @@ def main(argv=None):
     che.add_argument("--reps", type=int, default=2)
     che.add_argument("--short", action="store_true", help="the shorter request sequence")
     che.add_argument("--verbosity", type=int, help="llama-server log verbosity (for sizes)")
-    che.add_argument("--sequence", choices=["min", "pair", "short", "full"], default="full")
+    che.add_argument(
+        "--sequence", choices=["min", "pair", "short", "full", "kept", "restore"], default="full"
+    )
     che.add_argument("--gpu-device", help="run the Vulkan build on this device (Vulkan0)")
     che.add_argument(
         "--ctx-checkpoints", type=int, help="the checkpoint cap (Mimik passes 4, 3c-1b)"
@@ -782,13 +850,11 @@ def main(argv=None):
         if args.gpu_device and not gpu_allowed():
             print(json.dumps({"refused": "GPU cutoff 08:55 on weekdays"}))
             return 2
-        if not window_allows(args.threads):
-            print(json.dumps({"refused": "weekday 09:00-18:00 allows at most 2 threads"}))
-            return 2
         print(json.dumps(cache(args), indent=2))
         return 0
-    if not heavy_allowed():
-        print(json.dumps({"refused": "weekday 09:00-18:00"}))
+    gpu = args.gpu_device if args.command == "server" else args.device != "cpu"
+    if gpu and not gpu_allowed():
+        print(json.dumps({"refused": "GPU cutoff 08:55 on weekdays"}))
         return 2
     result = calibrate(args) if args.command == "calibrate" else server(args)
     print(json.dumps(result, indent=2))

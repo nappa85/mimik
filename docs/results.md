@@ -151,6 +151,37 @@ the pinned CPU build and Granite 4.2 3B mounted read-only, the launcher's own fl
 (`--cache-ram 1280 --ctx-checkpoints 4`, 2 threads), real prompts (the pinned interpretation and
 reminder prefixes), greedy. Limits: one run, one host, short replies, the GPU path not run.
 
+## Reminders that fit, both paths (3c-1c live checks, 2026-11-19)
+
+Live inference, prototype tooling, release build of master `95764b0`, RX 6650 XT with the fan
+on manual 255 (07:40-07:55), CPU at 5 threads (08:00-08:15). Conclusion: with owner decision C
+reminders are **available on both paths of the dev host**, the reminder entry survives long
+interpretations, and an interpretation restored after a reminder answers exactly as a fresh one.
+
+- **Start-up in the app** (`calibrate`): GPU (`--device auto`, Qwen3.5-9B): ready 45 s after
+  the start line, priming 1,961 tokens in 10.7 s, B 4,096, N(B) 1,128, R 105 s, Q 112 s;
+  "reminders: run 140 s, extra wait 7 s verified, 14 s until then, restore 0.21 s". CPU
+  (`--device cpu --reminders-on`, Granite 4.2 3B, 5 threads): ready after 172 s, priming
+  1,979 tokens in 73 s, B 1,024, N(B) 280, R 215 s, Q 228 s; "reminders: run 330 s, extra wait
+  16 s verified, 72 s until then, restore 0.09 s".
+- **Reminder entry kept** (`cache --sequence kept`: interpretation prime, reminder prime, two
+  samples, three interpretations with 352-token reply bounds, a reminder, an interpretation;
+  Mimik's `--cache-ram` 1,015 MiB GPU / 1,280 MiB CPU, `--ctx-checkpoints 4`): the reminder
+  reused its whole system message (GPU 1,819 of 1,814 tokens, 2 of 2 reps, 1.3 s to first
+  token against 10.3 s cold; CPU 1,760 of 1,741, 6.0 s against 66 s) and the interpretation
+  after it its whole prefix. The models stopped at 77 (Qwen) and 17 (Granite) reply tokens, so
+  the entries were smaller than the bound allows.
+- **Reply after a restore** (`cache --sequence restore`: three cases of
+  `assist-eval/cases.json` with full replies, each fresh, then after a reminder): identical
+  replies 3 of 3 on each path (41-59 tokens). On the GPU, an interpretation right after
+  another interpretation of a different case reused only 1,318 of the 1,805 prefix tokens
+  (2 of 3; Qwen3.5's checkpoints, the hybrid layers' restore points), re-evaluating about 490
+  tokens (about 2.7 s, inside R); Granite on the CPU reused the whole prefix every time.
+- **Reminder cases** (`assist_eval.py run-reminder`, 8 synthetic cases, smoke check, GPU,
+  llama-server with Mimik's flags including `--reasoning off`): relevance right 6 of 8, row
+  right 5 of 8; 1.7-13.4 s per reminder (the first one cold). Without `--reasoning off` the
+  model thinks for 166-849 tokens (10-56 s) and scored 8 of 8: Mimik keeps reasoning off.
+
 ## Prompt cache with the checkpoint cap and GPU start-up, GPU path (3c-1b, 2026-11-18)
 
 Live inference, prototype tooling, RX 6650 XT, fan manual 255, evening (18:30-18:40).
@@ -175,7 +206,7 @@ dev host**, as on its CPU path (below).
   ready after 39.7 and 39.2 s; priming 1,961 tokens in 10.5 and 10.4 s; samples W 10.4-10.5 s
   (prompt 1,140-1,142 tokens in 5.9 s, 1,917 cached, 64 tokens in 4.5-4.6 s); B 4,096, N(B)
   1,128, R 105 s, D 1, Q 111 s, busy after expiry 6 s.
-- **Reminders unavailable:** both runs: "a scribble reading waiting behind a reminder and the
+- **Reminders unavailable (before 3c-1c; the rule changed, see the section above):** both runs: "a scribble reading waiting behind a reminder and the
   readings ahead of it could wait 129 s, more than the 111 s it may". With D 1, Q is R plus 6 s,
   so a reminder may cost at most 6 s, while the budget counts its whole prompt at the measured
   rate (about 16 s: the reminder system message plus N(B) at 5.2 ms per token) plus the GPU

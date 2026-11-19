@@ -235,16 +235,13 @@ class CacheMeasureTests(unittest.TestCase):
         self.assertIn("<data>", measure.reminder_user(1))
         self.assertNotEqual(measure.reminder_user(1), measure.reminder_user(2))
 
-    def test_the_window_allows_two_threads_only_in_the_weekday_day(self):
+    def test_cpu_runs_have_no_thread_cap_at_any_time(self):
         from datetime import datetime
 
         monday_noon = datetime(2026, 11, 16, 12, 0)
-        monday_night = datetime(2026, 11, 16, 3, 0)
-        sunday_noon = datetime(2026, 11, 15, 12, 0)
-        self.assertTrue(measure.window_allows(2, monday_noon))
-        self.assertFalse(measure.window_allows(3, monday_noon))
-        self.assertTrue(measure.window_allows(5, monday_night))
-        self.assertTrue(measure.window_allows(5, sunday_noon))
+        self.assertTrue(measure.window_allows(12, monday_noon))
+        self.assertTrue(measure.window_allows(12, datetime(2026, 11, 15, 12, 0)))
+        self.assertFalse(measure.gpu_allowed(monday_noon))
 
 
 if __name__ == "__main__":

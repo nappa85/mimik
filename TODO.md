@@ -161,10 +161,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `the_memory_check_counts_the_cache_and_the_slots_checkpoints` is wrong; the live test's second
   readiness loop does not notice a server that died. Pending live: RAM headroom on the minimum
   host.
-- **Reminders that fit (3c-1c, steps 1-9 implemented, owner decision C, 2026-11-18):** the live
-  checks (plan step 10) are owed: `calibrate` on both paths shows reminders available; the cache
-  tool sequence with a reminder after interpretations with long replies; the browser reminder
-  scenario on the GPU. Review Minor: the progress skip of the reminder prime is never cleared
+- **Reminders that fit (3c-1c):** live checks passed 2026-11-19 (`docs/results.md`); the
+  fake-model browser reminder scenario is still owed. Qwen3.5 on the GPU reuses only 1,318 of
+  1,805 prefix tokens for an interpretation right after another (about 2.7 s). Review Minor: the progress skip of the reminder prime is never cleared
   by a later update (a CPU-to-GPU retry or reminders turned on during a CPU start show a total
   one too low until the prime step); add `Progress::unskip` in `skip_idle_prime`.
 - Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled
