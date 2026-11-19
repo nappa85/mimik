@@ -668,8 +668,8 @@ part afterwards, a scribble reading admitted behind a reminder may wait Q plus t
 failed cache check switches reminders off on both paths (the GPU re-prime is gone).
 
 Live checks done (`results.md`, 3c-1c live checks): reminders available on both paths, the
-reminder entry kept after long interpretations. Remaining: the `assist_model_browser.py`
-reminder scenario (a fake model, any time). Found: on the GPU, Qwen3.5 reuses only 1,318 of
+reminder entry kept after long interpretations. The `assist_model_browser.py` reminder scenario passes
+(fake model). Found: on the GPU, Qwen3.5 reuses only 1,318 of
 1,805 prefix tokens for an interpretation right after another one (about 2.7 s inside R).
 
 ##### 3c-2 Catalogue entry text and provenance
