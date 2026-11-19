@@ -879,9 +879,9 @@ class ReminderEvalTests(unittest.TestCase):
         self.assertIn(ae.REMINDER_PREFIX_SHA256, rust)
         self.assertIn(ae.REMINDER_SCHEMA_SHA256, rust)
 
-    def test_there_are_eight_synthetic_cases_and_each_builds_a_request(self):
+    def test_there_are_ten_synthetic_cases_and_each_builds_a_request(self):
         cases = self.cases()
-        self.assertEqual(len(cases), 8)
+        self.assertEqual(len(cases), 10)
         for case in cases:
             request = ae.build_reminder_request(case)
             self.assertTrue(request["user"].startswith("<data>\n"))
@@ -889,6 +889,17 @@ class ReminderEvalTests(unittest.TestCase):
             self.assertLess(len(request["user"].encode()), ae.DYNAMIC_LIMIT)
             enum = request["schema"]["$defs"]["target"]["enum"]
             self.assertEqual(enum[0], case["decrease"]["id"])
+
+    def test_the_entry_cases_send_the_entry_text_with_its_row(self):
+        cases = {case["id"]: case for case in self.cases()}
+        cited = ae.build_reminder_request(cases["rm-09"])["user"]
+        self.assertIn('"name":"Healing potion","entry":"Level: 1\\nRestores 6 hit points', cited)
+        other = ae.build_reminder_request(cases["rm-10"])["user"]
+        self.assertIn('"name":"Rope","entry":"Holds 40 pounds."', other)
+        # Plain rows send no entry member.
+        plain = ae.build_reminder_request(self.cases()[0])["user"]
+        self.assertNotIn("entry", plain)
+        self.assertIn('a number written in the "entry" of the item', ae.reminder_prefix())
 
     def test_booleans_text_and_notes_never_reach_the_prompt(self):
         case = {

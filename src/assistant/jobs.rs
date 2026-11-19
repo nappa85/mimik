@@ -1892,14 +1892,14 @@ async fn attempt_reminder(
             hint,
             row,
             options: option
-                .and_then(|(changes, explanation)| {
+                .and_then(|advice| {
                     bind_with_reads(
                         run.id,
                         0,
                         &run.origin,
-                        changes,
-                        rendered.reads.clone(),
-                        explanation,
+                        advice.changes,
+                        (rendered.reads.clone(), advice.sources),
+                        advice.explanation,
                     )
                 })
                 .into_iter()

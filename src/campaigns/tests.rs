@@ -34,6 +34,8 @@ mod catalogue_member_tests;
 mod catalogue_tests;
 #[path = "cell_tests.rs"]
 mod cell_tests;
+#[path = "entry_context_tests.rs"]
+mod entry_context_tests;
 #[path = "entry_save_tests.rs"]
 mod entry_save_tests;
 #[path = "formula_tests.rs"]

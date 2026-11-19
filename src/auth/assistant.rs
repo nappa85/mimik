@@ -401,9 +401,13 @@ pub(super) struct ReminderView {
     pub restart_note: Option<&'static str>,
     /// Why they are unavailable for this generation.
     pub unavailable: Option<String>,
-    /// On the CPU path: the catalogue text does not fit.
-    pub names_only: bool,
+    /// What a reminder sends of a linked catalogue entry (ASSIST-60), once a generation is
+    /// measured.
+    pub catalogue_text: Option<&'static str>,
 }
+
+/// The page's statement of what a reminder sends of a linked catalogue entry (ASSIST-60).
+const CATALOGUE_TEXT: &str = "Catalogue text is sent when it fits (rarely on the CPU path): a linked item's entry properties, then its text, as the entry page shows them.";
 
 pub(super) fn reminder_view(
     choice: Option<bool>,
@@ -425,7 +429,7 @@ pub(super) fn reminder_view(
         worst_extra_s: None,
         restart_note: None,
         unavailable: None,
-        names_only: false,
+        catalogue_text: None,
     };
     let Some((path, reminders)) = generation else {
         return view;
@@ -435,7 +439,7 @@ pub(super) fn reminder_view(
         path_name(path),
         threads.map_or_else(String::new, |n| format!(", {n} threads"))
     ));
-    view.names_only = path == Path::Cpu;
+    view.catalogue_text = Some(CATALOGUE_TEXT);
     match reminders {
         Reminders::Unavailable(why) => view.unavailable = Some(why),
         Reminders::NotPrepared => {
@@ -1150,7 +1154,7 @@ async fn set_reminders(
 
 #[cfg(test)]
 mod tests {
-    use super::{ReminderView, landlock_line, reminder_view};
+    use super::{CATALOGUE_TEXT, ReminderView, landlock_line, reminder_view};
     use crate::assistant::jobs::Reminders;
     use crate::assistant::runtime::Path;
     use crate::assistant::runtime::hako::Landlock;
@@ -1209,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn the_estimates_come_from_the_measurements_and_the_cpu_says_names_only() {
+    fn the_estimates_come_from_the_measurements_and_the_page_says_when_catalogue_text_is_sent() {
         let view = reminder_view(
             None,
             Some((Path::Cpu, budgets(true))),
@@ -1238,13 +1242,18 @@ mod tests {
             !wait.contains("re-prime") && !wait.contains("reprime"),
             "{wait}"
         );
-        assert!(view.names_only && view.unavailable.is_none());
+        assert_eq!(view.catalogue_text, Some(CATALOGUE_TEXT));
+        assert!(
+            CATALOGUE_TEXT
+                .starts_with("Catalogue text is sent when it fits (rarely on the CPU path)")
+        );
+        assert!(view.unavailable.is_none());
         // CPU path, reminders off by default: the length panel adds nothing.
         assert_eq!(view.worst_extra_s, None);
-        // The GPU path restores from the cache too, and sends catalogue text later; on by
+        // The GPU path restores from the cache too and states the same text; on by
         // default, so the length panel's worst wait includes Y.
         let gpu = reminder_view(None, Some((Path::Gpu, budgets(true))), "qwen", (None, None));
-        assert!(!gpu.names_only);
+        assert_eq!(gpu.catalogue_text, Some(CATALOGUE_TEXT));
         assert_eq!(gpu.worst_extra_s, Some(80));
         let wait = gpu.extra_wait.unwrap();
         assert!(wait.contains("from the prompt cache"), "{wait}");

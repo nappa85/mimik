@@ -8,7 +8,7 @@ use super::{StatusCode, error};
 use crate::{
     assistant::jobs::{Kind, Origin, ReminderDraft, ReminderRefusal},
     auth::{self, AuthState},
-    campaigns::{assist, notes::NoteValue, remind, transport::Pairs},
+    campaigns::{assist, catalogue::EntryWant, notes::NoteValue, remind, transport::Pairs},
 };
 use axum::extract::{Path, State};
 use serde_json::json;
@@ -44,7 +44,6 @@ pub(super) async fn start(
         .private_read_base(auth.clone(), id, None, permit)
         .await
         .map_err(error)?;
-    drop(permit);
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -83,9 +82,16 @@ pub(super) async fn start(
     {
         return Ok(conflict());
     }
-    let Some(request) = remind::build(definition, &view.snapshot.data, stored, decrease) else {
+    let Some(mut request) = remind::build(
+        definition,
+        &view.snapshot.data,
+        stored,
+        decrease,
+        &view.entry_links,
+    ) else {
         return Ok(conflict());
     };
+    attach_entries(&state, &auth, id, definition, &mut request, permit).await?;
     let origin = Origin {
         sheet: id,
         target: address.to_owned(),
@@ -116,4 +122,71 @@ pub(super) async fn start(
             "The assistant is busy, try again shortly.",
         )),
     }
+}
+
+/// The linked entries' text (plan 3c-2, step 3), read under the permit the request holds; a
+/// row whose entry cannot be read keeps its name only.
+async fn attach_entries(
+    state: &AuthState,
+    auth: &auth::RequestAuth,
+    id: i64,
+    definition: &crate::definitions::Definition,
+    request: &mut crate::assistant::reminder::ReminderRequest,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(), StatusCode> {
+    let assistant = state.assistant().ok_or(StatusCode::NOT_FOUND)?;
+    let wanted: Vec<EntryWant> = request
+        .rows
+        .iter()
+        .filter_map(|row| row.entry.as_ref())
+        .map(|binding| EntryWant {
+            address: String::new(),
+            catalogue: binding.catalogue.clone(),
+            version: binding.version,
+            key: binding.key.clone(),
+            characters: 0,
+        })
+        .collect();
+    let bytes = assistant
+        .budgets()
+        .map_or(0, |budgets| budgets.bounds.bytes);
+    if wanted.is_empty() || bytes == 0 {
+        drop(permit);
+        for row in &mut request.rows {
+            row.attach(None);
+        }
+        return Ok(());
+    }
+    let (contexts, permit) = state
+        .store()
+        .reminder_entries(
+            auth.clone(),
+            id,
+            (definition.game_id.clone(), definition.edition_id.clone()),
+            wanted,
+            bytes,
+            permit,
+        )
+        .await
+        .map_err(error)?;
+    drop(permit);
+    let mut contexts = contexts.into_iter();
+    for row in &mut request.rows {
+        let context = row
+            .entry
+            .is_some()
+            .then(|| contexts.next().flatten())
+            .flatten()
+            .map(|context| {
+                (
+                    (context.name, context.badge.label().to_owned(), context.text),
+                    context.cut,
+                )
+            });
+        match context {
+            Some((context, cut)) => row.attach_cut(Some(context), cut),
+            None => row.attach(None),
+        }
+    }
+    Ok(())
 }

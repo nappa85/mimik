@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 const RLO: char = '\u{202E}';
-const ZEROS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+pub(super) const ZEROS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Unit (id, page, raw text) of the synthetic source. Distinctive letters let a test count
 /// exactly what a page shows.
@@ -36,7 +36,7 @@ fn units() -> Vec<(i64, i64, String)> {
     ]
 }
 
-async fn catalogue_source(store: &Store) {
+pub(super) async fn catalogue_source(store: &Store) {
     store.run(|db| {
         for game in ["synthetic-game", "other-game"] {
             db.execute("INSERT INTO registry_games VALUES(?1,'Synthetic')", [game])?;
@@ -83,7 +83,7 @@ fn units_page(unit: i64) -> i64 {
         .1
 }
 
-fn owner_entry(key: &str, entry_type: &str, name: &str, text: &str) -> Value {
+pub(super) fn owner_entry(key: &str, entry_type: &str, name: &str, text: &str) -> Value {
     json!({"key": key, "type": entry_type, "name": name, "properties": {},
            "description": {"owner_text": text}})
 }
@@ -99,7 +99,7 @@ fn house_text() -> String {
     format!("{head}{}", "ŋ".repeat(20_000 - head.chars().count()))
 }
 
-fn spells(extra: Vec<Value>) -> Value {
+pub(super) fn spells(extra: Vec<Value>) -> Value {
     let mut entries = vec![
         unit_entry("lantern-flare", "Lantern Flare", &[1, 2]),
         unit_entry("giant", "Giant Text", &[3]),
@@ -138,7 +138,7 @@ fn owner_catalogue(game: &str, id: &str, entries: &[Value]) -> Value {
            "entries": entries})
 }
 
-async fn publish_catalogue(store: &Store, value: &Value, expected_revision: i64) {
+pub(super) async fn publish_catalogue(store: &Store, value: &Value, expected_revision: i64) {
     let draft = store
         .save_catalogue_draft(serde_json::to_vec(value).unwrap(), expected_revision)
         .await
@@ -167,7 +167,7 @@ fn definition(id: &str, catalogues: &[&str]) -> Value {
            "catalogues": catalogues.iter().map(|id| json!({"id": id})).collect::<Vec<_>>()})
 }
 
-async fn publish_definition(store: &Store, value: &Value) -> i64 {
+pub(super) async fn publish_definition(store: &Store, value: &Value) -> i64 {
     let draft = store
         .save_definition_draft(serde_json::to_vec(value).unwrap(), 0)
         .await
@@ -363,7 +363,7 @@ async fn revision(store: &Store, sql: &'static str, id: i64) -> i64 {
         .unwrap()
 }
 
-async fn review(store: &Store, unit: i64, state: &str, correction: &str) {
+pub(super) async fn review(store: &Store, unit: i64, state: &str, correction: &str) {
     let current = revision(store, "SELECT revision FROM source_units WHERE id=?1", unit).await;
     store
         .review_source_unit(
@@ -381,7 +381,7 @@ async fn review(store: &Store, unit: i64, state: &str, correction: &str) {
         .unwrap();
 }
 
-async fn complete(store: &Store, page: i64, label: &str) {
+pub(super) async fn complete(store: &Store, page: i64, label: &str) {
     let current = revision(store, "SELECT revision FROM source_pages WHERE id=?1", page).await;
     store
         .complete_source_page(
@@ -944,7 +944,7 @@ async fn catalogue_reads_hold_the_permit_and_recheck_grants_after_validation() {
 
 /// Damage one stored row past its guards: the named immutability trigger is dropped and
 /// restored around `statement`, with foreign keys and CHECK constraints off meanwhile.
-async fn tamper(store: &Store, trigger: &'static str, statement: String) {
+pub(super) async fn tamper(store: &Store, trigger: &'static str, statement: String) {
     store
         .run(move |db| {
             let original: String = db.query_row(
@@ -1842,4 +1842,210 @@ async fn a_lost_source_row_gives_the_same_badge_on_both_routes() {
     assert!(
         entry.contains("Description unavailable (source text malformed or citations missing).")
     );
+}
+
+/// The entry context of `key` in the latest sealed `spells`, cut to `max_chars`.
+async fn context_of(
+    store: &Store,
+    key: &'static str,
+    max_chars: usize,
+) -> Option<crate::catalogues::read::EntryContext> {
+    store
+        .run(move |db| {
+            let linked =
+                crate::catalogues::read::latest_sealed(db, "synthetic-game", "first", "spells")?
+                    .unwrap();
+            crate::catalogues::read::entry_context(db, &linked, key, max_chars)
+        })
+        .await
+        .unwrap()
+}
+
+/// Plan 3c-2 step 2: properties first, one line each as the entry page shows them, then the
+/// description; units joined with a blank line; an owner text as is.
+#[tokio::test]
+async fn the_entry_context_has_properties_then_the_description() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let context = context_of(&world.store, "lantern-flare", 2_000)
+        .await
+        .unwrap();
+    assert_eq!(context.name, "Lantern Flare");
+    assert_eq!(context.badge, crate::catalogues::read::Badge::Unchecked);
+    assert_eq!(
+        context.text,
+        "Level: 1\nSchool: Light\nNote: Bright\n\nLantern flare: a synthetic beam of light.\n\nSecond passage of the flare."
+    );
+    // An owner text as is (an entry type without properties has no property lines), with its
+    // right-to-left override turned into a space.
+    let house = context_of(&world.store, "house-charm", 2_000)
+        .await
+        .unwrap();
+    assert_eq!(house.badge, crate::catalogues::read::Badge::OwnerWritten);
+    assert!(
+        house
+            .text
+            .starts_with("<script>zqx()</script>\nWard ink  reversed tail"),
+        "{:?}",
+        house.text.chars().take(60).collect::<String>()
+    );
+    assert!(
+        house.text.chars().count() <= 2_000,
+        "cut at 2,000 characters"
+    );
+    assert!(house.cut);
+    // An unknown key and a retired entry give none.
+    assert!(context_of(&world.store, "missing", 2_000).await.is_none());
+    assert!(
+        context_of(&world.store, "retired-charm", 2_000)
+            .await
+            .is_none()
+    );
+}
+
+/// Rejected, malformed and unreadable descriptions give no description (the properties stay);
+/// a corrected unit gives its correction.
+#[tokio::test]
+async fn unavailable_and_malformed_descriptions_give_properties_only() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let properties = "Level: 1\nSchool: Light\nNote: Bright";
+    let malformed = context_of(&world.store, "malformed", 2_000).await.unwrap();
+    assert_eq!(malformed.badge, crate::catalogues::read::Badge::Malformed);
+    assert_eq!(malformed.text, properties);
+    review(&world.store, 9, "rejected", "").await;
+    let rejected = context_of(&world.store, "cut-rejected", 2_000)
+        .await
+        .unwrap();
+    assert_eq!(rejected.badge, crate::catalogues::read::Badge::Unavailable);
+    assert_eq!(rejected.text, properties);
+    // A correction after the seal is effective at once (sealed versions freeze the raw text,
+    // not the review state).
+    review(&world.store, 1, "corrected", "Corrected passage.").await;
+    let corrected = context_of(&world.store, "lantern-flare", 2_000)
+        .await
+        .unwrap();
+    assert!(
+        corrected.text.contains("Corrected passage.") && !corrected.text.contains("beam"),
+        "{}",
+        corrected.text
+    );
+}
+
+/// A cut falls on a character boundary of multi-byte text and the unit read stops at the
+/// bound (a 25,000-character unit is not read whole).
+#[tokio::test]
+async fn the_entry_context_cut_keeps_character_boundaries() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let cut = context_of(&world.store, "giant", 40).await.unwrap();
+    // The first word of the description is longer than the room left: the cut backs off to
+    // the whitespace before it instead of splitting the word.
+    assert_eq!(cut.text, "Level: 1\nSchool: Light\nNote: Bright\n");
+    assert!(cut.cut);
+    let emoji = context_of(&world.store, "multibyte", 38).await.unwrap();
+    assert_eq!(emoji.text, cut.text);
+    assert_eq!(
+        context_of(&world.store, "multibyte", 0).await.unwrap().text,
+        ""
+    );
+    // Control characters other than line feed and tab, and format characters, become spaces.
+    let hostile = context_of(&world.store, "hostile", 2_000).await.unwrap();
+    assert!(
+        hostile.text.ends_with("Hostile passage  tail"),
+        "{}",
+        hostile.text
+    );
+    assert!(!hostile.text.contains('\u{202e}'));
+}
+
+#[test]
+fn control_and_format_characters_become_spaces_but_line_feed_and_tab_stay() {
+    use crate::catalogues::read::sanitize_context;
+    let hostile = "a\u{0}b\u{7}c\rd\u{202a}e\u{202e}f\u{2066}g\u{2069}h\u{200e}i\u{200f}j\u{61c}k\u{feff}l\u{200b}m\u{ad}n\u{85}o";
+    assert_eq!(sanitize_context(hostile), "a b c d e f g h i j k l m n o");
+    assert_eq!(sanitize_context("x\ny\tz"), "x\ny\tz");
+}
+
+/// The cut never ends inside a token: a text cut inside "15" backs off to the word before, and
+/// the flag says the text was shortened (plan 3c-2, fix round).
+#[test]
+fn cut_text_never_splits_a_number_or_a_word() {
+    use crate::catalogues::read::cut_text;
+    let cut = |text: &str, max: usize| cut_text(text, max);
+    assert_eq!(
+        cut("Restores 15 hit points", 10),
+        ("Restores".to_owned(), true)
+    );
+    assert_eq!(
+        cut("Restores 15 hit points", 11),
+        ("Restores 15".to_owned(), true)
+    );
+    assert_eq!(
+        cut("Restores 15 hit points", 12),
+        ("Restores 15 ".to_owned(), true)
+    );
+    assert_eq!(cut("Restores 15", 11), ("Restores 15".to_owned(), false));
+    assert_eq!(cut("Restores 15", 40), ("Restores 15".to_owned(), false));
+    // No whitespace to back off to: the digit run that touches the cut goes.
+    assert_eq!(cut("abc12345", 5), ("abc".to_owned(), true));
+    assert_eq!(cut("12345", 3), (String::new(), true));
+    assert_eq!(cut("", 0), (String::new(), false));
+    assert_eq!(
+        cut("\u{e9}\u{e9} \u{e9}\u{e9}", 4),
+        ("\u{e9}\u{e9}".to_owned(), true)
+    );
+}
+
+/// At the 2,000-character cut too: a number that would be split is not sent.
+#[tokio::test]
+async fn the_entry_context_cut_does_not_split_a_number() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    publish_catalogue(
+        &world.store,
+        &spells(vec![owner_entry(
+            "restore",
+            "charm",
+            "Restore",
+            "Restores 15 hit points.",
+        )]),
+        1,
+    )
+    .await;
+    let split = context_of(&world.store, "restore", 10).await.unwrap();
+    assert_eq!(split.text, "Restores");
+    assert!(split.cut);
+    let whole = context_of(&world.store, "restore", 23).await.unwrap();
+    assert_eq!(whole.text, "Restores 15 hit points.");
+    assert!(!whole.cut);
+}
+
+/// The apply's re-read is the start read cut again: for every length, reading the entry at
+/// that length equals cutting the whole context to it, with several units and properties.
+#[tokio::test]
+async fn a_read_at_a_length_equals_the_whole_context_cut_to_it() {
+    use crate::catalogues::read::cut_text;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world().await;
+    let whole = context_of(&world.store, "lantern-flare", 2_000)
+        .await
+        .unwrap();
+    assert!(!whole.cut);
+    for max in 0..=whole.text.chars().count() + 2 {
+        let read = context_of(&world.store, "lantern-flare", max)
+            .await
+            .unwrap();
+        let (text, cut) = cut_text(&whole.text, max);
+        assert_eq!(
+            (read.text.as_str(), read.cut),
+            (text.as_str(), cut),
+            "{max}"
+        );
+    }
 }

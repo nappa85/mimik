@@ -76,6 +76,15 @@ fn decimal(c: char) -> Option<u8> {
 /// digit, not joined to another run by a single joiner, without a leading zero and at most
 /// 18 digits long. Signs are not part of a number.
 pub(crate) fn phrase_numbers(phrase: &str) -> Vec<u64> {
+    phrase_number_spans(phrase)
+        .into_iter()
+        .map(|(value, _, _)| value)
+        .collect()
+}
+
+/// [`phrase_numbers`] with where each number sits: `(value, start, end)`, the character
+/// offsets (not bytes) of its digits in `phrase`, in order.
+pub(crate) fn phrase_number_spans(phrase: &str) -> Vec<(u64, usize, usize)> {
     let chars: Vec<char> = phrase.chars().collect();
     let mut runs = Vec::new();
     let mut i = 0;
@@ -121,11 +130,13 @@ pub(crate) fn phrase_numbers(phrase: &str) -> Vec<u64> {
             if digits.len() > MAX_DIGITS || (digits.len() > 1 && digits[0] == 0) {
                 return None;
             }
-            Some(
+            Some((
                 digits
                     .iter()
                     .fold(0_u64, |value, &digit| value * 10 + u64::from(digit)),
-            )
+                start,
+                end,
+            ))
         })
         .collect()
 }

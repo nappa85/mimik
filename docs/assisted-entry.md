@@ -671,19 +671,54 @@ cached; the length panel's worst wait includes Y while reminders are on).
   after, phrase}, "fields": [{id, label, type, value}], "rows": [{id: "r<n>", list, name}]}`:
   the other stored integer and enum top-level fields in definition order, the names of the rows of
   lists with a catalogue member (at most 32) as quoted data; never booleans, text, multiline,
-  notes, keys or other properties. Within B and N(B) rows are dropped first (the last first),
-  then fields; the decrease never, and if it alone exceeds them the job is made and ends "too long"
-  (nothing is shown).
+  notes, keys or other properties. A row linked to a catalogue entry (the sheet page's linking,
+  here bound to the sealed version it found) may carry `entry`: the entry's properties, one
+  "Label: value" line each as the entry page shows them, then its description (an owner text as
+  is, unit texts joined with a blank line; none when a cited passage is rejected or unreadable),
+  control and format characters (bidi controls, zero-width characters) turned into spaces, cut to
+  2,000 characters; a cut never ends inside a word or a number (it backs off to the whitespace
+  before it, or drops the digit run that touches it when there is none), so a "15" is never
+  sent as "1". The route reads the texts after the sheet read, in one transaction under the
+  same runtime permit and the query budget, rechecking the sheet's read right and that the
+  latest sealed version is still the link's, and stops once the texts reach B bytes; a newer
+  version, a failure or a timeout gives that row its name only. Texts are sent wherever they fit,
+  on the CPU path too (B there is small, so rarely). Within B and N(B) the last text is dropped
+  first (the one that partly fits is cut at a character boundary to the bytes left, and what is
+  sent is what is bound), then rows (the last first), then fields; the decrease never, and if it
+  alone exceeds them the job is made and ends "too long" (nothing is shown). An entry's text is
+  data, never an instruction.
 - **Reply.** `{relevant, row, hint, option}` read against the request's own IDs: `relevant:
   false`, a truncated or invalid reply shows nothing; `row` names a sent row; `option` is one to
   four changes of `{ref, expr}` (an integer field, expression references limited to the sent
   integers and the decreased field) or `{ref, enum}` (a sent enum field and an option the pin
   declares). Literals follow the 2c rule with the decrease's phrase as the phrase, plus the
-  decrease's `before`, `after`, their difference and the change target's own value. An option
+  decrease's `before`, `after`, their difference and the change target's own value, plus the
+  numbers (digits only, no number words; `2d6` gives none, "3-5" gives 3 and 5, signs are not part
+  of a number) of the row the reply cites, as sent. A number only in another row's text, in a text
+  that was dropped or in none is not admitted. An option
   that fails a check is dropped and the hint stays.
+- **Badge.** An entry has one badge, computed from its description's units; the numbers of its
+  properties carry that badge too (a property line is never "unchecked" on its own), so an
+  option whose number comes from a property shows the description's badge.
+- **Sources.** A literal that only the cited entry's text admits is shown with its source: the
+  entry's name, its badge and the first place the text spells the number with the words around
+  it (at most 64 characters including "…"). The option's JSON carries `sources` (empty for
+  interpretations); the module shows "from <entry> (<badge in lower case>): <excerpt>" under the
+  option with text nodes only, the badge omitted for owner-written and reviewed text. Numbers
+  from unchecked source text are admitted with the badge shown. The sources are in the proposal's
+  content hash.
 - **Read set.** The proposal binds every value the reminder sent (the decrease, every field,
   every row name by `row:<list>/<host>`); the apply re-reads them and answers 409 when a row was
-  renamed or removed or a sent field changed, even if the changes' own numbers did not.
+  renamed or removed or a sent field changed, even if the changes' own numbers did not. Each sent
+  entry text adds a read `entry:<list>/<host>` whose value is the array catalogue, sealed
+  version, key, badge label, the text's SHA-256, its length in characters and whether it was cut;
+  the apply (a read in its own flow under its permit, before the plan) requires the row's link to
+  name the same catalogue, version and key, and the entry's whole context, read again and cut to
+  that length by the same rule, to have that fingerprint, the same badge and the same cut flag
+  (so text appended after what was sent whole, or a badge that changed with the text intact,
+  fails too). A unit corrected or rejected after the seal, a page completion change, a newer seal,
+  a changed key or a lookup that fails or times out gives 409
+  ("This entry changed since it was saved").
 - **Module.** After a saved answer the module stops an older reminder of the unit and starts one
   when the unit carries a key (once the route answers 404 it stops trying for the page; a 503
   does not). A decrease committed by a switch (`switched`) gives no reminder on the page: the

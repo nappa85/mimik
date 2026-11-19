@@ -823,7 +823,7 @@ async fn the_hash_covers_every_after_and_an_unencodable_value_drops_the_option()
     let _ = &assistant;
 }
 
-/// The read set is in the content hash (tag v3): a changed value, address, a row's name or
+/// The read set is in the content hash (tag v4): a changed value, address, a row's name or
 /// the set's size fails `verify`, and interpretations carry an empty set.
 #[tokio::test]
 async fn the_read_set_is_in_the_content_hash() {
@@ -836,8 +836,15 @@ async fn the_read_set_is_in_the_content_hash() {
         value: value.into(),
     };
     let base = vec![read("field:max_hp", "i:84"), read("row:abc", "Rope")];
-    let proposal =
-        bind_with_reads(id, 0, &origin, vec![change()], base.clone(), "why".into()).unwrap();
+    let proposal = bind_with_reads(
+        id,
+        0,
+        &origin,
+        vec![change()],
+        (base.clone(), Vec::new()),
+        "why".into(),
+    )
+    .unwrap();
     assert!(verify(id, 0, &origin, &proposal));
     let tampered = |reads: Vec<Read>| {
         let mut other = proposal.clone();
@@ -861,6 +868,65 @@ async fn the_read_set_is_in_the_content_hash() {
     let none = bind(id, 0, &origin, vec![change()], "why".into()).unwrap();
     assert_eq!(none.reads, Vec::new());
     assert_ne!(none.hash, proposal.hash);
+}
+
+/// The sources are in the content hash with an explicit count (tag v4): none and one do not
+/// collide, and a changed entry, badge or excerpt, or a moved boundary between two sources,
+/// fails `verify`.
+#[tokio::test]
+async fn the_sources_are_in_the_content_hash() {
+    use super::super::proposal::{Source, bind_with_reads};
+    let origin = reminder("field:hp");
+    let id = JobId([7; 16]);
+    let change = || int_change("field:hp", NoteValue::Int(84), 70);
+    let source = |entry: &str, badge: &str, excerpt: &str| Source {
+        entry: entry.into(),
+        badge: badge.into(),
+        excerpt: excerpt.into(),
+    };
+    let bind_sources = |sources: Vec<Source>| {
+        bind_with_reads(
+            id,
+            0,
+            &origin,
+            vec![change()],
+            (Vec::new(), sources),
+            "why".into(),
+        )
+        .unwrap()
+    };
+    let none = bind_sources(Vec::new());
+    let one = bind_sources(vec![source("Potion", "Unchecked source text", "heals 5")]);
+    assert!(verify(id, 0, &origin, &none) && verify(id, 0, &origin, &one));
+    assert_ne!(none.hash, one.hash, "empty and present do not collide");
+    let tampered = |sources: Vec<Source>| {
+        let mut other = one.clone();
+        other.sources = sources;
+        verify(id, 0, &origin, &other)
+    };
+    assert!(!tampered(Vec::new()));
+    assert!(!tampered(vec![source(
+        "Potion",
+        "Unchecked source text",
+        "heals 6"
+    )]));
+    assert!(!tampered(vec![source(
+        "Potion",
+        "Reviewed extraction",
+        "heals 5"
+    )]));
+    assert!(!tampered(vec![source(
+        "Elixir",
+        "Unchecked source text",
+        "heals 5"
+    )]));
+    // Two sources split differently never hash alike (every field is length-prefixed).
+    let first = bind_sources(vec![source("ab", "c", "d"), source("e", "f", "g")]);
+    let second = bind_sources(vec![source("a", "bc", "d"), source("e", "f", "g")]);
+    assert_ne!(first.hash, second.hash);
+    // An interpretation carries none.
+    let interpretation = bind(id, 0, &origin, vec![change()], "why".into()).unwrap();
+    assert_eq!(interpretation.sources, []);
 }
 
 /// How many options of `options` a test-built job keeps.
@@ -1328,8 +1394,10 @@ fn reminder_draft() -> ReminderDraft {
                     id: "r1".into(),
                     list: "Equipment".into(),
                     name: "Antidote".into(),
+                    entry: None,
                 },
                 address: "row:equipment/r1-1".into(),
+                entry: None,
             }],
         },
     }

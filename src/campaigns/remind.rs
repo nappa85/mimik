@@ -2,9 +2,10 @@
 //! "Context"): the trigger on a stored note, and the request built from the snapshot the
 //! reminder is bound to. The model never sees booleans, text, multiline values, notes, keys or
 //! other properties.
+use super::catalogue::EntryLinks;
 use super::notes::{NoteValue, Op, Stored};
 use crate::assistant::contract::{self, ItemKind, ReminderDecrease, ReminderField, ReminderRow};
-use crate::assistant::reminder::{FieldDraft, MAX_ROWS, ReminderRequest, RowDraft};
+use crate::assistant::reminder::{EntryBinding, FieldDraft, MAX_ROWS, ReminderRequest, RowDraft};
 use crate::definitions::{Control, Definition};
 use serde_json::Value;
 
@@ -45,13 +46,15 @@ pub(crate) fn applied<'a>(mut current: impl Iterator<Item = &'a Stored>, stored:
 
 /// The reminder request for the decrease `stored` records on the top-level integer field
 /// `id`, from `data` (the snapshot the reminder is bound to): the other stored integer and
-/// enum fields in definition order, and the names of the rows of lists with a catalogue member.
+/// enum fields in definition order, and the names of the rows of lists with a catalogue member,
+/// each with the link `links` gives it (its entry text is attached later, by the route).
 /// `None` when `id` is not a stored integer field of the pin.
 pub(crate) fn build(
     definition: &Definition,
     data: &Value,
     stored: &Stored,
     (before, after): (i64, i64),
+    links: &EntryLinks,
 ) -> Option<ReminderRequest> {
     let id = stored.note.address.strip_prefix("field:")?;
     let decreased = definition.fields.iter().find(|field| {
@@ -89,10 +92,11 @@ pub(crate) fn build(
         });
     }
     let mut rows = Vec::new();
-    for list in definition
+    for (index, list) in definition
         .fields
         .iter()
-        .filter(|field| field.control == Control::List && field.formula.is_none())
+        .enumerate()
+        .filter(|(_, field)| field.control == Control::List && field.formula.is_none())
     {
         let Some(name) = super::values::properties(list)
             .iter()
@@ -120,8 +124,19 @@ pub(crate) fn build(
                     id: format!("r{}", rows.len() + 1),
                     list: list.label.clone(),
                     name: text.to_owned(),
+                    entry: None,
                 },
                 address: super::notes::row_address(&list.id, host),
+                entry: links
+                    .get(&(index, host.to_owned()))
+                    .map(|link| EntryBinding {
+                        catalogue: link.catalogue.clone(),
+                        version: link.version,
+                        key: link.key.clone(),
+                        name: String::new(),
+                        badge: String::new(),
+                        cut: false,
+                    }),
             });
         }
     }

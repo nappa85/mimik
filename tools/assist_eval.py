@@ -1702,7 +1702,7 @@ def check_cases(args):
 
 # --- Reminders (step 3c-1): a smoke check of the reminder prompt, not a quality measure ------
 REMINDER_CASES_PATH = CASES_PATH.with_name("reminder-cases.json")
-REMINDER_PREFIX_SHA256 = "ed16ac36080fa5c22af58ae4da690d58b46491b83d7aa120fe95826bbda335e2"
+REMINDER_PREFIX_SHA256 = "239ffafd0f5a61d4c0521184ba86b1cc622acfc475245ac8e5ff50dc22c72d73"
 REMINDER_SCHEMA_SHA256 = "3744fd50813eba410d12e51c6e9d2cf587ca5f2795db394f9effb3aa3d330ae4"
 QUOTED_ROW = {"type": "string", "description": "the id of a list item from the data, or null"}
 QUOTED_FIELD = {"type": "string", "description": "the id of a field from the data"}

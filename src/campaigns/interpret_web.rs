@@ -18,7 +18,9 @@ use crate::{
     assistant::proposal::MAX_CHANGES,
     auth,
     campaigns::{
-        assist, interpret,
+        assist,
+        catalogue::EntryWant,
+        interpret,
         notes::{Note, NoteValue, Op},
         sheets::SheetView,
         transport::Pairs,
@@ -402,6 +404,13 @@ fn option_json(
         "value": first["after"],
         "effect": format!("{} \u{2192} {}", first["before"].as_str().unwrap_or(""), first["after"].as_str().unwrap_or("")),
         "explanation": option.explanation,
+        // The entry text behind the literals only that text admits (empty for an
+        // interpretation).
+        "sources": option.sources.iter().map(|source| json!({
+            "entry": source.entry,
+            "badge": source.badge,
+            "excerpt": source.excerpt,
+        })).collect::<Vec<_>>(),
         "action": format!("/private-sheets/{sheet}/proposals/{}/{n}", job.text()),
     })
 }
@@ -452,9 +461,27 @@ pub(super) async fn apply(
     if !jobs::verify(job, n, &origin, &proposal) {
         return Ok(changed());
     }
+    // What each sent entry text reads as now (plan 3c-2, step 5), in this request's flow under
+    // its permit, before the plan: a lookup that fails is an entry that changed.
+    let wants = entry_wants(&proposal.reads);
+    let (fingerprints, permit) = if wants.is_empty() {
+        (std::collections::BTreeMap::new(), permit)
+    } else {
+        let Some(ruleset) = view.immutable.as_ref().map(|pin| {
+            let definition = pin.definition();
+            (definition.game_id.clone(), definition.edition_id.clone())
+        }) else {
+            return Ok(changed());
+        };
+        state
+            .store()
+            .entry_fingerprints(auth.clone(), id, ruleset, wants, permit)
+            .await
+            .map_err(error)?
+    };
     let (planned, view, permit) = tokio::task::spawn_blocking(move || {
         let mut view = view;
-        let planned = plan(&mut view, &origin, &proposal);
+        let planned = plan(&mut view, &origin, &proposal, &fingerprints);
         (planned, view, permit)
     })
     .await
@@ -517,6 +544,7 @@ pub(in crate::campaigns) fn plan(
     view: &mut SheetView,
     origin: &Origin,
     proposal: &Proposal,
+    fingerprints: &std::collections::BTreeMap<String, crate::campaigns::catalogue::EntrySeen>,
 ) -> Option<Vec<(Unit, Option<String>)>> {
     let pin = view.immutable.as_ref()?;
     let definition = pin.definition();
@@ -554,7 +582,12 @@ pub(in crate::campaigns) fn plan(
     {
         return None;
     }
-    if !reads_hold(definition, data, &proposal.reads) {
+    if !reads_hold(
+        definition,
+        data,
+        &proposal.reads,
+        (&view.entry_links, fingerprints),
+    ) {
         return None;
     }
     let mut writes = Vec::new();
@@ -612,15 +645,91 @@ pub(in crate::campaigns) fn plan(
     Some(units)
 }
 
+/// The entry texts a reminder's reads are bound to (plan 3c-2, step 5): each `entry:` read
+/// whose value decodes, with the version, key and length it was sent at.
+fn entry_wants(reads: &[crate::assistant::proposal::Read]) -> Vec<EntryWant> {
+    reads
+        .iter()
+        .filter(|read| read.address.starts_with("entry:"))
+        .filter_map(|read| {
+            let bound = entry_binding(&read.value)?;
+            Some(EntryWant {
+                address: read.address.clone(),
+                catalogue: bound.catalogue,
+                version: bound.version,
+                key: bound.key,
+                characters: bound.characters,
+            })
+        })
+        .collect()
+}
+
+/// What an `entry:` read binds (its value is the array of these, in this order).
+struct EntryBound {
+    catalogue: String,
+    version: i64,
+    key: String,
+    badge: String,
+    fingerprint: String,
+    characters: usize,
+    cut: bool,
+}
+
+fn entry_binding(value: &str) -> Option<EntryBound> {
+    let (catalogue, version, key, badge, fingerprint, characters, cut) =
+        serde_json::from_str(value).ok()?;
+    Some(EntryBound {
+        catalogue,
+        version,
+        key,
+        badge,
+        fingerprint,
+        characters,
+        cut,
+    })
+}
+
 /// Whether every value a reminder sent still reads the same (plan 3c-1, "Read set and hash"):
 /// a field or cell by its typed address and encoded value, a catalogue row by its `row:` address
-/// (list and host ID) and its name. A row renamed or removed, or a sent field changed, fails.
+/// (list and host ID) and its name, and a sent entry text by its `entry:` address: the row's
+/// link (`entry_links` of this apply's read) must name the bound catalogue, sealed version and
+/// key, and what the entry reads as now (`seen`, by address: the text cut to the sent length)
+/// must have the bound fingerprint, badge and whether it goes on past the cut. A
+/// row renamed or removed, a sent field changed, or an entry that changed, was re-sealed or
+/// could not be read, fails.
 pub(in crate::campaigns) fn reads_hold(
     definition: &crate::definitions::Definition,
     data: &Value,
     reads: &[crate::assistant::proposal::Read],
+    (entry_links, seen): (
+        &crate::campaigns::catalogue::EntryLinks,
+        &std::collections::BTreeMap<String, crate::campaigns::catalogue::EntrySeen>,
+    ),
 ) -> bool {
     reads.iter().all(|read| {
+        if let Some(path) = read.address.strip_prefix("entry:") {
+            let Some(bound) = entry_binding(&read.value) else {
+                return false;
+            };
+            let Some((list, host)) = path.split_once('/') else {
+                return false;
+            };
+            let Some(index) = definition.fields.iter().position(|field| field.id == list) else {
+                return false;
+            };
+            return entry_links
+                .get(&(index, host.to_owned()))
+                .is_some_and(|link| {
+                    link.catalogue == bound.catalogue
+                        && link.version == bound.version
+                        && link.key == bound.key
+                })
+                && seen.get(&read.address).is_some_and(|now| {
+                    now.fingerprint == bound.fingerprint
+                        && now.cut == bound.cut
+                        && now.badge == bound.badge
+                });
+        }
         if let Some(path) = read.address.strip_prefix("row:") {
             let Some((list, host)) = path.split_once('/') else {
                 return false;

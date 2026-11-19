@@ -292,12 +292,15 @@ pub(crate) struct ReminderDecrease {
     pub phrase: String,
 }
 
-/// One catalogue-linked row: its request ID and name, as quoted data.
+/// One catalogue-linked row: its request ID and name, and, when the row's catalogue entry text
+/// fits, that entry's properties and text (plan 3c-2), all as quoted data.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ReminderRow {
     pub id: String,
     pub list: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 /// The reminder's dynamic part: the decrease, the fields, the rows, in this order.

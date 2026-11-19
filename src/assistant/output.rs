@@ -219,6 +219,19 @@ pub(crate) fn candidate(
     })
 }
 
+/// The literals of `node` in expression order (left before right), duplicates kept.
+pub(crate) fn literals(node: &Node) -> Vec<i64> {
+    match node {
+        Node::Lit { lit } => vec![*lit],
+        Node::Ref { .. } => Vec::new(),
+        Node::Op { l, r, .. } => {
+            let mut found = literals(l);
+            found.extend(literals(r));
+            found
+        }
+    }
+}
+
 /// Operator levels below `node` (a leaf is 0).
 fn depth(node: &Node) -> usize {
     match node {

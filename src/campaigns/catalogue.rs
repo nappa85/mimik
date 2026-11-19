@@ -68,7 +68,144 @@ pub(super) static AFTER_CATALOGUE_VALIDATION: std::sync::Mutex<
     Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 > = std::sync::Mutex::new(None);
 
+/// Runs inside the reminder's entry reads (tests only).
+#[cfg(test)]
+pub(super) static DURING_ENTRY_READ: std::sync::Mutex<
+    Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+> = std::sync::Mutex::new(None);
+
+/// What a recheck sees of an entry (plan 3c-2): the fingerprint of the text cut to the length it
+/// was sent at, whether the entry's context goes on past that, and the badge's label.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntrySeen {
+    pub fingerprint: String,
+    pub cut: bool,
+    pub badge: String,
+}
+
+/// One entry a reminder reads or rechecks (plan 3c-2): the sealed version its link names, the
+/// key, and for a recheck the length in characters the text was sent at.
+#[derive(Clone, Debug)]
+pub(crate) struct EntryWant {
+    pub address: String,
+    pub catalogue: String,
+    pub version: i64,
+    pub key: String,
+    pub characters: usize,
+}
+
 impl Store {
+    /// The entry contexts of a reminder's linked rows (plan 3c-2, step 3), aligned with
+    /// `wanted`: one transaction that rechecks the sheet's read right, then for each entry
+    /// checks that the latest sealed version still is the link's and reads its context, all
+    /// under one query budget, and stops once the texts read reach `bytes` in total. A newer
+    /// sealed version, a failure or a timeout gives none for that entry (logged without
+    /// names). Runs under the caller's runtime permit, which it returns.
+    pub(crate) async fn reminder_entries(
+        &self,
+        auth: RequestAuth,
+        sheet: i64,
+        ruleset: (String, String),
+        wanted: Vec<EntryWant>,
+        bytes: usize,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(Vec<Option<read::EntryContext>>, OwnedSemaphorePermit), AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck(&tx)?;
+            snapshots::authorize_read(&tx, &auth, sheet)?;
+            #[cfg(test)]
+            if let Some(hook) = DURING_ENTRY_READ.lock().unwrap().take() {
+                hook();
+            }
+            let mut found = Vec::with_capacity(wanted.len());
+            let mut total = 0;
+            {
+                let _budget = crate::sources::search::Budget::start(
+                    &tx,
+                    crate::sources::search::QUERY_BUDGET,
+                );
+                for want in &wanted {
+                    if total >= bytes {
+                        found.push(None);
+                        continue;
+                    }
+                    let context = entry_text(&tx, &ruleset, want, read::CONTEXT_CHARACTERS)
+                        .unwrap_or_else(|_| {
+                            eprintln!("Mimik: catalogue entry text unavailable for one row");
+                            None
+                        });
+                    total += context.as_ref().map_or(0, |context| context.text.len());
+                    found.push(context);
+                }
+            }
+            auth.recheck(&tx)?;
+            tx.commit()?;
+            Ok((found, permit))
+        })
+        .await
+    }
+
+    /// What the entries a reminder's apply rechecks read as now (plan 3c-2, step 5), by the
+    /// `address` of each: the entry's whole context read as at the start, cut to the length it
+    /// was sent at ([`read::cut_text`]); an entry that cannot be read (a newer sealed version,
+    /// a failure, a timeout) or whose text no longer reaches that length has none. One
+    /// transaction under the runtime permit, which it returns.
+    pub(crate) async fn entry_fingerprints(
+        &self,
+        auth: RequestAuth,
+        sheet: i64,
+        ruleset: (String, String),
+        wanted: Vec<EntryWant>,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<
+        (
+            std::collections::BTreeMap<String, EntrySeen>,
+            OwnedSemaphorePermit,
+        ),
+        AppError,
+    > {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck(&tx)?;
+            snapshots::authorize_read(&tx, &auth, sheet)?;
+            #[cfg(test)]
+            if let Some(hook) = DURING_ENTRY_READ.lock().unwrap().take() {
+                hook();
+            }
+            let mut found = std::collections::BTreeMap::new();
+            {
+                let _budget = crate::sources::search::Budget::start(
+                    &tx,
+                    crate::sources::search::QUERY_BUDGET,
+                );
+                for want in &wanted {
+                    match entry_text(&tx, &ruleset, want, read::CONTEXT_CHARACTERS) {
+                        Ok(Some(context)) => {
+                            let (text, cut) = read::cut_text(&context.text, want.characters);
+                            if text.chars().count() == want.characters {
+                                found.insert(
+                                    want.address.clone(),
+                                    EntrySeen {
+                                        fingerprint: read::context_fingerprint(&text),
+                                        cut: cut || context.cut,
+                                        badge: context.badge.label().to_owned(),
+                                    },
+                                );
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => eprintln!("Mimik: catalogue entry text unavailable for one row"),
+                    }
+                }
+            }
+            auth.recheck(&tx)?;
+            tx.commit()?;
+            Ok((found, permit))
+        })
+        .await
+    }
+
     pub(crate) async fn private_catalogue(
         &self,
         auth: RequestAuth,
@@ -163,6 +300,23 @@ impl Store {
     }
 }
 
+/// The context of `want`'s entry cut to `characters`, provided the catalogue's latest sealed
+/// version is still the one the link named.
+fn entry_text(
+    db: &rusqlite::Connection,
+    (game, edition): &(String, String),
+    want: &EntryWant,
+    characters: usize,
+) -> Result<Option<read::EntryContext>, AppError> {
+    let Some(linked) = read::latest_sealed(db, game, edition, &want.catalogue)? else {
+        return Ok(None);
+    };
+    if linked.version_id != want.version {
+        return Ok(None);
+    }
+    read::entry_context(db, &linked, &want.key, characters)
+}
+
 /// The sheet page's catalogue links, read inside its final read boundary.
 pub(super) fn links(
     db: &rusqlite::Connection,
@@ -189,12 +343,14 @@ pub(super) fn links(
 
 /// A saved row's link to a catalogue entry (assisted sheet step 3a, linking rules 1 and 2):
 /// the catalogue's place in the definition's links (which names the link on the page through
-/// the Catalogues panel) and its id, and the entry key.
+/// the Catalogues panel) and its id, the entry key and the sealed version it was found in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EntryLink {
     pub index: usize,
     pub catalogue: String,
     pub key: String,
+    /// The sealed version the link was found in (a reminder binds the entry text to it).
+    pub version: i64,
 }
 
 impl EntryLink {
@@ -317,6 +473,7 @@ fn rows_links(
         index,
         catalogue: member.id.clone(),
         key: entry.to_owned(),
+        version: linked.version_id,
     };
     let mut by_norm: std::collections::BTreeMap<&str, Vec<&str>> =
         std::collections::BTreeMap::new();

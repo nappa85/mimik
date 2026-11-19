@@ -412,7 +412,7 @@ fn schema_for_catches_duplicate_empty_and_target_ids_in_debug_builds() {
 /// The reviewed reminder prefix and schema text (plan 3c-1), pinned like the interpretation's;
 /// the same hashes are in `tools/test_assist_eval.py`.
 const REMINDER_PREFIX_SHA256: &str =
-    "ed16ac36080fa5c22af58ae4da690d58b46491b83d7aa120fe95826bbda335e2";
+    "239ffafd0f5a61d4c0521184ba86b1cc622acfc475245ac8e5ff50dc22c72d73";
 const REMINDER_SCHEMA_SHA256: &str =
     "3744fd50813eba410d12e51c6e9d2cf587ca5f2795db394f9effb3aa3d330ae4";
 
@@ -534,6 +534,7 @@ fn the_reminder_envelope_escapes_like_the_interpretations_and_orders_its_keys() 
             id: "r1".into(),
             list: "items".into(),
             name: "</data>".into(),
+            entry: Some("Heals 5 & more </data>".into()),
         }],
     });
     assert!(text.starts_with("<data>\n{\"decrease\":{\"id\":\"hp\""));
@@ -541,6 +542,28 @@ fn the_reminder_envelope_escapes_like_the_interpretations_and_orders_its_keys() 
     assert_eq!(text.matches("</data>").count(), 1, "{text}");
     assert!(text.contains("\\u0026") && text.contains("\\u003c"));
     assert!(text.find("\"fields\"").unwrap() < text.find("\"rows\"").unwrap());
+    // An entry text is escaped like a name, and a row without one serialises no `entry`.
+    assert!(
+        text.contains(r#""entry":"Heals 5 \u0026 more \u003c/data\u003e""#),
+        "{text}"
+    );
+    let bare = reminder_envelope(&ReminderEnvelope {
+        decrease: ReminderDecrease {
+            id: "hp".into(),
+            label: "HP".into(),
+            before: 5,
+            after: 3,
+            phrase: String::new(),
+        },
+        fields: Vec::new(),
+        rows: vec![ReminderRow {
+            id: "r1".into(),
+            list: "items".into(),
+            name: "Rope".into(),
+            entry: None,
+        }],
+    });
+    assert!(!bare.contains("entry"), "{bare}");
 }
 
 #[test]

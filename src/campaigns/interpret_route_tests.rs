@@ -16,7 +16,7 @@ type Pairs = Vec<(String, String)>;
 
 const HEAL: &str = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"t"},"r":{"lit":15}},"explanation":"took 15"}]}"#;
 
-fn budgets_at(bytes: usize) -> Budgets {
+pub(super) fn budgets_at(bytes: usize) -> Budgets {
     Budgets {
         bounds: Bounds { bytes, tokens: 384 },
         run: Duration::from_secs(85),
@@ -88,18 +88,18 @@ async fn assisted_with(
     }
 }
 
-fn pairs(items: &[(&str, &str)]) -> Pairs {
+pub(super) fn pairs(items: &[(&str, &str)]) -> Pairs {
     items
         .iter()
         .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
         .collect()
 }
 
-fn csrf() -> String {
+pub(super) fn csrf() -> String {
     "a".repeat(64)
 }
 
-async fn send(
+pub(super) async fn send(
     setup: &Setup,
     method: &str,
     path: &str,
@@ -144,7 +144,7 @@ async fn send(
 }
 
 /// Saves `value` into scalar field `field` through the module's JSON route.
-async fn save_field(setup: &Setup, field: &str, value: &str) -> Value {
+pub(super) async fn save_field(setup: &Setup, field: &str, value: &str) -> Value {
     let base = saved(setup, 1).await.0.to_string();
     let (status, answer, _) = send(
         setup,
@@ -174,7 +174,7 @@ async fn start(setup: &Setup, key: &str) -> (StatusCode, Value) {
     (status, answer)
 }
 
-async fn poll_done(setup: &Setup, job: &str) -> (StatusCode, Value) {
+pub(super) async fn poll_done(setup: &Setup, job: &str) -> (StatusCode, Value) {
     for _ in 0..400 {
         let (status, answer, _) = send(
             setup,
@@ -192,7 +192,11 @@ async fn poll_done(setup: &Setup, job: &str) -> (StatusCode, Value) {
     panic!("job {job} never finished");
 }
 
-async fn apply(setup: &Setup, action: &str, extra: &[(&str, &str)]) -> (StatusCode, Value) {
+pub(super) async fn apply(
+    setup: &Setup,
+    action: &str,
+    extra: &[(&str, &str)],
+) -> (StatusCode, Value) {
     let mut form = pairs(&[("csrf", &csrf())]);
     form.extend(pairs(extra));
     let (status, answer, _) = send(setup, "POST", action, Some(&form), true).await;
@@ -1240,21 +1244,43 @@ async fn the_reminder_origin_is_the_current_decrease_note_holding_its_value() {
         .unwrap();
     // Current note, field holding its after: applicable, one pending note per change.
     let mut view = read().await;
-    let units = crate::campaigns::web::interpret_web::plan(&mut view, &bound, &proposal).unwrap();
+    let units = crate::campaigns::web::interpret_web::plan(
+        &mut view,
+        &bound,
+        &proposal,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     assert_eq!(units.len(), 4);
     assert_eq!(view.notes.pending.len(), 4);
     assert!(view.notes.bundle);
     // The field no longer holds the decrease note's after (the note is still current).
     let mut view = read().await;
     view.snapshot.data["hp"] = json!(71);
-    assert!(crate::campaigns::web::interpret_web::plan(&mut view, &bound, &proposal).is_none());
+    assert!(
+        crate::campaigns::web::interpret_web::plan(
+            &mut view,
+            &bound,
+            &proposal,
+            &std::collections::BTreeMap::new()
+        )
+        .is_none()
+    );
     // An origin revision that is not the current note's.
     let mut view = read().await;
     let older = Origin {
         revision: origin.revision - 1,
         ..bound.clone()
     };
-    assert!(crate::campaigns::web::interpret_web::plan(&mut view, &older, &proposal).is_none());
+    assert!(
+        crate::campaigns::web::interpret_web::plan(
+            &mut view,
+            &older,
+            &proposal,
+            &std::collections::BTreeMap::new()
+        )
+        .is_none()
+    );
     // The same note read as an interpretation: it is not an `unresolved` note.
     let mut view = read().await;
     let interpreted = Origin {
@@ -1262,12 +1288,26 @@ async fn the_reminder_origin_is_the_current_decrease_note_holding_its_value() {
         ..bound.clone()
     };
     assert!(
-        crate::campaigns::web::interpret_web::plan(&mut view, &interpreted, &proposal).is_none()
+        crate::campaigns::web::interpret_web::plan(
+            &mut view,
+            &interpreted,
+            &proposal,
+            &std::collections::BTreeMap::new()
+        )
+        .is_none()
     );
     // The decrease note superseded by a later save: no longer current.
     save_field(setup, "hp", "65").await;
     let mut view = read().await;
-    assert!(crate::campaigns::web::interpret_web::plan(&mut view, &bound, &proposal).is_none());
+    assert!(
+        crate::campaigns::web::interpret_web::plan(
+            &mut view,
+            &bound,
+            &proposal,
+            &std::collections::BTreeMap::new()
+        )
+        .is_none()
+    );
 }
 
 /// Plan 3b, "Bundle Undo": Undo on any member reverts every member in one revision, one
@@ -1623,7 +1663,7 @@ async fn reminders_on(answers: &[String]) -> Assisted {
     .await
 }
 
-async fn remind(setup: &Setup, note: &str) -> (StatusCode, Value) {
+pub(super) async fn remind(setup: &Setup, note: &str) -> (StatusCode, Value) {
     let (status, answer, _) = send(
         setup,
         "POST",
@@ -1831,20 +1871,52 @@ fn the_read_set_rechecks_row_names_by_host_id_and_sent_fields() {
         value: r#"{"int":"2"}"#.into(),
     };
     let reads = vec![name("r1-1", "Rope"), name("r1-2", "Lamp"), quantity.clone()];
-    assert!(reads_hold(&definition, &data, &reads));
+    assert!(reads_hold(
+        &definition,
+        &data,
+        &reads,
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
+    ));
     // Renamed.
     let mut renamed = data.clone();
     renamed["equipment"][1]["name"] = "Lantern".into();
-    assert!(!reads_hold(&definition, &renamed, &reads));
+    assert!(!reads_hold(
+        &definition,
+        &renamed,
+        &reads,
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
+    ));
     // Removed: the host ID is gone, even when another row now bears the name.
     let mut removed = data.clone();
     removed["equipment"] = json!([{"id": "r1-3", "name": "Lamp", "quantity": 1},
                                   {"id": "r1-1", "name": "Rope", "quantity": 2}]);
-    assert!(!reads_hold(&definition, &removed, &reads));
+    assert!(!reads_hold(
+        &definition,
+        &removed,
+        &reads,
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
+    ));
     // A sent cell changed.
     let mut changed = data.clone();
     changed["equipment"][0]["quantity"] = 3.into();
-    assert!(!reads_hold(&definition, &changed, &reads));
+    assert!(!reads_hold(
+        &definition,
+        &changed,
+        &reads,
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
+    ));
     // An unknown list or a row address that is not one.
     assert!(!reads_hold(
         &definition,
@@ -1855,7 +1927,11 @@ fn the_read_set_rechecks_row_names_by_host_id_and_sent_fields() {
                 address: "row:nolist/r1-1".into(),
                 value: "Rope".into(),
             }
-        ]
+        ],
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
     ));
 }
 
@@ -1901,19 +1977,43 @@ fn a_missing_top_level_key_reads_as_unknown_as_it_was_sent() {
     assert!(reads_hold(
         &definition,
         &json!({}),
-        std::slice::from_ref(&unknown)
+        std::slice::from_ref(&unknown),
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
     ));
     assert!(reads_hold(
         &definition,
         &json!({"hp": null}),
-        std::slice::from_ref(&unknown)
+        std::slice::from_ref(&unknown),
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
     ));
-    assert!(!reads_hold(&definition, &json!({"hp": 5}), &[unknown]));
+    assert!(!reads_hold(
+        &definition,
+        &json!({"hp": 5}),
+        &[unknown],
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
+    ));
     let five = Read {
         address: "field:hp".into(),
         value: NoteValue::Int(5).encode().unwrap(),
     };
-    assert!(!reads_hold(&definition, &json!({}), &[five]));
+    assert!(!reads_hold(
+        &definition,
+        &json!({}),
+        &[five],
+        (
+            &crate::campaigns::catalogue::EntryLinks::new(),
+            &std::collections::BTreeMap::new()
+        )
+    ));
 }
 
 /// The reminder's prompt carries only whole-number and choice fields: never a boolean, a text or

@@ -468,6 +468,16 @@ pub(crate) fn entry(
     linked: &Linked,
     key: &str,
 ) -> Result<Option<EntryPage>, AppError> {
+    entry_within(db, linked, key, DISPLAY_CHARACTERS)
+}
+
+/// [`entry`] reading at most `characters` of the description's text.
+fn entry_within(
+    db: &Connection,
+    linked: &Linked,
+    key: &str,
+    characters: usize,
+) -> Result<Option<EntryPage>, AppError> {
     let sql = format!(
         "SELECT {},e.type_id,{},{},e.retired,e.desc_kind,{},{} FROM catalogue_entries e JOIN catalogue_entry_types t ON t.version_id=e.version_id AND t.type_id=e.type_id WHERE e.version_id=?1 AND e.key=?2",
         guarded("e.name", LABEL_BYTES),
@@ -524,7 +534,7 @@ pub(crate) fn entry(
     let description = match badge {
         Badge::Unavailable => Description::Unavailable,
         Badge::Malformed => Description::Malformed,
-        _ => unit_texts(db, &units)?,
+        _ => unit_texts(db, &units, characters)?,
     };
     Ok(Some(EntryPage {
         name,
@@ -562,12 +572,12 @@ fn unit_metadata(db: &Connection, version_id: i64, key: &str) -> Result<Vec<Unit
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Unit texts in author order, cut at 20,000 characters in all (R7).
-fn unit_texts(db: &Connection, units: &[UnitMeta]) -> Result<Description, AppError> {
+/// Unit texts in author order, cut at `limit` characters in all (R7: 20,000 on the page).
+fn unit_texts(db: &Connection, units: &[UnitMeta], limit: usize) -> Result<Description, AppError> {
     let mut statement = db.prepare(&format!(
         "SELECT CASE WHEN typeof({EFFECTIVE})='text' THEN substr({EFFECTIVE},1,?2) END FROM source_units u WHERE u.id=?1"
     ))?;
-    let mut remaining = DISPLAY_CHARACTERS;
+    let mut remaining = limit;
     let mut parts = Vec::new();
     for unit in units {
         if remaining == 0 {
@@ -590,6 +600,112 @@ fn unit_texts(db: &Connection, units: &[UnitMeta]) -> Result<Description, AppErr
         }
     }
     Ok(Description::Units { parts, cut: None })
+}
+
+/// The most characters of an entry's context a reminder carries (plan 3c-2).
+pub(crate) const CONTEXT_CHARACTERS: usize = 2_000;
+
+/// What a reminder may quote of a catalogue entry (plan 3c-2, step 2): the entry's name and
+/// badge, and its context text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntryContext {
+    pub name: String,
+    pub badge: Badge,
+    pub text: String,
+    /// Whether `text` is shorter than the entry's whole context (see [`cut_text`]).
+    pub cut: bool,
+}
+
+/// Control characters other than line feed and tab, and every format character (`Cf`: the
+/// bidi controls, zero-width characters, the soft hyphen, the byte order mark), as spaces.
+pub(crate) fn sanitize_context(text: &str) -> String {
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    text.chars()
+        .map(|c| {
+            let controlled = c.is_control() && c != '\n' && c != '\t';
+            if controlled || get_general_category(c) == GeneralCategory::Format {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `text` cut to at most `max` characters, and whether it was shortened. A cut never splits a
+/// token: when it falls inside one (neither the last kept nor the first dropped character is
+/// whitespace) it backs off to the last whitespace before it, or, when the kept text has none,
+/// drops the digit run that touches the cut, so a number is only ever sent whole (a "15" cut to
+/// "1" would admit a 1 nobody wrote).
+pub(crate) fn cut_text(text: &str, max: usize) -> (String, bool) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return (text.to_owned(), false);
+    }
+    let mut end = max;
+    if end > 0 && !chars[end - 1].is_whitespace() && !chars[end].is_whitespace() {
+        if let Some(space) = chars[..end].iter().rposition(|c| c.is_whitespace()) {
+            end = space;
+        } else {
+            while end > 0 && chars[end - 1].is_numeric() {
+                end -= 1;
+            }
+        }
+    }
+    (chars[..end].iter().collect(), true)
+}
+
+/// The SHA-256 of a context text, in lower-case hex: the fingerprint a reminder binds.
+pub(crate) fn context_fingerprint(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+/// The entry context of `key` in `linked` (plan 3c-2, step 2): the properties first, one
+/// "Label: value" line each as the entry page shows them, then the description (an owner text
+/// as is, unit texts joined with a blank line; none when unavailable or malformed), sanitised
+/// and cut to `max_chars` characters. `None` for an unknown or retired entry (linking already
+/// excludes retired entries; this is defence only).
+///
+/// # Errors
+/// Storage failures, or stored projections outside their bounds.
+pub(crate) fn entry_context(
+    db: &Connection,
+    linked: &Linked,
+    key: &str,
+    max_chars: usize,
+) -> Result<Option<EntryContext>, AppError> {
+    // One character more than is kept, to know whether the text goes on.
+    let Some(page) = entry_within(db, linked, key, max_chars.saturating_add(1))? else {
+        return Ok(None);
+    };
+    if page.retired {
+        return Ok(None);
+    }
+    let mut text = page
+        .properties
+        .iter()
+        .map(|(label, value)| format!("{label}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let description = match page.description {
+        Description::OwnerText(text) => text,
+        Description::Units { parts, .. } => parts.join("\n\n"),
+        Description::Unavailable | Description::Malformed => String::new(),
+    };
+    if !description.is_empty() {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&description);
+    }
+    let (text, cut) = cut_text(&sanitize_context(&text), max_chars);
+    Ok(Some(EntryContext {
+        name: sanitize_context(&page.name),
+        badge: page.badge,
+        text,
+        cut,
+    }))
 }
 
 /// Display values of an entry's properties in declared order. Booleans read Yes/No; enum
