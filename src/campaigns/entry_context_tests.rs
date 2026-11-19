@@ -42,6 +42,23 @@ fn definition() -> Value {
     })
 }
 
+/// The owner entries besides the units' (a Potion with `potion`, two Twins, three long ones).
+fn extras(potion: &str) -> Vec<Value> {
+    vec![
+        owner_entry("potion", "charm", "Potion", potion),
+        owner_entry("twin-a", "charm", "Twin", "First twin, 3 uses."),
+        owner_entry("twin-b", "charm", "Twin", "Second twin, 4 uses."),
+        owner_entry(
+            "big",
+            "charm",
+            "Big",
+            &long_text("Heals 12 hit points.", 2_500),
+        ),
+        owner_entry("long-a", "charm", "Long A", &long_text("Alpha 5.", 1_940)),
+        owner_entry("long-b", "charm", "Long B", &long_text("Beta 7.", 1_940)),
+    ]
+}
+
 struct Remind {
     setup: Setup,
     stub: Arc<StubInterpreter>,
@@ -54,11 +71,7 @@ struct Remind {
 async fn world(answers: &[&str], rows: &[(&str, Option<&str>)]) -> Remind {
     let (dir, store, auth, _clock) = super::fixture().await;
     catalogue_source(&store).await;
-    let extra = vec![
-        owner_entry("potion", "charm", "Potion", "Heals 7 hit points."),
-        owner_entry("twin-a", "charm", "Twin", "First twin, 3 uses."),
-        owner_entry("twin-b", "charm", "Twin", "Second twin, 4 uses."),
-    ];
+    let extra = extras("Heals 7 hit points.");
     publish_catalogue(&store, &spells(extra), 0).await;
     review(&store, 1, "corrected", "Flare burns for 9 rounds.").await;
     let version = publish_definition(&store, &definition()).await;
@@ -101,7 +114,7 @@ async fn world(answers: &[&str], rows: &[(&str, Option<&str>)]) -> Remind {
     ));
     *stub.cached_tokens.lock().unwrap() = Some(1800);
     let handle =
-        AssistantHandle::ready_for_tests_with(Arc::clone(&stub) as _, budgets_at(4096), true);
+        AssistantHandle::ready_for_tests_with(Arc::clone(&stub) as _, roomy_budgets(), true);
     setup.app = crate::auth::app_with_options(
         setup.store.clone(),
         crate::auth::AuthOptions {
@@ -112,6 +125,24 @@ async fn world(answers: &[&str], rows: &[(&str, Option<&str>)]) -> Remind {
     .await
     .unwrap();
     Remind { setup, stub }
+}
+
+/// 4,096 bytes with a token bound the stub's one token per three bytes never reaches, so the
+/// bytes decide what is cut.
+fn roomy_budgets() -> crate::assistant::jobs::Budgets {
+    let mut budgets = budgets_at(4096);
+    budgets.bounds.tokens = 4096;
+    budgets
+}
+
+/// `head`, then filler words up to `length` characters in all.
+fn long_text(head: &str, length: usize) -> String {
+    let mut text = format!("{head} ");
+    while text.chars().count() < length {
+        text.push_str("filler ");
+    }
+    text.truncate(length);
+    text
 }
 
 fn reply(row: &str, literal: i64) -> String {
@@ -312,11 +343,7 @@ async fn an_apply_is_refused_when_the_entry_changed_since_the_reminder() {
                 .await;
             }
             "resealed" => {
-                let extra = vec![
-                    owner_entry("potion", "charm", "Potion", "Heals 8 hit points."),
-                    owner_entry("twin-a", "charm", "Twin", "First twin, 3 uses."),
-                    owner_entry("twin-b", "charm", "Twin", "Second twin, 4 uses."),
-                ];
+                let extra = extras("Heals 8 hit points.");
                 publish_catalogue(&world.setup.store, &spells(extra), 1).await;
             }
             _ => {
@@ -443,7 +470,10 @@ fn the_entry_read_needs_the_same_link_and_fingerprint() {
     assert!(!holds(&EntryLinks::new(), &fingerprints("abc")), "no link");
     // The same fingerprint with a different cut flag or badge fails too.
     assert!(
-        !holds(&link("gear", 3, "rope"), &seen("abc", true, "Owner-written")),
+        !holds(
+            &link("gear", 3, "rope"),
+            &seen("abc", true, "Owner-written")
+        ),
         "cut flag"
     );
     assert!(
@@ -529,4 +559,82 @@ async fn a_changed_key_between_the_reminder_and_the_apply_refuses_it() {
     .await;
     let (status, refused) = apply(&world.setup, &action, &[]).await;
     assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+}
+
+/// The entry texts of the last request, by row, as sent.
+fn sent_entries(world: &Remind) -> Vec<Option<String>> {
+    let dynamic = sent(world);
+    let json = dynamic
+        .trim_start_matches("<data>\n")
+        .trim_end_matches("\n</data>");
+    let value: Value = serde_json::from_str(json).unwrap();
+    value["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["entry"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// An entry longer than 2,000 characters is cut there (at a word); a number in what was sent
+/// is a source, and the apply, which cuts the entry read again alike, gives 200.
+#[tokio::test]
+async fn an_apply_succeeds_after_the_two_thousand_character_cut() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world(&[&reply(r#""r1""#, 12)], &[("Big", None)]).await;
+    let done = reminded(&world).await;
+    let entries = sent_entries(&world);
+    let text = entries[0].as_ref().unwrap();
+    assert!(
+        text.chars().count() <= 2_000 && text.chars().count() > 1_900,
+        "{}",
+        text.len()
+    );
+    assert!(text.starts_with("Heals 12 hit points. filler"));
+    assert!(!text.ends_with("fille"), "a cut at a word");
+    let option = &done["options"][0];
+    assert!(
+        option["sources"][0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("12"),
+        "{option}"
+    );
+    let (status, applied) = apply(&world.setup, option["action"].as_str().unwrap(), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(super::notes_tests::saved(&world.setup, 1).await.1["hp"], 72);
+}
+
+/// Two long entries that do not both fit B: the second is cut by the render to the bytes left;
+/// a number in its sent part is a source and the apply gives 200.
+#[tokio::test]
+async fn an_apply_succeeds_after_the_render_cut() {
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let world = world(
+        &[&reply(r#""r2""#, 7)],
+        &[("Long A", None), ("Long B", None)],
+    )
+    .await;
+    let done = reminded(&world).await;
+    let entries = sent_entries(&world);
+    let (first, second) = (entries[0].as_ref().unwrap(), entries[1].as_ref().unwrap());
+    assert_eq!(first.chars().count(), 1_940, "the first is whole");
+    assert!(
+        second.chars().count() < 1_940 && second.starts_with("Beta 7. filler"),
+        "the second is cut: {}",
+        second.chars().count()
+    );
+    let option = &done["options"][0];
+    assert!(
+        option["sources"][0]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains('7'),
+        "{option}"
+    );
+    let (status, applied) = apply(&world.setup, option["action"].as_str().unwrap(), &[]).await;
+    assert_eq!(status, StatusCode::OK, "{applied}");
+    assert_eq!(super::notes_tests::saved(&world.setup, 1).await.1["hp"], 67);
 }

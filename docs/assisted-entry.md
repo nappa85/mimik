@@ -677,11 +677,13 @@ cached; the length panel's worst wait includes Y while reminders are on).
   is, unit texts joined with a blank line; none when a cited passage is rejected or unreadable),
   control and format characters (bidi controls, zero-width characters) turned into spaces, cut to
   2,000 characters; a cut never ends inside a word or a number (it backs off to the whitespace
-  before it, or drops the digit run that touches it when there is none), so a "15" is never
-  sent as "1". The route reads the texts after the sheet read, in one transaction under the
-  same runtime permit and the query budget, rechecking the sheet's read right and that the
-  latest sealed version is still the link's, and stops once the texts reach B bytes; a newer
-  version, a failure or a timeout gives that row its name only. Texts are sent wherever they fit,
+  before it, a group joiner such as a no-break space not counting as one, or drops the digit run
+  that touches it when there is none, and the kept text may read no number the whole text does
+  not), so a "15" is never sent as "1", nor "1 500" as "1", nor "(1,500)" as "(1,". The route
+  reads the texts after the sheet read, in one transaction under the same runtime permit and
+  the query budget, rechecking the sheet's read right and that the latest sealed version is
+  still the link's, and stops once the texts reach B bytes; a newer version, a failure or a
+  timeout gives that row its name only. Texts are sent wherever they fit,
   on the CPU path too (B there is small, so rarely). Within B and N(B) the last text is dropped
   first (the one that partly fits is cut at a character boundary to the bytes left, and what is
   sent is what is bound), then rows (the last first), then fields; the decrease never, and if it

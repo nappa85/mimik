@@ -632,24 +632,48 @@ pub(crate) fn sanitize_context(text: &str) -> String {
         .collect()
 }
 
-/// `text` cut to at most `max` characters, and whether it was shortened. A cut never splits a
-/// token: when it falls inside one (neither the last kept nor the first dropped character is
-/// whitespace) it backs off to the last whitespace before it, or, when the kept text has none,
-/// drops the digit run that touches the cut, so a number is only ever sent whole (a "15" cut to
-/// "1" would admit a 1 nobody wrote).
+/// `text` cut to at most `max` characters, and whether it was shortened. A cut never leaves a
+/// number the lexer would not read from the whole text (a "15" cut to "1", "1\u{a0}500" cut
+/// to "1\u{a0}", "(1,500)" cut to "(1,"):
+/// - a cut inside a token backs off to the last boundary before it, a boundary being
+///   whitespace that is not a lexer group joiner (a no-break space joins "1 500"), or, when
+///   the kept text has none, drops the digit run that touches the cut;
+/// - every number of the kept text must be among the whole text's numbers with the same value
+///   and place, else the text ends where the first offending one starts.
+///
+/// Both rules repeat until the end stops moving, so cutting `text` again at the length of its
+/// own cut gives that cut (the apply's recheck relies on it).
 pub(crate) fn cut_text(text: &str, max: usize) -> (String, bool) {
+    use crate::assistant::lexer::{is_joiner, phrase_number_spans};
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max {
         return (text.to_owned(), false);
     }
+    let boundary = |c: char| c.is_whitespace() && !is_joiner(c);
+    let whole = phrase_number_spans(text);
     let mut end = max;
-    if end > 0 && !chars[end - 1].is_whitespace() && !chars[end].is_whitespace() {
-        if let Some(space) = chars[..end].iter().rposition(|c| c.is_whitespace()) {
-            end = space;
-        } else {
-            while end > 0 && chars[end - 1].is_numeric() {
-                end -= 1;
+    loop {
+        let before = end;
+        if end > 0 && !boundary(chars[end - 1]) && !boundary(chars[end]) {
+            if let Some(space) = chars[..end].iter().rposition(|c| boundary(*c)) {
+                end = space;
+            } else {
+                while end > 0 && chars[end - 1].is_numeric() {
+                    end -= 1;
+                }
             }
+        }
+        let kept: String = chars[..end].iter().collect();
+        if let Some(start) = phrase_number_spans(&kept)
+            .into_iter()
+            .filter(|span| !whole.contains(span))
+            .map(|(_, start, _)| start)
+            .min()
+        {
+            end = end.min(start);
+        }
+        if end == before {
+            break;
         }
     }
     (chars[..end].iter().collect(), true)

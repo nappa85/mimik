@@ -2049,3 +2049,71 @@ async fn a_read_at_a_length_equals_the_whole_context_cut_to_it() {
         );
     }
 }
+
+/// A group joiner (a no-break space, a narrow no-break space) does not end a token for the
+/// lexer ("1\u{a0}500" is no number), so a cut after or inside such a group must not leave the
+/// "1" behind; nor may a separator ("(1,500)") (plan 3c-2, second fix round).
+#[test]
+fn cut_text_keeps_every_number_the_lexer_would_read_whole_or_drops_it() {
+    use crate::assistant::lexer::phrase_numbers;
+    use crate::catalogues::read::cut_text;
+    let nbsp = "Costs 1\u{a0}500 gp";
+    assert_eq!(phrase_numbers(nbsp), Vec::<u64>::new());
+    // Right after the no-break space, inside "500" and between "1" and the space.
+    for max in [7, 8, 9, 10] {
+        let (kept, cut) = cut_text(nbsp, max);
+        assert!(cut, "{max}");
+        assert_eq!(phrase_numbers(&kept), Vec::<u64>::new(), "{max}: {kept:?}");
+        assert_eq!(kept, "Costs", "{max}");
+    }
+    // Cut after the whole group the number is whole of the lexer's view: nothing to admit.
+    let (kept, _) = cut_text(nbsp, 11);
+    assert_eq!(phrase_numbers(&kept), Vec::<u64>::new());
+    let narrow = "Costs 1\u{202f}500 gp";
+    for max in [8, 9, 10] {
+        let (kept, _) = cut_text(narrow, max);
+        assert_eq!(kept, "Costs", "{max}");
+    }
+    // An ordinary space still ends the token.
+    assert_eq!(cut_text("Costs 15 gp", 8), ("Costs 15".to_owned(), true));
+    // No whitespace: the number the separator joins is dropped with its first part.
+    assert_eq!(cut_text("(1,500)", 3), ("(".to_owned(), true));
+    assert_eq!(cut_text("(1,500)", 4), ("(".to_owned(), true));
+    assert_eq!(cut_text("x(1.5)", 4), ("x(".to_owned(), true));
+}
+
+/// What the apply's recheck relies on: cutting the whole text at the length of an earlier cut
+/// gives that cut again.
+#[test]
+fn cut_text_is_idempotent_at_its_own_length() {
+    use crate::catalogues::read::cut_text;
+    let texts = [
+        "Costs 1\u{a0}500 gp and 2\u{202f}000 more, then 15 hit points.",
+        "(1,500) or 3-5 or 1/2, 12.5 and 1'500 and 7",
+        "abc12345def678 9",
+        "no digits at all just words and more words",
+        "12345678901234567890 99 \u{661}\u{665} 15",
+        "tab\tseparated 40\n\nlines 7\u{3000}x 8",
+        "\u{e9}\u{e9}1\u{a0}\u{a0}2 3",
+    ];
+    for text in texts {
+        let length = text.chars().count();
+        for max in 0..=length + 1 {
+            let (kept, cut) = cut_text(text, max);
+            if cut {
+                let again = cut_text(text, kept.chars().count());
+                assert_eq!(again, (kept.clone(), true), "{text:?} at {max}: {kept:?}");
+            } else {
+                assert_eq!(kept, text);
+            }
+            // Whatever is kept reads the same numbers, at the same places, as the whole.
+            let whole = crate::assistant::lexer::phrase_number_spans(text);
+            for span in crate::assistant::lexer::phrase_number_spans(&kept) {
+                assert!(
+                    whole.contains(&span),
+                    "{text:?} at {max}: {kept:?} has {span:?}"
+                );
+            }
+        }
+    }
+}

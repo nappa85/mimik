@@ -22,7 +22,7 @@ fn is_separator(c: char) -> bool {
 }
 
 /// Group joiners: two runs joined by one of these ("1 500", "1'500") both give nothing.
-fn is_joiner(c: char) -> bool {
+pub(crate) fn is_joiner(c: char) -> bool {
     matches!(c, '\u{a0}' | '\u{202f}' | '\'' | '\u{2019}')
 }
 
