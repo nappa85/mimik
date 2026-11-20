@@ -103,8 +103,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   PNGs, 512 MiB text, 20,000 units) and the fixed 2 GiB staging total (use free space minus the
   512 MiB margin); keep per-page/per-request bounds and one upload at a time; CLI import keeps
   its JSON bounds. Plan reviewed and merged (`docs/source-limits-plan.md`, also several exclusion
-  boxes per page and a content-addressed PDF store). Next: implement slice by slice, before route
-  A's 4c builds on staging.
+  boxes per page and a content-addressed PDF store). Slice 1 (worker opens by path, 20,000-page
+  frame bound) merged 2026-11-20; its four live tests run only in CI. Next: slice 2 (migration
+  036, which also removes slice 1's temporary 2,000-page upload guard), before route A's 4c
+  builds on staging.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
