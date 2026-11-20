@@ -46,7 +46,7 @@ base64 = "0.22"
 jsonschema = { version = "=0.58.6", default-features = false }
 lopdf = { version = "0.45", default-features = false }
 png = "0.18"
-rusqlite = { version = "0.37", features = ["bundled", "functions", "hooks"] }
+rusqlite = { version = "0.43", features = ["bundled", "functions", "hooks"] }
 rustix = { version = "1", features = ["fs", "process", "net", "thread", "pipe", "event", "time", "stdio"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` (also enabled by rig-core): the assistant's schema must reach llama.cpp in
@@ -68,7 +68,7 @@ unicase = "=2.10.0"
 # tree through clap.
 strsim = "=0.11.1"
 # The suggest route's LRUs (step 4); follows rusqlite's own hashlink so cargo-deny sees one copy.
-hashlink = "0.10"
+hashlink = "0.12"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
 cel = { version = "=0.15.0", default-features = false }
 # Interpretation assistant (step 2c-1, D-H, ASSIST-39): the provider client; Mimik's own
