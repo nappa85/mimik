@@ -89,7 +89,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   procfs's default features. When a release with it ships, bump the `hakoniwa` pin and remove the
   RUSTSEC-2023-0089, RUSTSEC-2026-0574..0582 and RUSTSEC-2026-0543 (chrono) ignores from
   `.cargo/audit.toml` (DEP-24): with Mimik's hakoniwa features (no defaults) neither heapless nor
-  chrono stays in the tree. procfs's own jiff option is eminence/procfs#374 (open, no PR).
+  chrono stays in the tree. procfs's own jiff option: eminence/procfs#379 (opened 2026-11-20, for #374).
 
 ## Next steps
 
