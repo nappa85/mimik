@@ -111,7 +111,8 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         with page.expect_navigation(wait_until="load"):
             page.locator('form[action="/auth/login"] button').click()
         goto("/admin/materials/uploads")
-        token = page.locator('[name="csrf"]').input_value()
+        # The upload form's token: the navigation's logout form carries one too.
+        token = page.locator('form[data-form="upload"] [name="csrf"]').input_value()
         refused = context.request.post(
             ORIGIN + "/admin/materials/uploads",
             headers={"Origin": ORIGIN, "Content-Type": "multipart/form-data; boundary=bad"},
