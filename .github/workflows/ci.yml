@@ -142,8 +142,21 @@ jobs:
         with:
           name: synthetic-smoke-inputs
           path: smoke-source
+      # Only the helper reads the database: Ubuntu 22.04's system SQLite (3.37) cannot parse the
+      # schema (`->>` needs 3.38, migration 036's ordered group_concat needs 3.44). The binary
+      # bundles its own SQLite and still runs on the runner's own system libraries. The helper
+      # uses the same pinned uv and Python 3.12.12 as containers/ci.Dockerfile (a standalone
+      # build with its own current SQLite); the uv binary is copied out of the digest-pinned image.
+      - name: Python for the smoke helper (bundled SQLite)
+        run: |
+          id=$(docker create ghcr.io/astral-sh/uv:0.9.27@sha256:143b40f4ab56a780f43377604702107b5a35f83a4453daf1e4be691358718a6a)
+          docker cp "$id:/uv" "$RUNNER_TEMP/uv"
+          docker rm "$id"
+          UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" "$RUNNER_TEMP/uv" venv --managed-python --python 3.12.12 "$RUNNER_TEMP/helper-venv"
+          "$RUNNER_TEMP/helper-venv/bin/python" -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 45), sqlite3.sqlite_version"
+          echo "$RUNNER_TEMP/helper-venv/bin" >> "$GITHUB_PATH"
       - name: Run packaged binary from isolated working directory
-        run: python3 tools/smoke_release.py release/mimik-0.1.0-linux-x86_64/mimik --source-fixture smoke-source --auth
+        run: python tools/smoke_release.py release/mimik-0.1.0-linux-x86_64/mimik --source-fixture smoke-source --auth
       - name: Build isolated source-rebuild environment
         run: docker build -f containers/ci.Dockerfile -t mimik-ci .
       - name: Verify corresponding source builds offline without dependency cache

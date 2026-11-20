@@ -647,6 +647,12 @@ fn push_word(
     Ok(())
 }
 
+/// The text-page flags of the words stage. No `PRESERVE_IMAGES`: words never read image blocks,
+/// and the stext device keeps one per image or shading paint, so a hostile page would grow
+/// memory with its operator count.
+pub(super) const WORDS_FLAGS: TextPageFlags =
+    TextPageFlags::CLIP.union(TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE);
+
 /// The words of one page: whitespace and font-size gaps split a line's characters; a run longer
 /// than the word bound is cut at a character boundary.
 fn page_words(document: &PdfDocument, info: &Page) -> Result<PageWords, Error> {
@@ -654,11 +660,7 @@ fn page_words(document: &PdfDocument, info: &Page) -> Result<PageWords, Error> {
         document.load_pdf_page(i32::try_from(info.n - 1).map_err(|_| Error::Unsupported)?)?;
     let mut correction = page.ctm()?.invert().ok_or(Error::Unsupported)?;
     correction.concat(matrix(info.transform));
-    let text = page.to_text_page(
-        TextPageFlags::CLIP
-            | TextPageFlags::PRESERVE_IMAGES
-            | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE,
-    )?;
+    let text = page.to_text_page(WORDS_FLAGS)?;
     let mut words = Vec::new();
     let mut chars = 0_u32;
     for block in text.blocks() {

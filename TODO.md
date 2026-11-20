@@ -152,6 +152,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
+- Render-stage image blocks (review 2026-11-20, Major): `text()` in
+  `src/sources/worker/operations.rs` keeps `PRESERVE_IMAGES`, so a page of a few hundred plain
+  full-page `sh` operators (no tiling pattern) can rasterise within the deadline and then retain
+  N x mediabox RGBA pixmaps. Add a `shading-only` hostile-corpus case and either cap image blocks
+  before allocation or get image bounds without `PRESERVE_IMAGES`.
 - Browser smoke CSP coverage (review 2026-11-17, Minor): the signed-in scenario checks for CSP
   violations only on the page each Owner stage ends on (the probe resets per page), and
   `tools/lan_client.py` installs no probe; record violations across navigations (a

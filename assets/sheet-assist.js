@@ -87,7 +87,7 @@ function answerKey(unit, shown) {
 }
 
 function announce(text) {
-  const region = document.querySelector('main [role="status"]');
+  const region = document.getElementById('sheet-status');
   if (region) {
     region.textContent = text;
   }

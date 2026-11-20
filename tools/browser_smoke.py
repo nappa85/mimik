@@ -3,8 +3,10 @@
 import argparse
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
@@ -1246,7 +1248,9 @@ def run_assist_js_browser(page, campaign, version):
         "Leaving a changed HP did not save 84 -15 as 69 with its note and Undo",
     )
     require(
-        page.locator('main [role="status"]').inner_text() == "Current HP saved.",
+        # The page's own live region; each unit's assist and reminder box is also a
+        # `role="status"` inside `main`.
+        page.locator("#sheet-status").inner_text() == "Current HP saved.",
         "The live region did not announce the save",
     )
     # Retyping the saved sum is compared with the acknowledged 69, not the raw last
@@ -1663,7 +1667,7 @@ def run_assist_js_browser(page, campaign, version):
     require(
         len(navigations) == moved
         and hp.input_value() == "91"
-        and "Not undone" in page.locator('main [role="status"]').inner_text()
+        and "Not undone" in page.locator("#sheet-status").inner_text()
         and not errors,
         f"An Undo clicked during its field's save was retargeted or failed: {errors}",
     )
@@ -1993,8 +1997,20 @@ def run_workspace_browser(
     except AssertionError:
         raise
     except Exception:
+        # Exception class and the last frames' file, function and line only: the message can
+        # carry page URLs, selectors and typed values.
+        error_type, _, error_tb = sys.exc_info()
+        frames = "; ".join(
+            f"{Path(frame.filename).name}:{frame.lineno} {frame.name}"
+            for frame in [
+                frame
+                for frame in traceback.extract_tb(error_tb)
+                if Path(frame.filename).resolve().parent == Path(__file__).resolve().parent
+            ][-3:]
+        )
         raise AssertionError(
-            f"Workspace browser operation failed at {stage} (diagnostics redacted)"
+            f"Workspace browser operation failed at {stage} "
+            f"({error_type.__name__} at {frames}; diagnostics redacted)"
         ) from None
     finally:
         owner_context.close()
