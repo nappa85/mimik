@@ -46,7 +46,7 @@ process, never a container
 Authenticated startup refuses to serve until an Owner exists (`bootstrap-owner`). The
 prototype keeps the legacy identity/notes records and the native MÖRK BORG editor, isolated
 from the private campaign tables. `--assistant` turns the interpretation assistant on, with its
-`--assistant-model*`, `--models-dir`, `--assistant-runtime` and `--assistant-threads` options
+`--assistant-model*`, `--models-dir`, `--assistant-runtime`, `--assistant-threads` and `--assistant-device` options
 ([model-runtime.md](model-runtime.md)); builds with the `dev-endpoint` feature (never a
 release) also take `--assistant-dev-endpoint` and `--assistant-dev-token-file` for tests. The
 hidden `assistant-runner` subcommand is the model server's runner and the start-time probe.
@@ -160,7 +160,7 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
 `ubuntu-24.04`), with read-only contents permission and pinned actions.
 
 1. **llama-fetch** (in the `mimik-ci` container): `tools/llama_runtime.py fetch` downloads the
-   pinned llama.cpp asset, the test model and the source (`git archive` of the pinned commit),
+   pinned llama.cpp asset, the two CI test models and the source (`git archive` of the pinned commit),
    verifies every size and hash against `schemas/llama-runtime-v1.json`, and uploads them.
 2. **checks** (needs llama-fetch; in the `mimik-ci` container): `cargo fmt --check`; `cargo clippy --locked
    --all-targets --all-features -- -D warnings` and the same with default features; `ruff check tools` and `ruff format --check
@@ -192,7 +192,9 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    refuses the namespaces the sandbox needs; no Rust toolchain): verifies and unpacks the release,
    reapplies the manifest's modes, lifts the Ubuntu AppArmor user-namespace
    restriction for the job, checks `llama-server --version` and `--help` for every flag, runs
-   `mimik assistant-runner --probe` (fails below level 1), then the confinement test binary's
+   `mimik assistant-runner --probe` (fails below level 1), starts the unpacked release with
+   `--assistant` and requires Ready at level 1 and a clean SIGINT exit
+   (`tools/assist_release_smoke.py`), then the confinement test binary's
    seccomp, endpoint, runner and live tests against the unpacked runtime and the test model,
    with the release's own binary as the runner.
 7. **deployable:** always runs and fails unless all six jobs succeeded.

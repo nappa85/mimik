@@ -103,6 +103,37 @@ class LlamaRuntimeTests(unittest.TestCase):
                 self.assertEqual(int(entry["mode"], 8) & 0o022, 0)
         self.assertEqual(len(data["source"]["tar_sha256"]), 64)
 
+    def test_the_real_manifest_pins_both_ci_models_to_a_commit_with_size_and_hash(self):
+        data = llama_runtime.manifest()
+        models = llama_runtime.pinned_models(data)
+        self.assertEqual(
+            [model["name"] for model in models],
+            ["stories260K.gguf", "SmolLM2-135M-Instruct-Q4_K_M.gguf"],
+        )
+        for model in models:
+            self.assertRegex(model["revision"], r"^[0-9a-f]{40}$")
+            self.assertIn(f"/resolve/{model['revision']}/", model["url"])
+            self.assertRegex(model["sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(model["size"], 0)
+            self.assertTrue(model["licence"])
+
+    def test_verify_model_checks_every_pinned_model_and_tolerates_none_extra(self):
+        data = synthetic()
+        data["smoke_model"] = {"name": "s.gguf", "sha256": digest(b"SMOKE"), "size": 5}
+        with tempfile.TemporaryDirectory() as temp:
+            models = Path(temp) / "models"
+            models.mkdir()
+            (models / "m.gguf").write_bytes(b"GGUF")
+            with self.assertRaises(OSError):
+                llama_runtime.verify_model(models, data)
+            (models / "s.gguf").write_bytes(b"SMOKE")
+            llama_runtime.verify_model(models, data)
+            (models / "s.gguf").write_bytes(b"OTHER")
+            with self.assertRaises(ValueError):
+                llama_runtime.verify_model(models, data)
+            # A manifest with only the confinement model still verifies.
+            llama_runtime.verify_model(models, synthetic())
+
     def test_verify_reapplies_modes_and_refuses_extra_missing_changed_or_linked_files(self):
         data = synthetic()
         with tempfile.TemporaryDirectory() as temp:

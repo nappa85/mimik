@@ -21,8 +21,9 @@ licensed under AGPL-3.0-only; see `LICENSE` and the licensing section of the
   Derived values and checks use a bounded CEL profile and are advisory: they never block a save
   ([formulas](docs/formulas.md)). Read-only [catalogues](docs/catalogues.md) can be browsed
   through a sheet.
-- **Assisted entry.** Number cells accept sums such as `84 -15`, record change notes with Undo,
-  accept unknown values and save per field ([assisted entry](docs/assisted-entry.md)).
+- **Assisted entry.** Each cell saves on its own; number cells accept sums such as `84 -15`,
+  changes record notes with Undo, unknown values are accepted, and catalogue-backed names get
+  suggestions and "Which one?" ([assisted entry](docs/assisted-entry.md)).
 - **Sources.** Owner-supplied manuals are imported locally with page images, preserved tables
   and a review history ([sources and retrieval](docs/sources-and-retrieval.md)). In normal
   operation manuals never leave the machine; the optional extraction reviewer
@@ -30,9 +31,10 @@ licensed under AGPL-3.0-only; see `LICENSE` and the licensing section of the
   the HTTPS endpoint the owner selects.
 - **Native MÖRK BORG sheet** for the Italian 2025 core rules, once that exact source is
   registered.
-- No language model is integrated into the application. Model evaluation is prototype tooling
-  under `tools/` ([evaluation tooling](docs/evaluation-tooling.md),
-  [results](docs/results.md)).
+- **Optional local model assistant** (`--assistant`, off by default): a pinned llama.cpp
+  server run as a confined child proposes readings and reminders that the player confirms;
+  proof-of-concept quality, not certified ([model runtime](docs/model-runtime.md),
+  [evaluation tooling](docs/evaluation-tooling.md), [results](docs/results.md)).
 
 ## Run
 

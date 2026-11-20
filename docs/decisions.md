@@ -30,7 +30,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 
 ## Assisted sheet entry
 
-- **D-B / D-R** (2026-10-19) A picked catalogue name is stored as plain text; once the player answers "Which Sword?", the entry key is stored beside it in a declared optional text property, and the cell still shows the text.
+- **D-B / D-R** (2026-10-19) A picked catalogue name is stored as plain text; once the player answers "Which one?", the entry key is stored beside it in a declared optional text property, and the cell still shows the text.
 - **D-C / D-S** (2026-10-19) Each field and list cell saves on its own on Enter; lists keep Add, Remove and Move, plus a quick-add line ("3 torches", "healing potion x2") with a deterministic parse in the POC.
 - **D-AA** (2026-10-19) With JavaScript a field also saves when the player leaves it, only if its value changed since its last save or offer; without JavaScript Enter is the only way.
 - **D-D** (2026-10-19) The model quality bar (EVAL-1) is waived for the POC and revisited before release; engineering gates stay.
@@ -41,7 +41,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **D-I / D-K** (2026-10-19) Multi-field bundles (applied and undone as one) and dismissible reminders are their own step after model interpretation; POC knowledge is item names plus linked entry text.
 - **D-M** (2026-10-19) `null` is the unknown value of every integer cell: blank input is unknown, and an unreadable number in a new row, newly present property or on create is stored as unknown with its scribble.
 - **D-N / D-X1** (2026-10-19) Undo covers the last change of each field only, including a blanked (`erased`) value; older history is viewable.
-- **D-O** (2026-10-19) A name links to a catalogue entry automatically only when exactly one eligible entry matches; otherwise the sheet asks "Which Sword?".
+- **D-O** (2026-10-19) A name links to a catalogue entry automatically only when exactly one eligible entry matches; otherwise the sheet asks "Which one?".
 - **D-P** (2026-10-19) Stale or expired model proposals never become a literal; they need reconfirmation.
 - **D-Q / D-X4** (2026-10-19) Sign-led input ("-15") on a number field is applied literally, then a non-blocking, dismissible offer "Did you mean 84 − 15 = 69?" switches in one click; multi-term input ("84 -15") is computed directly.
 - **V3** (2026-10-19) "-5+3" is a sign-led sum: applied as −2 and offered relative to the value before ("84 − 5 + 3 = 82"); the leading sign must touch its digits.
@@ -145,7 +145,7 @@ Assisted-sheet IDs are D-B…D-AA and V, U, N, S, P. Project rules (schedule, re
 - **M3-D6** (2026-10-16) History recomputes from the sheet's pin; stale or withdrawn approval does not stop evaluation; create evaluates nothing; a change with an error on either side reads as unknown.
 - **M3-Q5** (2026-10-16) `dependency_failed` names the first derived field it reads, in evaluation order, whose own result is an error.
 - **M3-K40** (2026-10-16) Stored inputs the formula layer does not declare are projected away before evaluation; any other undeclared key is refused; only an `InputError` renders "Derived values unavailable" (200).
-- **M4-SCOPE** (2026-10-16) Lists ship as plain list editing: every declared list property is editable; a per-property `editable` flag and an item catalogue in the definition are later.
+- **M4-SCOPE** (2026-10-16) Lists ship as plain list editing: every declared list property is editable; a per-property `editable` flag is later.
 - **D1** (2026-10-16) List form keys are positional: `id-f-r`, `row-f-r-p`, `set-f-r-p` (`present`/`absent`) and `op` from the clicked submitter; indices match `0|[1-9][0-9]{0,2}`; submitted row order is saved order.
 - **D2** (2026-10-16) Sheet POSTs are parsed with a 65,536-pair cap, then CSRF and authorization, then an O(n) exact-key admission; a bad key set answers 400.
 - **D3** (2026-10-16) Item IDs are host-managed: each new ID is `r<N>-<k>` (N the revision written, k the list's new-row number), enforced by the writer after the conflict check; IDs label row slots and never return once removed.

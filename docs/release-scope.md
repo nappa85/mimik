@@ -2,7 +2,8 @@
 
 Mimik is a sheet-first tabletop RPG companion for players at a physical table. This archive
 holds one self-contained Linux x86_64 binary. It runs on one machine and serves browsers on the
-same private network. No Node.js, Python, GPU, API key or internet access is needed.
+same private network. Linux x86_64 is the only verified platform. No Node.js, Python, GPU, API
+key or internet access is needed; the assistant and its model downloads are optional.
 
 ## What this release supports
 
@@ -21,7 +22,13 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
     browsing through the sheet, number cells that accept sums such as `84 -15`, change notes
     with Undo, unknown values and per-field and per-cell saving (each list cell, new row and
     row action saves on its own; Remove is followed by "Row removed · Undo"), and a
-    quick-add line ("3 torches") on lists whose definition declares one;
+    quick-add line ("3 torches") on lists whose definition declares one. On lists whose
+    definition links a catalogue, a name cell warns when the name is not in the catalogue and
+    asks "Which one?" when several entries share it; the pick is stored as an advisory
+    catalogue key beside the name; name suggestions come as you type. None of this needs a
+    model. Saved runtime sheet pages load one script module under a strict CSP; every save,
+    Undo, switch, quick-add, row action, catalogue warning, Browse and "Which one?" also works
+    without JavaScript. Name suggestions and the assistant's readings and reminders need it;
   - native sheets for the Italian 2025 MÖRK BORG core rules, once that exact source is
     registered;
   - on both, a "Not validated" flag in the header of any saved revision whose checks did not
@@ -38,20 +45,38 @@ same private network. No Node.js, Python, GPU, API key or internet access is nee
 - **Unauthenticated prototype.** `--no-auth` serves the old single-user editor on
   `127.0.0.1` only. It is not protected by accounts and does not see private campaign data.
 
-No language model file is part of this release. The archive carries the pinned official
-llama.cpp CPU and Vulkan builds (`llama/`, b12110, MIT; pinned and hash-checked, its source is at the upstream commit named in `SOURCE.txt`) for the
-optional interpretation assistant, which is off unless started with `--assistant` and proposes
-readings the player must confirm; it never applies sheet changes on its own. Its scope is
-Linux `x86_64` on the CPU: the model server runs only inside Mimik's own sandbox (Hakoniwa, built into the binary: nothing to install), where the
-start-time probe shows unprivileged user namespaces work; otherwise the assistant stays off and
-`/admin/assistant` says how to enable them (it never runs the model server unconfined). Level 1 is verified on Ubuntu 24.04 with
-`kernel.apparmor_restrict_unprivileged_userns` switched off (the CI runner) and on the dev host
-(Gentoo, no such restriction); with Ubuntu 24.04's default restriction on, CI records the
-probe's outcome without certifying it. On a machine with a hardware GPU the assistant tries
-the GPU path first (the Vulkan build, `--assistant-device`) and falls back to the CPU; the GPU
-path is not certified: CI does not cover it, and its live checks have been run on the dev
-host's GPU only (RX 6650 XT, Mesa RADV; `results.md`). The documented minimum host for the bundled build (Ubuntu 22.04 `x86_64`) is not
-yet verified on a VM.
+## The optional assistant
+
+Scope: **local endpoint, POC quality, not certified** (D-D: the model quality bar is waived;
+`limitations.md`, ASSIST-L4). It is off unless started with `--assistant`.
+
+- **What it does.** It reads a number scribble the cell could not take, and, when the Owner's
+  Reminders setting is on (on by default on the GPU path, off on the CPU path), reminds the
+  player after a saved decrease. Both are narrow proposals the player must confirm; the model never
+  applies a sheet change, never judges legality, and its output is shown before any write.
+  Without the flag there is no model child, no job route and no client.
+- **Runtime.** The archive carries the pinned official llama.cpp b12110 CPU and Vulkan builds
+  (`llama/`, MIT; hash-checked; source at the upstream commit named in `SOURCE.txt`). No model
+  file ships. The model server runs only inside Mimik's own sandbox (Hakoniwa, built into the
+  binary) where the start-time probe shows unprivileged user namespaces work; otherwise the
+  assistant stays off and `/admin/assistant` says how to enable them. It never runs unconfined.
+- **Owner setting.** At `/admin/assistant` the Owner sees the runtime's state, switches models,
+  sets the reply length, turns reminders on or off and downloads models. A download is Owner-started and licence-confirmed,
+  goes over HTTPS only to the pinned Hugging Face hosts, and is size- and hash-verified before it
+  is used. It needs the operating system's CA certificate store (`model-downloads.md`).
+  Mimik sends no sheet, note or player text in a download.
+- **Verified.** Linux `x86_64` only. Confinement level 1 on Ubuntu 24.04 with
+  `kernel.apparmor_restrict_unprivileged_userns` switched off (the CI runner) and on the dev
+  host (Gentoo); with Ubuntu 24.04's default restriction on, CI records the probe's outcome
+  without certifying it. There is no level 2, and level 3 is not used. The GPU path (Vulkan,
+  tried first on a hardware GPU, falling back to the CPU) is not covered by CI and was measured
+  on one machine only: an RX 6650 XT with Mesa RADV (`results.md`). The documented minimum host
+  (Ubuntu 22.04 `x86_64`) is not yet verified on a VM. macOS and Windows have no assistant.
+- **Open limits** (`limitations.md`): L1 (change notes are unsealed), ASSIST-L4 (no quality
+  bar), ASSIST-L5 (unbounded history), ASSIST-L34 and ASSIST-L36 (hosts and GPUs not
+  verified), ASSIST-L24 (no confinement fallback), ASSIST-L20 (the CPU path needs enough
+  threads), C1 (no model file ships), ASSIST-L58 to ASSIST-L60 (download hosts, proxies, CA
+  store).
 
 `THIRD-PARTY-NOTICES.md` includes the MuPDF 1.27.2 vendored-tree section: all licence
 documents shipped by mupdf-sys 0.8.0, including disabled components and fonts, the full
@@ -86,13 +111,17 @@ Options:
   under the working directory.
 - `./mimik --help` lists the operator subcommands (accounts, registry, sources, definitions,
   catalogues).
-- `--assistant`: the interpretation assistant. Put the model file in `data/models/` (mode
-  0700; the default is `granite-4.2-3b-Q4_K_M.gguf`, SHA-256 `e0406663…`; another file needs
-  `--assistant-model local:<name>.gguf --assistant-model-sha256 <hex>`). Mimik runs the
-  bundled `llama/` build itself and measures it before the assistant takes jobs; on a slow
-  machine it stays off and says why. `./mimik assistant-runner --probe --runtime llama
-  --models-dir data/models --model local:<name>.gguf` reports the confinement level this
-  machine reaches.
+- `--assistant`: the interpretation assistant. It needs a model file in the models folder (by default `data/models/`, beside the database;
+  mode 0700): download one of the two pinned defaults or another Hugging Face GGUF from
+  `/admin/assistant`, or place a GGUF file there by hand. The default depends on the device: Qwen3.5-9B `Q4_K_M` on the GPU path (Granite
+  if its file is missing or does not match its pinned hash), `granite-4.2-3b-Q4_K_M.gguf` (SHA-256 `e0406663...`) on the CPU
+  path. Another file needs `--assistant-model local:<name>.gguf --assistant-model-sha256 <hex>`,
+  and a model the Owner switched to on `/admin/assistant` replaces the flag. Related options:
+  `--models-dir`, `--assistant-runtime`, `--assistant-threads` (default: physical cores minus
+  one), `--assistant-device` (`auto`, `cpu` or a GPU's PCI address). Mimik runs the bundled
+  `llama/` build itself and measures it before the assistant takes jobs; on a slow machine it
+  stays off and says why. `./mimik assistant-runner --probe --runtime llama --models-dir
+  data/models --model local:<name>.gguf [--model-sha256 <hex>]` reports the confinement level this machine reaches.
 
 Assistant requirements on the host:
 
@@ -129,7 +158,7 @@ PDFs.
 The CI workflow ends in one status, **`deployable`**, which passes only when every job below
 succeeded for the same revision:
 
-- **llama-fetch:** the pinned llama.cpp release asset, the test model and the llama.cpp source (a build-time input for the notice
+- **llama-fetch:** the pinned llama.cpp release asset, the two CI test models and the llama.cpp source (a build-time input for the notice
   texts, never shipped), every size and hash checked against the manifest;
 - **checks:** formatting, Clippy with all and pedantic lints denied, all Rust tests
   (`--locked --all-targets --all-features`), Ruff and the Python helper tests, workflow lint,
@@ -142,7 +171,9 @@ holding exactly the pinned files);
   an offline rebuild of the corresponding source with no dependency cache;
 - **browser-smoke:** the same binary in offline Chromium at 1280×720 and 390×844: forms,
   long text, overflow and reflow, sharing, source review and sheet editing, runtime sheets
-  with and without JavaScript (the sheet module under its strict CSP);
+  with and without JavaScript (the sheet module under its strict CSP), and name suggestions
+  with "Which one?"; the assistant's page flow runs in a development build (never released)
+  against a fake model server;
 - **lan-smoke:** the same binary on isolated networks with separate clients, a denied subnet
   and an HTTPS reverse proxy, including Secure cookies and rendered QR codes;
 - **llama-runtime:** on Ubuntu 24.04 from the unpacked archive, with the AppArmor user-namespace
@@ -152,14 +183,17 @@ holding exactly the pinned files);
   against the unpacked `llama/` (seccomp, endpoint check, runner, and the server under the real
   profiles with the test model: token refusal, socket and peer checks, an adversary in the
   sandbox reaching nothing, forged sandbox errors keeping level 1, SIGKILL of Mimik ending the
-  sandbox), with a minimum count of tests run so a filter matching too little fails.
+  sandbox), with a minimum count of tests run so a filter matching too little fails; and the
+  unpacked release started with `--assistant` (bundled `llama/`, the SmolLM2-135M
+  test model, the CPU device), which must reach Ready at level 1 after priming and calibration and then stop on
+  SIGINT with a clean exit and no llama-server left.
 
 **Green means** these checks passed for this revision and these exact archives. It does not mean
 a finished RPG companion.
 
 **Not certified:** physical phone or router setups; Windows, macOS or other CPU architectures;
-browsers other than Chromium; public internet exposure; path-prefix proxying; the quality or
-speed of any model's interpretations, inference on a GPU, API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
+browsers other than Chromium; public internet exposure; path-prefix proxying; the assistant as a whole (local endpoint, POC quality, D-D) and the quality or
+speed of any model's interpretations; inference on any GPU (the GPU path was measured on one RX 6650 XT only, outside CI); API providers; PDF extraction or OCR; accuracy of any real manual's extraction; fidelity to
 official sheet layouts; any game's rules legality; tamper evidence of change notes (they are
 not sealed or verified); protection against unbounded growth (no per-account write-rate limit
 or storage guard for sheet history and notes).

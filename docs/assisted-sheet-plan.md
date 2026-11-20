@@ -664,25 +664,6 @@ set). Remaining:
    weekday window, fan on manual). Record in `docs/results.md`, and the reminder prime's size in
    `docs/model-runtime.md` if it changed noticeably.
 
-### 5 Docs, release scope, gate
-
-- Update `docs/assisted-entry.md`, `architecture.md` (the model runtime is no longer absent),
-  `evaluation-tooling.md` (its "no provider or model integration" scope),
-  `release-scope.md` (schema 23, the sheet module under its strict CSP, the local model as
-  confirm-only, the bundled llama.cpp build, its licence and source, the confinement levels and
-  which were verified, model downloads over HTTPS, Linux x86_64 as the only verified platform,
-  the GPU path measured on one RX 6650 XT), the runtime definition contract (the
-  `catalogue` member), publication and dependency docs; replace the statements this work
-  reverses: catalogue Q4 (not in the catalogue is a warning, "Which Sword?" remembered), the
-  catalogue writer membership check (`catalogue_ref`, not built; the key is advisory),
-  "no model proposes", the accuracy bar (waived, D-D), and "the LLM does not judge at play
-  time" (narrow confirmable proposals and reminders).
-- `cargo about`, audit, packaging (the runtime files verified against the manifest), and the
-  unpacked smoke with the assistant off and once on the production runtime path (§1.4a, CI
-  workflow); stub-endpoint coverage stays in the feature-enabled test build.
-- Assistant scope stated as "local endpoint, POC quality, not certified (D-D)", with L1 and the
-  other open limitations listed.
-
 ## 3. Verification
 
 - Rust gate: fmt, strict Clippy, locked tests (red then green), audit, `cargo about`, release
