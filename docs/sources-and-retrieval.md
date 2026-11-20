@@ -193,6 +193,7 @@ are part of the upload model. A removal retains its historical boxes but exposes
 exclusion. Writes recheck Owner/CSRF in the transaction and require both the upload revision
 and exclusion revision. Selection changes that would deselect an excluded page are refused
 until the Owner replaces or removes the exclusion; unrelated selection/metadata changes retain it.
+The schema uses `group_concat(... ORDER BY ...)` (migration 036) and `->>`, so external tools that read the database need SQLite 3.44 or later.
 
 The manager owns a process-wide ledger of used bytes and reservations. Total staging is
 2 GiB; free space must cover outstanding reservations plus 512 MiB for SQLite/WAL. Each

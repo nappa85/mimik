@@ -963,7 +963,7 @@ fn files_of_rows_dropped_by_migration_036_are_removed_at_the_next_start() {
     assert!(staged.join("page-1.png").exists());
     std::fs::write(dir.path().join("outside"), b"keep").unwrap();
     std::os::unix::fs::symlink(dir.path().join("outside"), staged.join("link")).unwrap();
-    // The migration drops the four tables (cascading from the upload row) and recreates them.
+    // The migration drops the four tables (children first) and recreates them.
     m.0.store
         .upload_storage(|db| {
             db.execute_batch(include_str!("../../migrations/036_upload_limits.sql"))?;

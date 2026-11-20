@@ -31,14 +31,12 @@ nothing re-verifies the file. Pages are published inside the render callback
 
 | Limit | Where |
 | --- | --- |
-| 128 MiB PDF | `auth/uploads.rs:35-36` (`FILE_LIMIT`, `BODY_LIMIT`), `:46` (`DefaultBodyLimit::max`), `:163`, `:174` (`Counting`), `:311-316` (multer `whole_stream`, `for_field("file")`), `:231` (per chunk), `:349` (Content-Length); `staging.rs:19` `UPLOAD_RESERVATION`; `uploads.rs:1356`; `entry.rs:61-71`; `operations.rs:34`; migration 026 `:5`; `templates/upload_form.html:4,11` |
-| 64 selected pages | `uploads.rs:1478`; `upload_page.html:13`; migration 026 `:15` (`selected_pages` <= 385 B / 64 entries), `:107` (exclusion `pages` <= 385 B / 64), `:120-121` (`pages_done`/`total` <= 64); `upload_exclusions.rs:276` (`e.pages.len() > 64`); contract `limits.pages` `uploads.rs:901` |
-| 32 KiB exclusion boxes | migration 026 `:108` |
+| 128 MiB PDF | `auth/uploads.rs:35-36` (`FILE_LIMIT`, `BODY_LIMIT`), `:46` (`DefaultBodyLimit::max`), `:163`, `:174` (`Counting`), `:311-316` (multer `whole_stream`, `for_field("file")`), `:231` (per chunk), `:349` (Content-Length); `staging.rs:19` `UPLOAD_RESERVATION`; `uploads.rs:1356`; `entry.rs:61-71`; `operations.rs:34`; `templates/upload_form.html:4,11` |
+| 64 selected pages | `uploads.rs:1478`; `upload_page.html:13`; `upload_exclusions.rs:276` (`e.pages.len() > 64`); contract `limits.pages` `uploads.rs:901` |
 | 128 MiB PNG total | `uploads.rs:875`, `:1222-1226` (reason `source_png_limit`, `:1404`), `upload_progress.html:3`, contract `:902` |
 | 512 MiB text | `uploads.rs:1228` |
 | 20,000 units | contract `uploads.rs:903` (not enforced in staging) |
 | 2 GiB staging total | `staging.rs:17` `TOTAL`, `Ledger::reserve` `:59`; also the "unknown usage" sentinel `staging.rs:467,679` (blocks reserve only through `used + reserved > TOTAL`) |
-| 2,000 pages | `operations.rs:52-58`, `records.rs:411`, `geometry.rs:72`, migration 026 `:22,30,55,60,129`; inspection frame 9 MiB `records.rs:13`, migration `:14` |
 | Whole-source PDF BLOB | `003_sources.sql:10` `sources.pdf BLOB NOT NULL`; written only by `import.rs:584`, read only by the `import.rs:375` equality check; no other reader |
 | Tests | `upload_tests.rs:655,1835,1974`, `upload_route_tests.rs:715`, `worker/tests.rs` (about 10 `Input::Bytes`/`from_bytes` sites), `preflight_tests.rs`, `live_tests` 128 MiB cases |
 | Docs | `sources-and-retrieval.md` (worker/RSS sections near `:28-70`, upload `:89-93`, `:110`, staging `:154-186`, contract `:217`, import `:286-287`); `release-scope.md:33` and its backup note (`:119`); `limitations.md` C5, L-SRC-3, L-SRC-8; `source-upload-plan.md` historical totals; `source-route-a-plan.md` ("PDF BLOB once"); the TODO entry |
@@ -129,7 +127,7 @@ nothing re-verifies the file. Pages are published inside the render callback
      is "4000"); a box is at most 4 x 8 + 2 = 34 B, eight boxes plus key and separators at most
      320 B. The view enforces 384 B per page (`length(value)`), derived from this worst case
      rather than from shortest-form f64 text (up to 24 characters) which would overflow a naive
-     96-byte bound. At 20,000 pages a revision is at most 6.4 MB; the history grows by that per
+     96-byte bound. At 20,000 pages a revision is at most 6.4 MB by that worst case (the column bound is 6.5 MB); the history grows by that per
      revision (noted in `limitations.md`).
    - *Several proposals:* each proposal carries one box per page; the Owner can confirm more than
      one in one exclusion. The `exclusion` row keeps one rationale and replaces `proposal_fingerprint`
@@ -276,6 +274,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    still fail; an exclusion over 200 pages; proposal identity with the current function and
    `COMPARISON_LIMIT` on hostile many-distinct-lines input; server memory flat across 500 text
    pages.
+   Box de-duplication must be numeric: migration 036 compares boxes as text (`[1,1,2,2]` and `[1.0,1,2,2]` differ), so the rounding step makes equal boxes bit-identical before writing.
 6. **Large-input gate.** Synthetic 500-page and 5,000-page PDFs (and a 20,000-page minimal one for
    the frame) through inspect with a cold page cache (`posix_fadvise` DONTNEED on the magnetic
    disk, weekend window), all render batches, cancel, restart reconciliation; fix the
@@ -299,6 +298,8 @@ Review: this plan and each slice get a fresh Opus reviewer (AGENTS.md); slices 1
 of agent work run in containers; weekday builds at 2 cores.
 
 ## Risks
+- Forward work found in slice 2 review: every `load()`/progress poll parses the up-to-9 MiB inspection (slice 4: read only the facts a poll needs); each published page updates the row that holds the inspection (`uploads.rs` ~1280, slice 4); the Rust selection/exclusion checks are O(selected x pages) (`uploads.rs` ~1484, `upload_exclusions.rs` ~166 and ~304-315) and must be made linear when slice 5 lifts the 64 cap; the page screen renders up to 20,000 checkboxes until slice 5's ranges UI (slice 5); `upload_progress.html` prints `document_changed` raw until slice 3 gives it a label (slice 3).
+- Tools that read the database outside Mimik need SQLite >= 3.44 (migration 036 views use `group_concat(... ORDER BY ...)`; an earlier catalogue migration already uses `->>`, 3.38).
 
 - A MuPDF bug on a very large or hostile file is contained by the same sandbox; memory by
   `RLIMIT_AS`, time by the deadlines; a big PDF fails as `too_large`/`took too long`, never

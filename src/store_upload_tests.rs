@@ -184,7 +184,10 @@ fn within<T>(what: &str, work: impl FnOnce() -> T) -> T {
     let start = std::time::Instant::now();
     let result = work();
     let elapsed = start.elapsed();
-    assert!(elapsed < std::time::Duration::from_secs(10), "{what} took {elapsed:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "{what} took {elapsed:?}"
+    );
     result
 }
 

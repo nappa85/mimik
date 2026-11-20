@@ -115,8 +115,9 @@ CREATE TRIGGER source_upload_page_facts_update BEFORE UPDATE ON source_upload_pa
  BEGIN SELECT RAISE(ABORT,'invalid staged page facts'); END;
 -- `boxes` maps each excluded page to 1-8 boxes. The view bounds one page at 384 bytes (eight boxes
 -- of four numbers rounded outward to 0.01 pt need at most 320) and a revision at 20,000 pages of
--- it, 6.5 MB at most. Pages and box keys are compared by one ordered pass each (pages strictly
--- ascending, box keys equal to them as a list), never by a join: the view stays linear at 20,000 pages.
+-- it: 6.4 MB by that worst case, bounded at 6,500,000 bytes. The box keys, sorted numerically, must equal the
+-- `pages` list in document order (one ordered group_concat each, SQLite >= 3.44; never a join, so the view
+-- stays linear at 20,000 pages); that also forces `pages` strictly ascending and distinct.
 CREATE TABLE source_upload_exclusions (
  upload_id TEXT NOT NULL REFERENCES source_uploads(id) ON DELETE CASCADE,
  revision INTEGER NOT NULL CHECK(revision>0),
@@ -152,7 +153,6 @@ CREATE VIEW source_upload_invalid_exclusion AS
  (SELECT count(DISTINCT value) FROM json_each(e.pages))!=json_array_length(e.pages) OR
  (SELECT count(*) FROM json_each(e.boxes))!=json_array_length(e.pages) OR
  (SELECT count(DISTINCT key) FROM json_each(e.boxes))!=json_array_length(e.pages) OR
- EXISTS(SELECT 1 FROM (SELECT value AS v,lag(value) OVER (ORDER BY key) AS prev FROM json_each(e.pages)) WHERE prev IS NOT NULL AND v<=prev) OR
  (SELECT group_concat(key,',' ORDER BY CAST(key AS INTEGER)) FROM json_each(e.boxes)) IS NOT (SELECT group_concat(CAST(value AS TEXT),',' ORDER BY key) FROM json_each(e.pages)) OR
  EXISTS(SELECT 1 FROM json_each(e.boxes) b WHERE b.type IS NOT 'array' OR json_array_length(b.value) NOT BETWEEN 1 AND 8 OR length(CAST(b.value AS BLOB))>384 OR (SELECT count(DISTINCT value) FROM json_each(b.value))!=json_array_length(b.value)) OR
  EXISTS(SELECT 1 FROM json_each(e.boxes) b,json_each(b.value) x WHERE x.type IS NOT 'array' OR json_array_length(x.value)!=4) OR
