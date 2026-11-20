@@ -85,9 +85,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `df` before gates. Free-model reviews: never in parallel (the `external-agents` skill locks
   and skips limited models, `~/.local/state/external-agents/limits.json`).
 
-- Hakoniwa audit exception: check new Hakoniwa releases; when one drops postcard's default
-  features, remove the RUSTSEC-2023-0089 and RUSTSEC-2026-0574..0582 ignores from `.cargo/audit.toml`
-  (DEP-24); likewise RUSTSEC-2026-0543 (chrono) when procfs drops chrono.
+- Hakoniwa audit exception: souk4711/hakoniwa#208 (opened 2026-11-20) turns off postcard's and
+  procfs's default features. When a release with it ships, bump the `hakoniwa` pin and remove the
+  RUSTSEC-2023-0089, RUSTSEC-2026-0574..0582 and RUSTSEC-2026-0543 (chrono) ignores from
+  `.cargo/audit.toml` (DEP-24): with Mimik's hakoniwa features (no defaults) neither heapless nor
+  chrono stays in the tree. procfs's own jiff option is eminence/procfs#374 (open, no PR).
 
 ## Next steps
 
