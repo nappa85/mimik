@@ -53,6 +53,9 @@ jobs:
           docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" \
             -e REVISION -e CI=1 -e MIMIK_FORMULA_EVAL=/workspace/target/debug/examples/formula_eval \
             mimik-ci bash -euxo pipefail -c '
+              # Every locked package, for every platform: `cargo metadata --offline` in the
+              # tests needs the ones a Linux build never downloads.
+              cargo fetch --locked
               cargo fmt --check
               cargo clippy --locked --all-targets --all-features -- -D warnings
               cargo clippy --locked --all-targets -- -D warnings
