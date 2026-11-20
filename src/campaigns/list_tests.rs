@@ -313,8 +313,13 @@ async fn writer_accepts_mixed_retained_new_rows_per_list_reuse_and_swaps() {
 /// Inserts a create row with arbitrary (pre-M4, non-host) item IDs, as the writer's own SQL
 /// does, bypassing only the host-ID invariant.
 pub(super) async fn legacy_create(setup: &Setup, auth: usize, values: Value) {
+    legacy_create_id(setup, auth, 1, values).await;
+}
+
+/// `legacy_create` for sheet `id` (pinned to `setup.version`).
+pub(super) async fn legacy_create_id(setup: &Setup, auth: usize, id: i64, values: Value) {
     let mut snapshot = blank(setup, auth).await;
-    snapshot.sheet_id = 1;
+    snapshot.sheet_id = id;
     snapshot.revision = 1;
     snapshot.data = values;
     let auth = setup.auth[auth].clone();
@@ -326,8 +331,8 @@ pub(super) async fn legacy_create(setup: &Setup, auth: usize, values: Value) {
             let hash = snapshots::hash(content.as_bytes());
             let pin = serde_json::to_string(&snapshot.pin)?;
             let now = auth.recheck(&tx)?;
-            tx.execute("INSERT INTO private_sheets(id,campaign_id,custodian_id,game_id,edition_id,kind,pin,revision,state,snapshot,hash) VALUES(1,?1,?2,?3,?4,'runtime',?5,1,'active',?6,?7)",params![snapshot.campaign_id,snapshot.custodian_id,snapshot.game_id,snapshot.edition_id,pin,content,hash])?;
-            tx.execute("INSERT INTO private_sheet_history(sheet_id,revision,hash,snapshot,operation,previous_revision,actor_id,actor_epoch,session_digest,occurred_at) VALUES(1,1,?1,?2,'create',0,?3,?4,?5,?6)",params![hash,content,auth.account_id(),auth.epoch(),auth.digest(),now])?;
+            tx.execute("INSERT INTO private_sheets(id,campaign_id,custodian_id,game_id,edition_id,kind,pin,revision,state,snapshot,hash) VALUES(?8,?1,?2,?3,?4,'runtime',?5,1,'active',?6,?7)",params![snapshot.campaign_id,snapshot.custodian_id,snapshot.game_id,snapshot.edition_id,pin,content,hash,id])?;
+            tx.execute("INSERT INTO private_sheet_history(sheet_id,revision,hash,snapshot,operation,previous_revision,actor_id,actor_epoch,session_digest,occurred_at) VALUES(?7,1,?1,?2,'create',0,?3,?4,?5,?6)",params![hash,content,auth.account_id(),auth.epoch(),auth.digest(),now,id])?;
             tx.commit()?;
             Ok(())
         })

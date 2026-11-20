@@ -18,6 +18,11 @@ const POLL_PATH = /^\/private-sheets\/\d+\/interpretations\/[0-9a-f]{32}$/;
 const DIGITS = /^\d+$/;
 /** The only href a catalogue entry link may carry (step 3a): the sheet's own entry route. */
 const ENTRY_PATH = /^\/private-sheets\/\d+\/catalogue\/[a-z][a-z0-9-]{0,63}\/[a-z][a-z0-9-]{0,63}$/;
+/** The only hrefs the suggestion and name-match code may use (step 4): the sheet's own routes. */
+const SUGGEST_PATH = /^\/private-sheets\/\d+\/suggest\/\d+\/\d+$/;
+const WHICH_PATH = /^\/private-sheets\/\d+\/cells\/\d+\/\d+\/\d+\/which\?base=\d+$/;
+const BROWSE_PATH = /^\/private-sheets\/\d+\/catalogue\/[a-z][a-z0-9-]{0,63}(?:\?type=[a-z][a-z0-9-]{0,63})?$/;
+const SLUG = /^[a-z][a-z0-9-]{0,63}$/;
 const JSON_TYPE = 'application/json';
 
 /** Unit state by form. */
@@ -36,8 +41,10 @@ let remindersOn = true;
 /** The only attribute names `element` sets: no inline styling, no event handler, no URL that
  * loads anything. */
 const ATTRIBUTES = new Set([
-  'action', 'aria-describedby', 'aria-label', 'aria-labelledby', 'class', 'for', 'form',
-  'hidden', 'href', 'id', 'method', 'name', 'rel', 'role', 'target', 'type', 'value',
+  'action', 'aria-activedescendant', 'aria-autocomplete', 'aria-controls', 'aria-describedby',
+  'aria-expanded', 'aria-label', 'aria-labelledby', 'aria-selected', 'autocomplete', 'class',
+  'for', 'form', 'hidden', 'href', 'id', 'method', 'name', 'rel', 'role', 'target', 'type',
+  'value',
 ]);
 
 function element(tag, attributes, ...children) {
@@ -312,10 +319,11 @@ function showUnit(unit, shown, revision, replace) {
   }
   const button = saveButton(unit.form);
   showLink(unit, shown.link);
+  const matchIds = showMatch(unit, shown.match);
   const noteIds = showNote(unit, shown.note, button);
   const after = unit.form.querySelector('.entry-note') || button;
   const offerIds = showActions(unit, shown.actions, revision, after);
-  describe(unit, [...noteIds, ...offerIds]);
+  describe(unit, [...noteIds, ...offerIds, ...matchIds]);
 }
 
 /** The catalogue entry link of a saved name cell (step 3a): put back as the page draws it, or
@@ -502,6 +510,20 @@ const textOrNull = (value) => value === null || text(value);
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const STATUSES = new Set(['saved', 'unchanged', 'conflict', 'invalid']);
 
+/** The name match of a saved name cell (step 4): absent or null, or one of the two shapes. */
+function validMatch(match) {
+  return (
+    match === undefined ||
+    match === null ||
+    (record(match) &&
+      ((match.kind === 'several' && text(match.which) && WHICH_PATH.test(match.which)) ||
+        (match.kind === 'none' &&
+          text(match.browse) &&
+          BROWSE_PATH.test(match.browse) &&
+          (match.current === undefined || typeof match.current === 'boolean'))))
+  );
+}
+
 function validUnit(unit, refused) {
   if (!record(unit) || !textOrNull(unit.action)) {
     return false;
@@ -518,6 +540,7 @@ function validUnit(unit, refused) {
     (unit.link === undefined ||
       unit.link === null ||
       (record(unit.link) && ENTRY_PATH.test(unit.link.href) && DIGITS.test(unit.link.catalogue))) &&
+    validMatch(unit.match) &&
     (note === null ||
       (record(note) && text(note.kind) && text(note.shown) && text(note.value))) &&
     (actions === null ||
@@ -576,6 +599,13 @@ function valid(answer, many = false) {
   );
 }
 
+/** Drops the name-match warning and its inline "Which one?" list, as the server's draft
+ * re-render shows none (the control then names no `match-` id in `aria-describedby`). */
+function clearMatch(unit) {
+  unit.form.querySelector('.entry-match')?.remove();
+  unit.form.querySelector('.which-list')?.remove();
+}
+
 /** The unit has no route at the answer's revision (its row was removed): the entry stays
  * to copy and can no longer be posted, so a newer base is never paired with an old row
  * index (which would name another row). */
@@ -596,6 +626,7 @@ function orphan(unit, message) {
     button.disabled = true;
   }
   clearActions(unit);
+  clearMatch(unit);
   unit.form.querySelector('.entry-note')?.remove();
   describe(unit, []);
   setAlert(unit, message);
@@ -612,6 +643,10 @@ function settle(unit, flight, answer, status, submitter, quiet = false) {
   const pressed = flight.submitter || submitter;
   const focusBack = pressed && document.activeElement === pressed;
   if (!valid(answer)) {
+    // A pick refused as malformed (400) would be refused again: it is dropped.
+    if (status === 400) {
+      dropEntry(unit, flight);
+    }
     setAlert(unit, failure(status));
     // A conflict whose body is unreadable is still a conflict: hold and drop the queue.
     if (status === 409) {
@@ -655,6 +690,8 @@ function settle(unit, flight, answer, status, submitter, quiet = false) {
       stopRemind(unit);
       remind(unit, answer.unit.reminder);
     }
+    // A pick among duplicates is held until this save's 200 answer (step 4).
+    dropEntry(unit, flight);
     unit.sent = answerKey(unit, answer.unit);
     unit.ack = current ? entryKey(unit.form) : unit.sent;
     if (!quiet) {
@@ -668,9 +705,12 @@ function settle(unit, flight, answer, status, submitter, quiet = false) {
     // so it is overwritten consciously, never by leaving the field (ASSIST-23); after a
     // refused value a corrected entry saves as usual.
     unit.hold = answer.status === 'conflict';
+    // A refused save (409, 422) drops the pick it carried: the catalogue or the row moved.
+    dropEntry(unit, flight);
     // As on the re-rendered page, a drafted unit shows no note, switch or Undo.
     unit.form.querySelector('.entry-note')?.remove();
     clearActions(unit);
+    clearMatch(unit);
     describe(unit, []);
     clearAlert(unit);
     const shown = typeof answer.unit.current === 'string' ? ` Saved value now: ${answer.unit.current}.` : '';
@@ -691,7 +731,8 @@ async function send(unit, key, submitter) {
   body.set('base', unit.base.toString());
   unit.seq += 1;
   stopAssist(unit);
-  const flight = { key, gen: unit.gen, seq: unit.seq, submitter };
+  const picked = unit.form.querySelector('input[name="entry"]');
+  const flight = { key, gen: unit.gen, seq: unit.seq, submitter, entry: picked ? picked.value : null };
   unit.flight = flight;
   unit.sent = key;
   pending += 1;
@@ -1241,6 +1282,10 @@ function enhance(form) {
     }
   });
   form.addEventListener('change', (event) => {
+    // A name that is Not set takes no entry (the server refuses the pair).
+    if (event.target instanceof HTMLSelectElement && event.target.value === 'absent') {
+      form.querySelector('input[name="entry"]')?.remove();
+    }
     if (event.target instanceof HTMLSelectElement && event.target.name) {
       request(unit, false, null);
     }
@@ -1252,6 +1297,13 @@ function enhance(form) {
       (target instanceof HTMLInputElement && target.type !== 'checkbox' && target.type !== 'hidden');
     if (text && target.name) {
       request(unit, false, null);
+    }
+  });
+  form.addEventListener('click', (event) => {
+    const link = event.target instanceof Element ? event.target.closest('a.which') : null;
+    if (link && form.contains(link)) {
+      event.preventDefault();
+      whichList(unit, link);
     }
   });
 }
@@ -1346,5 +1398,410 @@ document.addEventListener('submit', (event) => {
 
 for (const form of document.forms) {
   enhance(form);
+}
+
+// Name suggestions and the name match (step 4; docs/assisted-entry.md, "Catalogue links").
+// A catalogue-backed name input (`data-suggest`, the sheet's own suggest route) becomes an
+// ARIA combobox; a saved name cell under rule 3 or 4 shows its warning, "Which one?" inline
+// and "Did you mean...?". Everything the server names is drawn with textContent inside <bdi>;
+// hrefs are checked against fixed patterns first. Without this module the page keeps its
+// warnings, Browse and the "Which one?" page (D-G).
+
+const SUGGEST_DEBOUNCE = 150;
+const SUGGEST_TIMEOUT = 5000;
+const MAX_SUGGESTIONS = 8;
+
+/** Removes the pick among duplicates (`entry`) the save that carried it has answered for. */
+function dropEntry(unit, flight) {
+  const held = unit.form.querySelector('input[name="entry"]');
+  if (held && flight && flight.entry === held.value) {
+    held.remove();
+  }
+}
+
+/** Holds a pick among duplicates in its form until the next save (never rendered empty). */
+function holdEntry(form, key) {
+  form.querySelector('input[name="entry"]')?.remove();
+  form.append(element('input', { type: 'hidden', name: 'entry', value: key }));
+}
+
+function addTypo(unit, line) {
+  if (!unit.suggest || line.querySelector('.did-you-mean')) {
+    return;
+  }
+  const button = element('button', { type: 'button', class: 'did-you-mean' }, 'Did you mean…?');
+  button.addEventListener('click', () => unit.suggest(true));
+  line.append(' ', button);
+}
+
+/** The warning of a saved name cell with several or no catalogue match (rules 3 and 4):
+ * put back as the page draws it, or dropped when the save left the row linked. An answer
+ * without the member leaves it. Returns the ids that describe the control. */
+function showMatch(unit, match) {
+  const old = unit.form.querySelector('.entry-match');
+  if (match === undefined) {
+    return old ? [old.id] : [];
+  }
+  old?.remove();
+  unit.form.querySelector('.which-list')?.remove();
+  const shown = names(unit);
+  if (match === null || !shown) {
+    return [];
+  }
+  const line = element('p', { class: 'entry-match', id: `match-${shown.key}` });
+  if (match.kind === 'several') {
+    line.append(
+      'Several catalogue entries have this name. ',
+      element('a', { class: 'which', href: match.which }, 'Which one?'),
+    );
+  } else {
+    line.append(
+      match.current === false
+        ? 'No current entry of this type has this name. '
+        : 'Not in the catalogue. ',
+      element('a', { href: match.browse, target: '_blank', rel: 'noopener' }, 'Browse'),
+    );
+    addTypo(unit, line);
+  }
+  (unit.form.querySelector('.entry-link') || unit.control).after(line);
+  return [line.id];
+}
+
+/** The candidates of "Which one?" inline, under the warning; any failure sends the player to
+ * the page the link names. */
+async function whichList(unit, link) {
+  const href = link.getAttribute('href');
+  if (!href || !WHICH_PATH.test(href)) {
+    return;
+  }
+  unit.form.querySelector('.which-list')?.remove();
+  // Clicking the link left the field, which saved it: the route is under the runtime permit,
+  // so it is asked only once every save in flight has its answer.
+  await whenIdle();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SUGGEST_TIMEOUT);
+  let answer = null;
+  let status = 0;
+  try {
+    const response = await fetch(href, {
+      signal: controller.signal,
+      headers: { Accept: JSON_TYPE },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'manual',
+    });
+    status = response.status;
+    const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
+    if (response.status === 200 && type === JSON_TYPE) {
+      answer = await response.json();
+    }
+  } catch {
+    answer = null;
+  } finally {
+    clearTimeout(timer);
+  }
+  if (status === 429 || status === 503) {
+    // Busy: say so and let the player press the link again; do not leave the sheet.
+    setAlert(unit, 'The catalogue is busy. Press Which one? again in a moment.');
+    return;
+  }
+  const valid =
+    record(answer) &&
+    answer.status === 'ok' &&
+    typeof answer.more === 'boolean' &&
+    textOrNull(answer.browse) &&
+    (answer.browse === null || BROWSE_PATH.test(answer.browse)) &&
+    Array.isArray(answer.candidates) &&
+    answer.candidates.length > 0 &&
+    answer.candidates.every(
+      (one) =>
+        record(one) &&
+        text(one.key) &&
+        SLUG.test(one.key) &&
+        text(one.type) &&
+        text(one.hint) &&
+        text(one.open) &&
+        ENTRY_PATH.test(one.open),
+    );
+  if (!valid) {
+    window.location.assign(href);
+    return;
+  }
+  // A busy answer's alert does not outlive the retry that opened the list.
+  clearAlert(unit);
+  const list = element('ul', { class: 'which-list' });
+  for (const [at, one] of answer.candidates.entries()) {
+    const use = element(
+      'button',
+      { type: 'button', id: `${unit.control.id}-use-${at}`, 'aria-labelledby': `${unit.control.id}-use-${at} ${unit.control.id}-line-${at}` },
+      'Use this one',
+    );
+    use.addEventListener('click', () => {
+      holdEntry(unit.form, one.key);
+      unit.gen += 1;
+      list.remove();
+      request(unit, true, null);
+    });
+    list.append(
+      element(
+        'li',
+        {},
+        element(
+          'bdi',
+          { id: `${unit.control.id}-line-${at}` },
+          one.hint ? `${one.type} · ${one.key} · ${one.hint}` : `${one.type} · ${one.key}`,
+        ),
+        ' ',
+        element('a', { href: one.open, target: '_blank', rel: 'noopener' }, 'Open entry'),
+        ' ',
+        use,
+      ),
+    );
+  }
+  if (answer.more && answer.browse) {
+    list.append(
+      element('li', {}, element('a', { href: answer.browse, target: '_blank', rel: 'noopener' }, 'Browse')),
+    );
+  }
+  unit.form.querySelector('.entry-match')?.after(list);
+}
+
+const validSuggestions = (answer) =>
+  record(answer) &&
+  answer.status === 'ok' &&
+  typeof answer.more === 'boolean' &&
+  typeof answer.cut === 'boolean' &&
+  Array.isArray(answer.suggestions) &&
+  answer.suggestions.length <= MAX_SUGGESTIONS &&
+  answer.suggestions.every(
+    (one) =>
+      record(one) &&
+      text(one.name) &&
+      text(one.key) &&
+      SLUG.test(one.key) &&
+      text(one.type) &&
+      typeof one.duplicate === 'boolean' &&
+      text(one.hint),
+  );
+
+/** The combobox of one name input. `unit` is its saved-cell unit, or null for the new-row
+ * form. State: a generation counter and one AbortController, so an answer is drawn only for
+ * the current generation and the current text. */
+function combobox(control, path, unit) {
+  const id = `suggest-${control.id.replace(/^row-/, '')}`;
+  const list = element('ul', { role: 'listbox', id, 'aria-label': 'Catalogue suggestions', hidden: '' });
+  const status = element('p', { role: 'status', class: 'visually-hidden', id: `${id}-status` });
+  control.after(list, status);
+  control.setAttribute('role', 'combobox');
+  control.setAttribute('aria-autocomplete', 'list');
+  control.setAttribute('aria-controls', id);
+  control.setAttribute('aria-expanded', 'false');
+  control.setAttribute('autocomplete', 'off');
+  const box = { items: [], active: -1, gen: 0, abort: null, timer: 0, composing: false };
+
+  const activate = (index) => {
+    box.active = index;
+    [...list.children].forEach((option, at) => {
+      option.setAttribute('aria-selected', at === index ? 'true' : 'false');
+    });
+    if (index >= 0 && list.children[index]) {
+      control.setAttribute('aria-activedescendant', list.children[index].id);
+    } else {
+      control.removeAttribute('aria-activedescendant');
+    }
+  };
+
+  const close = () => {
+    box.gen += 1;
+    box.abort?.abort();
+    clearTimeout(box.timer);
+    box.items = [];
+    list.replaceChildren();
+    list.hidden = true;
+    control.setAttribute('aria-expanded', 'false');
+    activate(-1);
+  };
+
+  const draw = (answer, typo) => {
+    list.replaceChildren();
+    box.items = answer.suggestions.map((one) => ({ ...one }));
+    answer.suggestions.forEach((one, at) => {
+      const attributes = { role: 'option', id: `${id}-${at}`, 'aria-selected': 'false' };
+      if (one.duplicate) {
+        attributes['aria-label'] = `${one.name}, ${one.type}, ${one.hint || one.key}`;
+      }
+      const option = element('li', attributes, element('bdi', {}, one.name), ` · ${one.type}`);
+      if (one.duplicate) {
+        option.append(' · ', element('bdi', {}, one.hint || one.key));
+      }
+      list.append(option);
+    });
+    if (answer.suggestions.length === 0 && !typo) {
+      box.items.push({ typo: true });
+      list.append(
+        element('li', { role: 'option', id: `${id}-typo`, 'aria-selected': 'false' }, 'Did you mean…?'),
+      );
+    }
+    const count = answer.suggestions.length;
+    status.textContent = count === 0 ? 'No suggestions' : `${count} suggestion${count === 1 ? '' : 's'}`;
+    list.hidden = box.items.length === 0;
+    control.setAttribute('aria-expanded', list.hidden ? 'false' : 'true');
+    activate(-1);
+  };
+
+  const query = async (typo) => {
+    clearTimeout(box.timer);
+    const typed = control.value.trim();
+    const scalars = Array.from(typed).length;
+    if (scalars < (typo ? 3 : 2) || scalars > 64) {
+      close();
+      return;
+    }
+    box.gen += 1;
+    const gen = box.gen;
+    box.abort?.abort();
+    const controller = new AbortController();
+    box.abort = controller;
+    const timer = setTimeout(() => controller.abort(), SUGGEST_TIMEOUT);
+    const params = new URLSearchParams({ q: typed });
+    if (typo) {
+      params.set('typo', '1');
+    }
+    let answer = null;
+    try {
+      const response = await fetch(`${path}?${params}`, {
+        signal: controller.signal,
+        headers: { Accept: JSON_TYPE },
+        credentials: 'same-origin',
+        cache: 'no-store',
+        redirect: 'manual',
+      });
+      const type = (response.headers.get('Content-Type') || '').split(';')[0].trim();
+      if (response.status === 200 && type === JSON_TYPE) {
+        answer = await response.json();
+      }
+    } catch {
+      answer = null;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (gen !== box.gen || control.value.trim() !== typed) {
+      return;
+    }
+    if (!validSuggestions(answer)) {
+      // 429, 503 and any failure close the list silently.
+      close();
+      return;
+    }
+    draw(answer, typo);
+  };
+
+  const pick = (index) => {
+    const item = box.items[index];
+    if (!item) {
+      return;
+    }
+    if (item.typo) {
+      close();
+      control.focus();
+      query(true);
+      return;
+    }
+    control.value = item.name;
+    control.form?.querySelector('input[name="entry"]')?.remove();
+    if (item.duplicate && control.form) {
+      holdEntry(control.form, item.key);
+    }
+    if (unit) {
+      unit.gen += 1;
+    }
+    close();
+    status.textContent = `${item.name} chosen`;
+  };
+
+  if (unit) {
+    unit.suggest = (typo) => {
+      control.focus();
+      query(typo);
+    };
+  }
+  control.addEventListener('input', (event) => {
+    // Typing drops a held pick; no query while composing.
+    control.form?.querySelector('input[name="entry"]')?.remove();
+    if (event.isComposing || box.composing) {
+      return;
+    }
+    clearTimeout(box.timer);
+    box.timer = setTimeout(() => query(false), SUGGEST_DEBOUNCE);
+  });
+  if (!unit && control.form) {
+    // The new-row form is not a unit: a name set to Not set drops a held pick there too (the
+    // server refuses `entry` with an absent name).
+    control.form.addEventListener('change', (event) => {
+      if (event.target instanceof HTMLSelectElement && event.target.value === 'absent') {
+        control.form.querySelector('input[name="entry"]')?.remove();
+      }
+    });
+  }
+  control.addEventListener('compositionstart', () => {
+    box.composing = true;
+    clearTimeout(box.timer);
+  });
+  control.addEventListener('compositionend', () => {
+    box.composing = false;
+    query(false);
+  });
+  control.addEventListener('keydown', (event) => {
+    if (event.isComposing || event.keyCode === 229) {
+      return;
+    }
+    const open = !list.hidden;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      if (open) {
+        activate((box.active + 1) % box.items.length);
+      } else {
+        query(false);
+      }
+    } else if (event.key === 'ArrowUp' && open) {
+      event.preventDefault();
+      activate(box.active <= 0 ? box.items.length - 1 : box.active - 1);
+    } else if (event.key === 'Enter' && open && box.active >= 0) {
+      // Selecting fills the name; it does not save.
+      event.preventDefault();
+      pick(box.active);
+    } else if (event.key === 'Escape' && open) {
+      event.preventDefault();
+      close();
+    } else if (event.key === 'Tab') {
+      close();
+    }
+  });
+  control.addEventListener('focusout', () => close());
+  // Pointer and touch picks keep focus in the input (pointerdown and mousedown are
+  // prevented), so the save on leaving never sends the half-typed text; the pick itself runs
+  // on `click`, after the press has ended, so the click can never land on what the closing
+  // list uncovers.
+  list.addEventListener('pointerdown', (event) => event.preventDefault());
+  list.addEventListener('mousedown', (event) => event.preventDefault());
+  list.addEventListener('click', (event) => {
+    event.preventDefault();
+    const option = event.target instanceof Element ? event.target.closest('[role="option"]') : null;
+    if (option && list.contains(option)) {
+      pick([...list.children].indexOf(option));
+    }
+  });
+}
+
+for (const control of document.querySelectorAll('input[data-suggest]')) {
+  const path = control.getAttribute('data-suggest');
+  if (control instanceof HTMLInputElement && path && SUGGEST_PATH.test(path)) {
+    const unit = control.form ? units.get(control.form) : undefined;
+    combobox(control, path, unit || null);
+    const line = unit && unit.form.querySelector('.entry-match');
+    if (line && !line.querySelector('a.which')) {
+      addTypo(unit, line);
+    }
+  }
 }
 document.documentElement.setAttribute('data-sheet-assist', 'ready');

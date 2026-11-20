@@ -165,8 +165,24 @@ impl Unit {
         }
     }
 
-    /// The exact key set of the unit's form.
-    pub(crate) fn keys(self, definition: &Definition) -> HashSet<String> {
+    /// The catalogue-backed name property an `entry` key may accompany (step 4, items 3 and
+    /// 4): the cell of a catalogue-backed name, or the new-row form of a list that has one.
+    /// `None` for every other unit: `entry` there is an unknown key (400).
+    pub(crate) fn entry_target(self, definition: &Definition) -> Option<(usize, usize)> {
+        match self {
+            Self::Cell { f, p, .. } => values::properties(list(definition, f)?)
+                .get(p)?
+                .catalogue
+                .is_some()
+                .then_some((f, p)),
+            Self::NewRow(f) => Some((f, values::name_property(list(definition, f)?)?)),
+            _ => None,
+        }
+    }
+
+    /// The exact key set of the unit's form; `entry` (a pick among duplicates, step 4) adds
+    /// the optional `entry` key on a unit that may carry one.
+    pub(crate) fn keys(self, definition: &Definition, entry: bool) -> HashSet<String> {
         let mut keys: HashSet<String> = match self {
             Self::NewRow(_) | Self::Row { .. } => ["csrf", "base"].map(String::from).into(),
             Self::QuickAdd(_) => ["csrf", "base", "text"].map(String::from).into(),
@@ -192,6 +208,9 @@ impl Unit {
                 }
             }
             _ => {}
+        }
+        if entry && self.entry_target(definition).is_some() {
+            keys.insert("entry".into());
         }
         keys
     }

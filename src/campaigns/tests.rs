@@ -36,6 +36,10 @@ mod catalogue_tests;
 mod cell_tests;
 #[path = "entry_context_tests.rs"]
 mod entry_context_tests;
+#[path = "entry_key_tests.rs"]
+mod entry_key_tests;
+#[path = "entry_match_tests.rs"]
+mod entry_match_tests;
 #[path = "entry_save_tests.rs"]
 mod entry_save_tests;
 #[path = "formula_tests.rs"]
@@ -60,6 +64,8 @@ mod quick_tests;
 mod registry_tests;
 #[path = "script_tests.rs"]
 mod script_tests;
+#[path = "suggest_tests.rs"]
+mod suggest_tests;
 #[path = "unit_tests.rs"]
 mod unit_tests;
 #[path = "unknown_tests.rs"]

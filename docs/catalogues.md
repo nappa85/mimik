@@ -198,6 +198,32 @@ busy server answers 503.
 The 400/403/404 pages carry `CatalogueNotice` so the auth layer keeps them. An ended session
 gets the session layer's 401.
 
+- `GET /private-sheets/{id}/cells/{f}/{r}/{p}/which?base=…`: "Which one?" for a saved name that
+  several entries share, under the same `runtime` layer and the same uniform 403
+  (`docs/assisted-entry.md`, "Catalogue links"). Two transactions (the sheet through
+  `private_read_base`, then the candidates through `Store::which_candidates`, which also
+  requires the sheet still at the revision read: a save in between is 409).
+- `GET /private-sheets/{id}/suggest/{f}/{p}?q=…[&typo=1]`: name suggestions as JSON, outside the
+  `runtime` layer (`campaigns/suggest_web.rs`), inside `signed_in` (a signed-out request gets
+  the generic 403 first). A malformed request is 400 before the session is read. Then it takes
+  one of the pool of 4 (`SUGGEST`), then one read transaction that reads only the sheet's
+  identity and pin columns, the definition row, the member's latest sealed version and, on a
+  cache miss, the names; a duplicate's hint is read in a second short transaction. The pool
+  permit moves into every blocking closure, so an aborted request keeps it until its work ends.
+  Every refusal after the shape checks is one uniform 403 JSON.
+
+**Caches** (process-wide, both LRUs from `hashlink`). The *name cache*
+(`catalogues::suggest::NAMES`, 32 MiB) is keyed by (sealed version id, content hash), so a new
+seal is a new key and old ones age out; staleness is bounded because every request reads
+`latest_sealed`. A value is an `Arc` of the entry type labels and per entry its key, name,
+stored norm (`catalogue_entry_names`, the table linking compares), length in scalars, type and
+retired flag, no description text; bytes are charged per entry (string capacities plus fixed
+overhead) and the least recently used are evicted until the budget holds; an index over the
+budget serves its request and is not kept; concurrent misses may both load (at most 4). A miss
+reads under `QUERY_BUDGET` in the request's own transaction. The *pin-facts cache* (64 sets)
+is keyed by the definition's content hash and holds, per list field and property, the
+member's catalogue and entry type when its catalogue is linked.
+
 **Badges** (`read::Badge`, one rule for browse and entry pages, computed live):
 
 | Badge | When |

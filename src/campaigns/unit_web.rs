@@ -226,7 +226,28 @@ async fn save(
     let unit = route
         .unit(pin.definition())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let form = pairs.admit(&unit.keys(pin.definition()))?;
+    let with_entry = pairs.value("entry").is_some();
+    let form = pairs.admit(&unit.keys(pin.definition(), with_entry))?;
+    // A pick among duplicates (step 4): see `check_entry`.
+    let (refusal, permit) = check_entry(
+        (&state, &auth, id),
+        (pin, &view.snapshot),
+        base_snapshot.as_ref(),
+        (unit, &form),
+        permit,
+    )
+    .await?;
+    if let Some(plan) = refusal {
+        return finish(
+            &state,
+            auth,
+            (id, csrf, json),
+            (view, permit),
+            (unit, &form),
+            plan,
+        )
+        .await;
+    }
     if matches!(unit, Unit::NewRow(_))
         && form.values().map(String::len).sum::<usize>() > super::ECHO_BYTES
     {
@@ -270,6 +291,88 @@ async fn save(
         planned?,
     )
     .await
+}
+
+/// The check of a pick among duplicates (step 4, items 3 and 4): `entry` is a registry slug on
+/// a name that is Set (else 400), and under this request's runtime permit it must name an
+/// eligible entry of the member's catalogue whose name has the posted name's norm. A pick that
+/// no longer matches is a refused plan (422) that keeps the draft; a unit without `entry`
+/// passes untouched. Returns the permit.
+async fn check_entry(
+    (state, auth, id): (&AuthState, &auth::RequestAuth, i64),
+    (pin, snapshot): (
+        &crate::definitions::private_pin::ImmutablePin,
+        &PrivateSnapshot,
+    ),
+    base: Option<&PrivateSnapshot>,
+    (unit, form): (Unit, &BTreeMap<String, String>),
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(Option<Plan>, tokio::sync::OwnedSemaphorePermit), StatusCode> {
+    let Some(entry) = form.get("entry") else {
+        return Ok((None, permit));
+    };
+    let (member, norm, absent) = entry_pick(pin.definition(), unit, form)?;
+    if !crate::registry::valid_id(entry) || absent {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let pair = (snapshot.game_id.clone(), snapshot.edition_id.clone());
+    let (named, permit) = state
+        .store()
+        .entry_named(
+            auth.clone(),
+            id,
+            pair,
+            (member, entry.clone(), norm),
+            permit,
+        )
+        .await
+        .map_err(error)?;
+    if named {
+        return Ok((None, permit));
+    }
+    let host = match (unit, base) {
+        (Unit::Cell { f, r, .. }, Some(base)) => rows::host(pin, base, (f, r)),
+        _ => None,
+    };
+    let anchor = match unit {
+        Unit::Cell { f, r, p } => format!("label-{f}-{r}-{p}"),
+        Unit::NewRow(f) => format!("list-legend-{f}"),
+        _ => String::new(),
+    };
+    let plan = Plan {
+        planned: Planned::Invalid("That entry no longer has this name in the catalogue."),
+        anchor,
+        host,
+        focus: None,
+    };
+    Ok((Some(plan), permit))
+}
+
+/// The member, the norm of the name and whether the name is Not set, for the unit's `entry`
+/// (an `entry` key is admitted only on a unit with a catalogue-backed name).
+fn entry_pick(
+    definition: &crate::definitions::Definition,
+    unit: Unit,
+    form: &BTreeMap<String, String>,
+) -> Result<(crate::campaigns::catalogue::PickMember, String, bool), StatusCode> {
+    let (f, p) = unit
+        .entry_target(definition)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let property = &super::values::properties(&definition.fields[f])[p];
+    let member = property.catalogue.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
+    let (value, state) = match unit {
+        Unit::Cell { .. } => (form.get("value"), form.get("set")),
+        _ => (form.get(&format!("row-{p}")), form.get(&format!("set-{p}"))),
+    };
+    let absent = state.is_some_and(|state| state == "absent");
+    Ok((
+        crate::campaigns::catalogue::PickMember {
+            catalogue: member.id.clone(),
+            entry_type: member.entry_type.clone(),
+        },
+        crate::text_fold::name_norm(value.map_or("", String::as_str)),
+        absent,
+    ))
 }
 
 /// Answers a planned unit save: writes it (303 to the unit), or says "No change", or
@@ -732,7 +835,7 @@ fn busy(id: i64, route: &Route, pairs: &Pairs, csrf: &str) -> super::ResultRespo
         }
     };
     let value = pairs.value("value").unwrap_or_default();
-    let hidden = ["base", "null", "set"]
+    let hidden = ["base", "null", "set", "entry"]
         .into_iter()
         .filter_map(|key| pairs.value(key).map(|value| (key, value)))
         .collect();

@@ -293,24 +293,96 @@ those of the other unit routes (parse, CSRF, request auth, the D-X3 wait, rights
 
 ## Catalogue links
 
-Step 3a, `docs/runtime-definition-contract.md` ("Catalogue member"). A list whose text
+Steps 3a and 4, `docs/runtime-definition-contract.md` ("Catalogue member"). A list whose text
 property carries `catalogue: {id, entry_type?, key}` links each saved row's name cell to an
 entry of the linked catalogue, on view, without a model. Names are compared through
 `text_fold::name_norm` (NFKC, full fold, no marks, white space collapsed) against the stored
 normalised names of the catalogue's latest sealed version (`docs/catalogues.md`). For each saved
 row with a non-blank name: (1) if the key property holds the key of an eligible entry (not
-retired, of the member's entry type when it has one) whose norm equals the cell's, that entry;
-(2) otherwise the single eligible entry with that norm; none or several: no link, and no
-warning yet (step 4 adds rules 3 and 4). One query per list under `QUERY_BUDGET`, only on
-pages whose pin the catalogue read route would serve; a failure or timeout shows no links and
-logs no names. Draft re-renders show none.
+retired, of the member's entry type when it has one) whose norm equals the cell's, that entry
+(a key that resolves to no such entry is ignored: dangling, no link and no warning of its own);
+(2) otherwise the single eligible entry with that norm; (3) several: "Several catalogue entries
+have this name." with a "Which one?" link (editors only); (4) none: "Not in the catalogue.",
+or, when only a retired entry or one of another type has the name, "No current entry of this
+type has this name.", each with a Browse link to the catalogue filtered by the member's entry
+type (new tab). The warning names no text of the row and describes the control through
+`aria-describedby` (`match-<f>-<r>-<p>`). One lookup per list under `QUERY_BUDGET`, only on
+pages whose pin the catalogue read route would serve; a failed or timed-out lookup, or a
+catalogue without a sealed version, gives no outcome for the list (never "Not in the
+catalogue") and logs no names. Draft re-renders show none.
 
 The name cell gets an "Open entry" link to the entry page (new tab, `rel="noopener"`), named
-through `aria-labelledby` ("Open entry" + the cell's value + the catalogue's panel item); the
-sheet JSON answer of a cell save carries `unit.link` (`{href, catalogue}` or `null`) and the
-module puts it back or drops it. The key property is never a control: not on the page, not in
-the full form, the cell route (400), the new-row form or the quick-add line; every save keeps
-its stored value and new rows leave it absent. Nothing writes it yet.
+through `aria-labelledby` ("Open entry" + the cell's value + the catalogue's panel item). The
+sheet JSON answer of a cell save carries `unit.link` (`{href, catalogue}` or `null`) and
+`unit.match` (`{kind: "several", which}`, `{kind: "none", browse}` with `current: false` for
+the retired or other-type wording, or `null`); the module puts them back as the page draws
+them and checks each href against a fixed pattern first.
+
+**The key** is never a control: not on the page, not in the full form, the cell route's own
+property (400), the new-row form or the quick-add line. It is written by one thing only: a pick
+among several same-named entries, posted as `entry` (a registry slug) to the cell route of the
+catalogue-backed name, or to the new-row route of a list that has one. `entry` is admitted as
+one more key only there (else 400), and not with the name's `set=absent` (400; an optional name
+posts `set=present`). Under the request's runtime permit one read transaction requires an
+eligible entry of the latest sealed version with that key whose norm equals the posted name's,
+else 422 "That entry no longer has this name in the catalogue." The cell route sets name and
+key in one patch (one revision, no note; the same name and key is "No change"; staleness
+compares name and key between `base` and the latest); the new-row route creates the row with
+both. A seal between the check and the write can leave the key dangling, which only shows no
+link. Every other save keeps the stored key only while the saved name's norm stands
+(`values::keeps_key`): recasing or respacing keeps it, a rename removes it in the same
+revision (cell route and full form alike).
+
+**"Which one?"** `GET /private-sheets/{id}/cells/{f}/{r}/{p}/which?base=<revision>` (editors,
+under the `runtime` layer) lists at most 50 eligible entries of that norm by `(name, key)`:
+type, key, the first 120 characters of the entry's context and an "Open entry" link (new tab),
+each in a form that posts `csrf`, `base` (the live revision), `value` (the saved name), `set`
+and `entry` to the cell route, so it works without script; more than 50 adds Browse. The row
+index is read at `base` and mapped to the row's host in the live revision; a host that is gone,
+whose name's norm changed or that is no longer under rule 3 answers 404 with a link back,
+never another row's candidates. A save between the two reads is 409. Malformed address 400;
+every other refusal (including a reader who may not edit) is the uniform catalogue 403. With
+`Accept: application/json` it answers `{status, candidates: [{key, type, hint, open}], more,
+browse}` and the module shows the list under the warning; "Use this one" holds `entry` in the
+unit's form and saves through the unit's flight.
+
+**Suggestions.** `GET /private-sheets/{id}/suggest/{f}/{p}?q=…[&typo=1]` (JSON only; the new-row
+name uses the same route with its list and property) answers up to 8 `{name, key, type,
+duplicate, hint}` plus `more` and `cut` for the combobox. The `signed_in` layer runs first (a
+signed-out request gets the generic 403). Then the shape is checked, before the session is
+read: the exact JSON `Accept`, `f` and `p` in the index grammar, the raw query at most 1 KiB
+with no unknown or repeated parameter, `q` trimmed to 2 to 64 scalars and at most 256 bytes
+(all 400), and `q` folded through `name_norm` to 2 to 64 scalars (3 or more with `typo=1`; 400).
+Tiers, each over eligible entries only and ordered by (norm, name, key): the norm starts with
+`q`; the norm contains `q`; with `typo=1` the norms within 2 scalars of `q`'s length at
+`strsim::osa_distance` 1 (3 to 5 scalars) or 2 (from 6), under a 20 ms deadline that sets
+`cut`. `duplicate` marks an entry whose norm another eligible entry shares; its `hint` is the
+first 60 characters of its context, read in a second short transaction after the matching
+(an unreadable context is an empty hint). The route is outside the `runtime` layer: its own
+pool of 4 (429 with `Retry-After` at saturation), request auth, then one read transaction over
+the sheet's identity and pin columns, the definition row, the member's latest sealed version
+and, on a name-cache miss, that version's names (`docs/catalogues.md`). A hit of the pin-facts
+cache needs no runtime permit; a miss takes it once (try only: 503 when busy) to validate the
+pin. Every refusal after the shape checks (a forged address, a property without a member,
+another pair, a native, unsupported, corrupt or overlong pin, no sealed version, a reader who
+may not read the sheet, the production Owner) is one uniform 403 `{"status": "unavailable"}`;
+answers carry the strict sheet CSP.
+
+**Combobox** (`assets/sheet-assist.js`). A name input that carries `data-suggest` (saved name
+cells of an editable page and the new-row name) gets `role="combobox"`,
+`aria-autocomplete="list"`, `aria-expanded`, `aria-controls` and `aria-activedescendant`, a
+`listbox` of `option`s with index IDs (`suggest-<f>-<r>-<p>-<i>`, never keys) and a polite
+status line ("8 suggestions", "No suggestions"); options are drawn with `textContent` inside
+`<bdi>`, a duplicate's accessible name includes its hint. Arrows move; Enter on an active
+option fills the name and does not save (otherwise Enter saves as before); Escape and Tab
+close; leaving the field still saves. Options take `pointerdown` with `preventDefault`, so
+focus stays and the save on leaving never sends half-typed text. No query while composing
+(`isComposing`, keyCode 229), one on `compositionend`; 150 ms debounce, one `AbortController`
+per cell, a generation counter, a 5 s timeout; 429, 503 or a failure closes the list silently.
+Picking a duplicate holds `entry` in the form until the save's 200 answer; typing drops it and
+a 409 or 422 drops it. "Did you mean…?" (in the rule-4 warning and as the empty-list item)
+runs `typo=1`. Without script there are no suggestions (D-G); the warnings, Browse and the
+"Which one?" page work.
 
 ## Page-size bound
 
@@ -327,7 +399,7 @@ with both the densest sign-led notes and kept 200-`"` scribbles, the quick-add l
 widest list (255 and 256 rows, and a refused entry kept from a full list), a new row kept
 read-only from a full list (the tightest re-render, about 2.0% within its bound plus echo)
 and an orphaned cell's kept draft, each asserting its `readonly` textareas, and the same wide
-list with every row linked to an entry (64-character catalogue ID, entry type and keys:
+list with every row warned (rule 4, each name cell with its warning and Browse link) and with every row linked to an entry (64-character catalogue ID, entry type and keys:
 7.6 MB within a 20.0 MB bound, about 62% headroom; it fits because `render_units` still counts the hidden key property's control,
 while the page renders none). Rerun those fixtures whenever per-cell markup grows.
 

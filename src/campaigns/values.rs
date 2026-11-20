@@ -342,6 +342,33 @@ pub(crate) fn key_property(field: &Field) -> Option<usize> {
     properties.iter().position(|property| property.id == key)
 }
 
+/// The index of a list's catalogue-backed name property (the one with the `catalogue` member).
+pub(crate) fn name_property(field: &Field) -> Option<usize> {
+    properties(field)
+        .iter()
+        .position(|property| property.catalogue.is_some())
+}
+
+/// The catalogue member of `property` when its catalogue is one the definition links (the
+/// suggest route and the page's suggest path answer only for those).
+pub(crate) fn linked_member<'a>(
+    definition: &Definition,
+    property: &'a crate::definitions::ItemProperty,
+) -> Option<&'a crate::definitions::CatalogueMember> {
+    let member = property.catalogue.as_ref()?;
+    definition
+        .catalogues
+        .iter()
+        .any(|link| link.id == member.id)
+        .then_some(member)
+}
+
+/// Whether a save keeps a row's stored catalogue key (step 4, item 5): only while the name's
+/// norm is the saved name's, so recasing or respacing keeps the link and a rename removes it.
+pub(crate) fn keeps_key(saved_name: &str, new_name: &str) -> bool {
+    crate::text_fold::name_norm(saved_name) == crate::text_fold::name_norm(new_name)
+}
+
 /// One list row as submitted or saved: raw strings, never validated here (plan D5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DraftRow {
@@ -870,11 +897,8 @@ pub(crate) fn row_item(
     let key = key_property(field);
     for (p, property) in properties(field).iter().enumerate() {
         if key == Some(p) {
-            // Never a control: a saved row keeps the stored key, a new row leaves it absent;
-            // nothing is read from the form and no note is recorded.
-            if let Some(stored) = saved.and_then(|saved| saved.get(&property.id)) {
-                item.insert(property.id.clone(), stored.clone());
-            }
+            // Never a control: nothing is read from the form and no note is recorded; the
+            // stored key is kept below while the name's norm stands.
             continue;
         }
         let value = row_cell(
@@ -891,6 +915,18 @@ pub(crate) fn row_item(
         )?;
         if let Some(value) = value {
             item.insert(property.id.clone(), value);
+        }
+    }
+    // A saved row keeps its stored key while the name's norm stands (step 4, item 5); a new
+    // row leaves it absent.
+    if let (Some(key), Some(name), Some(saved)) = (key, name_property(field), saved) {
+        let (key, name) = (&properties(field)[key].id, &properties(field)[name].id);
+        let was = saved.get(name).and_then(Value::as_str).unwrap_or_default();
+        let is = item.get(name).and_then(Value::as_str).unwrap_or_default();
+        if let Some(stored) = saved.get(key)
+            && keeps_key(was, is)
+        {
+            item.insert(key.clone(), stored.clone());
         }
     }
     Ok(Value::Object(item))

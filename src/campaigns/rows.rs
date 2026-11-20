@@ -136,7 +136,13 @@ pub(crate) fn cell(
         });
     };
     let saved = &items(&snapshot.data, list)[index];
-    let stale = items(&base.data, list)[r].get(&property.id) != saved.get(&property.id);
+    // The key travels with a catalogue-backed name (step 4): a conflict compares both.
+    let key = values::key_property(list)
+        .filter(|_| property.catalogue.is_some())
+        .map(|key| values::properties(list)[key].id.as_str());
+    let was = &items(&base.data, list)[r];
+    let stale = was.get(&property.id) != saved.get(&property.id)
+        || key.is_some_and(|key| was.get(key) != saved.get(key));
     let mut recorder = values::Recorder::new(current);
     let read = values::row_cell(
         (
@@ -156,6 +162,23 @@ pub(crate) fn cell(
             Some(value) => item.insert(property.id.clone(), value),
             None => item.remove(&property.id),
         };
+        // A pick among duplicates stores its key with the name (one revision, no note); a save
+        // without one keeps the stored key only while the name's norm stands (item 5).
+        if let Some(key) = key {
+            if let Some(entry) = form.get("entry") {
+                item.insert(key.to_owned(), Value::String(entry.clone()));
+            } else if !values::keeps_key(
+                saved
+                    .get(&property.id)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                item.get(&property.id)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ) {
+                item.remove(key);
+            }
+        }
         pin.validate_values(&data)?;
         Ok(data)
     });
@@ -240,15 +263,20 @@ pub(crate) fn new_row(
             anchor,
         ));
     };
-    let added = new_item(list, &format!("r{next}-1"), form, current).and_then(|(item, notes)| {
-        let mut data = snapshot.data.clone();
-        data[&list.id]
-            .as_array_mut()
-            .ok_or(AppError::Invalid("Invalid runtime sheet data."))?
-            .push(item);
-        pin.validate_values(&data)?;
-        Ok((data, notes))
-    });
+    let added =
+        new_item(list, &format!("r{next}-1"), form, current).and_then(|(mut item, notes)| {
+            // A pick among duplicates creates the row with its key (one revision, item 4).
+            if let (Some(entry), Some(key)) = (form.get("entry"), values::key_property(list)) {
+                item[&values::properties(list)[key].id] = Value::String(entry.clone());
+            }
+            let mut data = snapshot.data.clone();
+            data[&list.id]
+                .as_array_mut()
+                .ok_or(AppError::Invalid("Invalid runtime sheet data."))?
+                .push(item);
+            pin.validate_values(&data)?;
+            Ok((data, notes))
+        });
     let planned = match added {
         Ok((data, notes)) => {
             snapshot.data = data;

@@ -5,6 +5,28 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Name suggestions at the entry cap (step 4, 2026-11-19)
+
+Prototype tier. The ignored test `campaigns::tests::suggest_tests::measure_the_worst_suggest_request`
+(`cargo test --release -- --ignored --nocapture measure_the_worst_suggest_request`, run in the
+CI container with 10 CPUs) seeds a synthetic catalogue of 6,144 owner-written entries (two
+types; names up to 100 scalars with shared prefixes, Latin, Cyrillic, Hangul and CJK names, a
+third of them short so about 2,000 norms lie within 2 scalars of the typo query) and times 1,000
+warm requests per mix through the real router and auth layer, in process. Release build, one
+run, same machine as every other result here:
+
+| Mix | Query | Cold | p50 | p95 |
+|---|---|---|---|---|
+| prefix | `la` | 23.4 ms | 1.40 ms | 1.54 ms |
+| substring | `nter` | 0.96 ms | 1.01 ms | 1.26 ms |
+| worst typo | `qzxwvu&typo=1` | 2.48 ms | 1.45 ms | 1.61 ms |
+
+The 50 ms p95 bound holds with a wide margin for this shape. The cold figure is the first
+request after the name cache was empty only for the prefix mix (it loads the names; the other
+mixes ran on the warm index). Not measured: the release binary over HTTP
+(`tools/suggest_profile.py` is written and self-tested, but needs a prepared server and sheet),
+a cold load with a cold SQLite page cache, and concurrent requests.
+
 ## Live progress on the assistant page in Chromium (2d-4, 2026-11-17)
 
 Live inference on the dev host: Mimik's release build of master (`--assistant`, CPU path,

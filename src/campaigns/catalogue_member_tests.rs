@@ -10,11 +10,11 @@ use crate::{Store, catalogues::PublishRequest};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
-fn mapped() -> Value {
+pub(super) fn mapped() -> Value {
     json!({"state": "mapped", "regions": [{"source_id": 1, "page_id": 1, "unit_id": 1}]})
 }
 
-fn entry(key: &str, entry_type: &str, name: &str, retired: bool) -> Value {
+pub(super) fn entry(key: &str, entry_type: &str, name: &str, retired: bool) -> Value {
     let mut entry = json!({"key": key, "type": entry_type, "name": name, "properties": {},
                            "description": {"owner_text": format!("Synthetic text of {key}.")}});
     if retired {
@@ -24,7 +24,7 @@ fn entry(key: &str, entry_type: &str, name: &str, retired: bool) -> Value {
 }
 
 /// `gear`: two entries named Sword of different types, a retired rope, and a name with `ß`.
-fn gear() -> Value {
+pub(super) fn gear() -> Value {
     json!({"contract_version": 1, "game_id": "synthetic-game", "edition_id": "first",
            "catalogue_id": "gear", "title": "Synthetic gear", "sources": [],
            "entry_types": [{"id": "tool", "label": "Tool", "properties": []},
@@ -65,7 +65,7 @@ pub(super) fn definition(entry_type: Option<&str>) -> Value {
     })
 }
 
-async fn publish_catalogue(store: &Store, value: &Value) {
+pub(super) async fn publish_catalogue(store: &Store, value: &Value) {
     let draft = store
         .save_catalogue_draft(serde_json::to_vec(value).unwrap(), 0)
         .await
@@ -86,7 +86,7 @@ async fn publish_catalogue(store: &Store, value: &Value) {
 
 /// A store with the synthetic source, `catalogue` published, `definition` published against it
 /// and a campaign (no sheet yet).
-async fn published(definition: &Value, catalogue: &Value) -> Setup {
+pub(super) async fn published(definition: &Value, catalogue: &Value) -> Setup {
     let (dir, store, auth, _clock) = fixture().await;
     published_fixture(&store).await;
     publish_catalogue(&store, catalogue).await;
@@ -131,7 +131,7 @@ async fn published(definition: &Value, catalogue: &Value) -> Setup {
 
 /// `published` with the demo definition, and the sheet 1 holding `rows` (name, key) with
 /// quantity 1.
-async fn world(entry_type: Option<&str>, rows: &[(&str, Option<&str>)]) -> Setup {
+pub(super) async fn world(entry_type: Option<&str>, rows: &[(&str, Option<&str>)]) -> Setup {
     let setup = published(&definition(entry_type), &gear()).await;
     let items: Vec<Value> = rows
         .iter()
@@ -148,14 +148,14 @@ async fn world(entry_type: Option<&str>, rows: &[(&str, Option<&str>)]) -> Setup
     setup
 }
 
-async fn page(setup: &Setup) -> scraper::Html {
+pub(super) async fn page(setup: &Setup) -> scraper::Html {
     let (status, html) = setup.get("/private-sheets/1").await;
     assert_eq!(status, StatusCode::OK, "{html}");
     scraper::Html::parse_document(&html)
 }
 
 /// The entry links of the page: the row they sit on (cell key `1-<r>-0`) and their href.
-fn links(page: &scraper::Html) -> Vec<(String, String)> {
+pub(super) fn links(page: &scraper::Html) -> Vec<(String, String)> {
     let anchors = scraper::Selector::parse("a.entry-link").unwrap();
     page.select(&anchors)
         .map(|anchor| {
@@ -172,11 +172,11 @@ fn links(page: &scraper::Html) -> Vec<(String, String)> {
         .collect()
 }
 
-fn href(key: &str) -> String {
+pub(super) fn href(key: &str) -> String {
     format!("/private-sheets/1/catalogue/gear/{key}")
 }
 
-async fn stored(setup: &Setup) -> Value {
+pub(super) async fn stored(setup: &Setup) -> Value {
     let snapshot: String = setup
         .store
         .run(|db| {
@@ -273,7 +273,7 @@ async fn a_failed_lookup_shows_no_links() {
 }
 
 #[tokio::test]
-async fn the_json_answer_carries_the_link_and_a_save_keeps_the_stored_key() {
+async fn the_json_answer_carries_the_link_and_a_rename_clears_the_stored_key() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = world(None, &[("Shield", None), ("Sword", Some("sword-b"))]).await;
@@ -319,10 +319,11 @@ async fn the_json_answer_carries_the_link_and_a_save_keeps_the_stored_key() {
         answer["unit"]["link"],
         json!({"href": href("rope"), "catalogue": "0"})
     );
-    assert_eq!(
-        stored(&setup).await["data"]["equipment"][1]["gear_key"],
-        "sword-b",
-        "a save keeps the stored key"
+    assert!(
+        stored(&setup).await["data"]["equipment"][1]
+            .get("gear_key")
+            .is_none(),
+        "a rename to another norm clears the stored key in the same revision"
     );
     // A name no entry has drops the link (null, so a script removes it).
     let (_, answer) = post("/private-sheets/1/cells/1/1/0", 2, "Nothing here").await;
@@ -333,7 +334,7 @@ async fn the_json_answer_carries_the_link_and_a_save_keeps_the_stored_key() {
     assert_eq!(answer["unit"]["link"], Value::Null);
 }
 
-fn full_form(extra: Vec<(String, String)>) -> Vec<(String, String)> {
+pub(super) fn full_form(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut form = vec![
         pair("csrf", "a".repeat(64)),
         pair("revision", "1"),
@@ -351,7 +352,7 @@ fn full_form(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     form
 }
 
-fn new_row_form(extra: Vec<(String, String)>) -> Vec<(String, String)> {
+pub(super) fn new_row_form(extra: Vec<(String, String)>) -> Vec<(String, String)> {
     let mut form = vec![
         pair("csrf", "a".repeat(64)),
         pair("base", "1"),
@@ -402,7 +403,7 @@ async fn no_route_takes_the_key_property_and_every_save_keeps_it() {
 }
 
 #[tokio::test]
-async fn every_save_keeps_the_stored_key_and_new_rows_leave_it_absent() {
+async fn saves_keep_the_key_while_the_name_norm_stands_and_new_rows_leave_it_absent() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = world(None, &[("Shield", Some("shield")), ("Rope", None)]).await;
@@ -436,7 +437,24 @@ async fn every_save_keeps_the_stored_key_and_new_rows_leave_it_absent() {
     let rows = stored(&setup).await["data"]["equipment"].clone();
     assert_eq!(rows.as_array().unwrap().len(), 4);
     assert!(rows[2].get("gear_key").is_none() && rows[3].get("gear_key").is_none());
-    // A name cell save keeps the stored key as well, and the page shows no key control.
+    // A name cell save that only recases keeps the stored key; a rename to another norm
+    // removes it in the same revision (plan step 4, item 5).
+    let base = revision().await.to_string();
+    let (status, _) = setup
+        .post(
+            "/private-sheets/1/cells/1/0/0",
+            vec![
+                pair("csrf", "a".repeat(64)),
+                pair("base", base),
+                pair("value", "SHIELD"),
+            ],
+        )
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        stored(&setup).await["data"]["equipment"][0]["gear_key"],
+        "shield"
+    );
     let base = revision().await.to_string();
     let (status, _) = setup
         .post(
@@ -449,9 +467,10 @@ async fn every_save_keeps_the_stored_key_and_new_rows_leave_it_absent() {
         )
         .await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        stored(&setup).await["data"]["equipment"][0]["gear_key"],
-        "shield"
+    assert!(
+        stored(&setup).await["data"]["equipment"][0]
+            .get("gear_key")
+            .is_none()
     );
     let response = router_request(&setup.app, &setup.auth[1], "/private-sheets/1", None).await;
     let html = String::from_utf8(
@@ -474,6 +493,18 @@ async fn every_save_keeps_the_stored_key_and_new_rows_leave_it_absent() {
 /// the bound itself is never enlarged.
 #[tokio::test]
 async fn worst_label_page_with_every_row_linked_is_within_the_unit_bound() {
+    wide_page(false).await;
+}
+
+/// The same widest list with every row warned instead of linked (step 4, rule 4: the names
+/// are in no catalogue entry), each name cell carrying the warning and its Browse link and
+/// the input its suggest route.
+#[tokio::test]
+async fn worst_label_page_with_every_row_warned_is_within_the_unit_bound() {
+    wide_page(true).await;
+}
+
+async fn wide_page(warned: bool) {
     use super::list_tests::{render_units, wide_list_definition, within_unit_bound};
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
@@ -514,6 +545,10 @@ async fn worst_label_page_with_every_row_linked_is_within_the_unit_bound() {
             let mut item = json!({"id": format!("i{k:03}-{}", "x".repeat(59)),
                                   name.clone(): format!("Item {k:03}"),
                                   key.clone(): format!("e{k:03}-{}", "k".repeat(59))});
+            if warned {
+                item[&name] = format!("Nowhere {k:03}").into();
+                item.as_object_mut().unwrap().remove(&key);
+            }
             for other in &others {
                 item[other] = 0.into();
             }
@@ -529,13 +564,24 @@ async fn worst_label_page_with_every_row_linked_is_within_the_unit_bound() {
             .to_vec(),
     )
     .unwrap();
-    assert_eq!(html.matches("class=\"entry-link\"").count(), 256);
+    if warned {
+        assert_eq!(html.matches("class=\"entry-match\"").count(), 256);
+        assert_eq!(html.matches("class=\"entry-link\"").count(), 0);
+        // The list is full (256 rows), so there is no new-row form.
+        assert_eq!(html.matches("data-suggest=").count(), 256);
+    } else {
+        assert_eq!(html.matches("class=\"entry-link\"").count(), 256);
+    }
     assert!(
         !html.contains("row-0-0-31"),
         "the key property is no control"
     );
     let units = render_units(&definition, &[256]);
-    within_unit_bound(&html, units, "every row linked, 64-character IDs and keys");
+    within_unit_bound(
+        &html,
+        units,
+        "every row linked or warned, 64-character IDs and keys",
+    );
 }
 
 fn refusal(error: crate::definitions::DefinitionError) -> String {

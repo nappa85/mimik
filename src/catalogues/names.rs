@@ -170,3 +170,20 @@ pub(crate) fn eligible(
         })?
         .collect()
 }
+
+/// The norms among `wanted` that any entry of `version_id` has, retired or of any type: what
+/// tells "No current entry of this type has this name" from "Not in the catalogue" (step 4).
+pub(crate) fn present(
+    db: &Connection,
+    version_id: i64,
+    wanted: &[String],
+) -> rusqlite::Result<BTreeSet<String>> {
+    let mut query = db.prepare_cached(
+        "SELECT DISTINCT norm FROM catalogue_entry_names WHERE version_id=?1 AND norm IN (SELECT value FROM json_each(?2))",
+    )?;
+    let wanted = serde_json::to_string(wanted)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    query
+        .query_map(params![version_id, wanted], |row| row.get(0))?
+        .collect()
+}

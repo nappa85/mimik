@@ -39,6 +39,9 @@ pub(crate) struct SheetView {
     /// Saved rows linked to a catalogue entry (step 3a), read with the links above; empty
     /// wherever those are.
     pub entry_links: super::catalogue::EntryLinks,
+    /// Saved unlinked name cells with several or no catalogue match (step 4, rules 3 and 4),
+    /// read with the links.
+    pub entry_matches: super::catalogue::Matches,
     /// Change notes (assisted sheet slice 1.2): the current note of each live address on a
     /// current page, the revision's notes on a history page, and the notes a save writes.
     pub notes: super::notes::Notes,
@@ -237,6 +240,7 @@ impl Store {
                     changes,
                     catalogues: Vec::new(),
                     entry_links: super::catalogue::EntryLinks::new(),
+                    entry_matches: super::catalogue::Matches::new(),
                     notes: super::notes::Notes::default(),
                 },
                 base,
@@ -314,6 +318,7 @@ impl Store {
                     changes: None,
                     catalogues: Vec::new(),
                     entry_links: super::catalogue::EntryLinks::new(),
+                    entry_matches: super::catalogue::Matches::new(),
                     notes: super::notes::Notes::default(),
                 },
                 permit,
@@ -511,7 +516,9 @@ impl Store {
             // history page (another revision's pin) lists no catalogue links.
             if let Some(pin)=view.immutable.as_ref().filter(|_|!create && history.is_none()){
                 view.catalogues=super::catalogue::links(&tx,pin)?;
-                view.entry_links=super::catalogue::entry_links(&tx,pin,&view.snapshot.data);
+                let linking=super::catalogue::linking(&tx,pin,&view.snapshot.data);
+                view.entry_links=linking.links;
+                view.entry_matches=linking.matches;
             }
             if let Some(pin)=&view.immutable{
                 let status=pin.readiness(&tx)?;

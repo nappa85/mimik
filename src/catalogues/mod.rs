@@ -11,6 +11,7 @@ pub(crate) mod names;
 mod publication;
 pub(crate) mod read;
 mod store;
+pub(crate) mod suggest;
 
 pub use decode::MAX_BYTES;
 

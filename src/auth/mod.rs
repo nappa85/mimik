@@ -437,7 +437,8 @@ fn normalize(mut response: Response) -> Response {
         || materials::trusted(&response)
         || crate::campaigns::web::catalogue_notice(&response)
         || crate::campaigns::web::sheet_busy(&response)
-        || crate::campaigns::web::assistant_answer(&response);
+        || crate::campaigns::web::assistant_answer(&response)
+        || crate::campaigns::web::suggest_answer(&response);
     if (status.is_client_error() || status.is_server_error())
         && !explained
         && !(matches!(

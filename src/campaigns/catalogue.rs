@@ -94,7 +94,148 @@ pub(crate) struct EntryWant {
     pub characters: usize,
 }
 
+/// One candidate of "Which one?": the entry's key, its type's label and the first characters
+/// of its context, which tell same-named entries apart.
+pub(crate) struct Candidate {
+    pub key: String,
+    pub type_label: String,
+    pub hint: String,
+}
+
+/// The catalogue member a pick among duplicates is checked against.
+pub(crate) struct PickMember {
+    pub catalogue: String,
+    pub entry_type: Option<String>,
+}
+
 impl Store {
+    /// Whether `key` names an eligible entry (not retired, of the member's entry type) of the
+    /// catalogue's latest sealed version whose normalised name is `norm` (step 4, item 3): one
+    /// read transaction that rechecks the session and the read right, under the caller's
+    /// runtime permit, which it returns. A catalogue without a sealed version is `false`.
+    pub(crate) async fn entry_named(
+        &self,
+        auth: RequestAuth,
+        sheet: i64,
+        (game, edition): (String, String),
+        (member, key, norm): (PickMember, String, String),
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(bool, OwnedSemaphorePermit), AppError> {
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck(&tx)?;
+            snapshots::authorize_read(&tx, &auth, sheet)?;
+            let named = match read::latest_sealed(&tx, &game, &edition, &member.catalogue)? {
+                Some(linked) if !norm.is_empty() => {
+                    let _budget = crate::sources::search::Budget::start(
+                        &tx,
+                        crate::sources::search::QUERY_BUDGET,
+                    );
+                    crate::catalogues::names::eligible(
+                        &tx,
+                        linked.version_id,
+                        member.entry_type.as_deref(),
+                        std::slice::from_ref(&norm),
+                    )
+                    .map_err(crate::sources::search::interrupted)?
+                    .iter()
+                    .any(|(_, entry)| *entry == key)
+                }
+                _ => false,
+            };
+            auth.recheck(&tx)?;
+            tx.commit()?;
+            Ok((named, permit))
+        })
+        .await
+    }
+
+    /// The eligible entries of the member's catalogue whose normalised name is `norm`, at most
+    /// `MAX_CANDIDATES` by `(name, key)`, and whether more exist (step 4,
+    /// item 6): one read transaction under the caller's runtime permit, which it returns. The
+    /// session and read right are rechecked and the sheet must still be at `revision` (a save
+    /// in between is a conflict).
+    pub(crate) async fn which_candidates(
+        &self,
+        auth: RequestAuth,
+        (sheet, revision): (i64, i64),
+        (game, edition): (String, String),
+        (catalogue, entry_type, norm): (String, Option<String>, String),
+        permit: OwnedSemaphorePermit,
+    ) -> Result<((Vec<Candidate>, bool), OwnedSemaphorePermit), AppError> {
+        use read::{CANDIDATE_HINT_CHARACTERS, LABEL_BYTES, MAX_CANDIDATES};
+        self.run_bounded_auth(move |db| {
+            let tx = db.transaction()?;
+            auth.recheck(&tx)?;
+            snapshots::authorize_read(&tx, &auth, sheet)?;
+            let current: i64 = tx.query_row(
+                "SELECT revision FROM private_sheets WHERE id=?1",
+                [sheet],
+                |row| row.get(0),
+            )?;
+            if current != revision {
+                return Err(AppError::Conflict);
+            }
+            let linked =
+                read::latest_sealed(&tx, &game, &edition, &catalogue)?.ok_or(AppError::NotFound)?;
+            let found = {
+                let _budget = crate::sources::search::Budget::start(
+                    &tx,
+                    crate::sources::search::QUERY_BUDGET,
+                );
+                let keys = crate::catalogues::names::eligible(
+                    &tx,
+                    linked.version_id,
+                    entry_type.as_deref(),
+                    std::slice::from_ref(&norm),
+                )
+                .map_err(crate::sources::search::interrupted)?;
+                let mut named = Vec::with_capacity(keys.len());
+                let mut query = tx
+                    .prepare_cached(&format!(
+                        "SELECT {},{} FROM catalogue_entries e JOIN catalogue_entry_types t ON t.version_id=e.version_id AND t.type_id=e.type_id WHERE e.version_id=?1 AND e.key=?2",
+                        crate::sources::search::guarded("e.name", LABEL_BYTES),
+                        crate::sources::search::guarded("t.label", LABEL_BYTES),
+                    ))
+                    .map_err(crate::sources::search::interrupted)?;
+                for (_, key) in keys {
+                    let (name, label) = query
+                        .query_row(rusqlite::params![linked.version_id, key], |row| {
+                            Ok((
+                                crate::sources::search::read_guarded(row, 0)?,
+                                crate::sources::search::read_guarded(row, 1)?,
+                            ))
+                        })
+                        .map_err(crate::sources::search::interrupted)?;
+                    named.push((name, key, label));
+                }
+                named.sort();
+                let more = named.len() > MAX_CANDIDATES;
+                named.truncate(MAX_CANDIDATES);
+                let mut candidates = Vec::with_capacity(named.len());
+                for (_, key, type_label) in named {
+                    // One policy with the suggestions' hints: an unreadable context is an empty
+                    // hint, never a failed page.
+                    let hint = read::entry_context(&tx, &linked, &key, CANDIDATE_HINT_CHARACTERS)
+                        .ok()
+                        .flatten()
+                        .map(|context| context.text.replace(['\n', '\t'], " "))
+                        .unwrap_or_default();
+                    candidates.push(Candidate {
+                        key,
+                        type_label,
+                        hint,
+                    });
+                }
+                (candidates, more)
+            };
+            auth.recheck(&tx)?;
+            tx.commit()?;
+            Ok((found, permit))
+        })
+        .await
+    }
+
     /// The entry contexts of a reminder's linked rows (plan 3c-2, step 3), aligned with
     /// `wanted`: one transaction that rechecks the sheet's read right, then for each entry
     /// checks that the latest sealed version still is the link's and reads its context, all
@@ -366,6 +507,29 @@ impl EntryLink {
 /// Links of the saved rows, by `(list field index, row host ID)`.
 pub(crate) type EntryLinks = std::collections::BTreeMap<(usize, String), EntryLink>;
 
+/// What a saved, unlinked name has instead of a link (step 4, rules 3 and 4): only where the
+/// lookup ran. A failed or timed-out lookup, or a catalogue without a sealed version, gives no
+/// outcome at all (never "Not in the catalogue").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Match {
+    /// Rule 3: several eligible entries share the name.
+    Several,
+    /// Rule 4: no entry of the catalogue has the name.
+    None,
+    /// Rule 4: entries have the name, but only retired ones or ones of another entry type.
+    NoCurrent,
+}
+
+/// The outcomes of the saved rows that have no link, by `(list field index, row host ID)`.
+pub(crate) type Matches = std::collections::BTreeMap<(usize, String), Match>;
+
+/// Linking on view: the links and the outcomes of the rows without one.
+#[derive(Default)]
+pub(crate) struct Linking {
+    pub links: EntryLinks,
+    pub matches: Matches,
+}
+
 /// Linking on view for the saved `data` of a sheet pinned to `pin`: for each saved row of a
 /// list with a `catalogue` member and a non-blank name, (1) the entry the stored key property
 /// names, if it is an eligible entry of the latest sealed version whose normalised name equals
@@ -374,24 +538,35 @@ pub(crate) type EntryLinks = std::collections::BTreeMap<(usize, String), EntryLi
 /// list under `QUERY_BUDGET`; a failure or timeout gives no links for that list and logs
 /// nothing about names. The catalogue must be reachable the way the catalogue route would
 /// serve it (a sealed version), which the caller's supported runtime pin already guarantees.
-pub(super) fn entry_links(
+pub(super) fn linking(
     db: &rusqlite::Connection,
     pin: &private_pin::ImmutablePin,
     data: &serde_json::Value,
-) -> EntryLinks {
-    entry_links_within(db, pin, data, (crate::sources::search::QUERY_BUDGET, None))
+) -> Linking {
+    linking_within(db, pin, data, (crate::sources::search::QUERY_BUDGET, None))
 }
 
-/// `entry_links` with its budget and, for tests that must interrupt very short reads, the
-/// VM-instruction interval of the budget check.
+/// The links of [`linking_within`] alone.
+#[cfg(test)]
 pub(super) fn entry_links_within(
     db: &rusqlite::Connection,
     pin: &private_pin::ImmutablePin,
     data: &serde_json::Value,
     budget: (std::time::Duration, Option<i32>),
 ) -> EntryLinks {
+    linking_within(db, pin, data, budget).links
+}
+
+/// `linking` with its budget and, for tests that must interrupt very short reads, the
+/// VM-instruction interval of the budget check.
+pub(super) fn linking_within(
+    db: &rusqlite::Connection,
+    pin: &private_pin::ImmutablePin,
+    data: &serde_json::Value,
+    budget: (std::time::Duration, Option<i32>),
+) -> Linking {
     let definition = pin.definition();
-    let mut links = EntryLinks::new();
+    let mut found = Linking::default();
     for (f, field) in definition.fields.iter().enumerate() {
         let properties = super::values::properties(field);
         let (Some(name), Some(key)) = (
@@ -422,12 +597,22 @@ pub(super) fn entry_links_within(
             budget,
         );
         match outcome {
-            Ok(found) => links.extend(found.into_iter().map(|(host, link)| ((f, host), link))),
+            Ok((links, matches)) => {
+                found
+                    .links
+                    .extend(links.into_iter().map(|(host, link)| ((f, host), link)));
+                found
+                    .matches
+                    .extend(matches.into_iter().map(|(host, kind)| ((f, host), kind)));
+            }
             Err(_) => eprintln!("Mimik: catalogue links unavailable for one list"),
         }
     }
-    links
+    found
 }
+
+/// The links and the outcomes of one list's saved rows, by row host ID.
+type RowsLinking = (Vec<(String, EntryLink)>, Vec<(String, Match)>);
 
 fn rows_links(
     db: &rusqlite::Connection,
@@ -436,12 +621,12 @@ fn rows_links(
     (name, key): (&str, &str),
     rows: &[serde_json::Value],
     budget: (std::time::Duration, Option<i32>),
-) -> Result<Vec<(String, EntryLink)>, AppError> {
+) -> Result<RowsLinking, AppError> {
     let definition = pin.definition();
     let Some(linked) =
         read::latest_sealed(db, &definition.game_id, &definition.edition_id, &member.id)?
     else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let named: Vec<(&str, String, Option<&str>)> = rows
         .iter()
@@ -451,7 +636,7 @@ fn rows_links(
         })
         .collect();
     if named.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut wanted: Vec<String> = named.iter().map(|(_, norm, _)| norm.clone()).collect();
     wanted.sort();
@@ -467,8 +652,23 @@ fn rows_links(
             member.entry_type.as_deref(),
             &wanted,
         )
+        .and_then(|eligible| {
+            // Which unmatched names any entry has at all (retired or of another type).
+            let unmatched: Vec<String> = wanted
+                .iter()
+                .filter(|norm| !eligible.iter().any(|(found, _)| found == *norm))
+                .cloned()
+                .collect();
+            let present = if unmatched.is_empty() {
+                std::collections::BTreeSet::new()
+            } else {
+                crate::catalogues::names::present(db, linked.version_id, &unmatched)?
+            };
+            Ok((eligible, present))
+        })
     }
-    .map_err(AppError::from)?;
+    .map_err(crate::sources::search::interrupted)?;
+    let (found, present) = found;
     let link = |entry: &str| EntryLink {
         index,
         catalogue: member.id.clone(),
@@ -480,14 +680,26 @@ fn rows_links(
     for (norm, entry) in &found {
         by_norm.entry(norm).or_default().push(entry);
     }
-    Ok(named
-        .into_iter()
-        .filter_map(|(host, norm, stored)| {
-            let matching = by_norm.get(norm.as_str())?;
-            let chosen = stored
-                .and_then(|stored| matching.iter().copied().find(|entry| *entry == stored))
-                .or_else(|| (matching.len() == 1).then(|| matching[0]))?;
-            Some((host.to_owned(), link(chosen)))
-        })
-        .collect())
+    let mut links = Vec::new();
+    let mut matches = Vec::new();
+    for (host, norm, stored) in named {
+        let outcome = match by_norm.get(norm.as_str()) {
+            Some(matching) => {
+                let chosen = stored
+                    .and_then(|stored| matching.iter().copied().find(|entry| *entry == stored))
+                    .or_else(|| (matching.len() == 1).then(|| matching[0]));
+                match chosen {
+                    Some(chosen) => {
+                        links.push((host.to_owned(), link(chosen)));
+                        continue;
+                    }
+                    None => Match::Several,
+                }
+            }
+            None if present.contains(&norm) => Match::NoCurrent,
+            None => Match::None,
+        };
+        matches.push((host.to_owned(), outcome));
+    }
+    Ok((links, matches))
 }
