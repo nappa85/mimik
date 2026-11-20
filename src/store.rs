@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 35;
+pub const SCHEMA_VERSION: i64 = 36;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 35] = [
+const MIGRATIONS: [&str; 36] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -46,6 +46,7 @@ const MIGRATIONS: [&str; 35] = [
     include_str!("../migrations/033_catalogue_entry_names.sql"),
     include_str!("../migrations/034_note_bundles.sql"),
     include_str!("../migrations/035_assistant_reminders.sql"),
+    include_str!("../migrations/036_upload_limits.sql"),
 ];
 
 #[derive(Clone)]
@@ -483,3 +484,7 @@ mod migration_tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "store_upload_tests.rs"]
+mod upload_limits_tests;

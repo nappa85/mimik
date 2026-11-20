@@ -149,7 +149,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    - *Rounding and the page edge:* after rounding outward each box is clamped to
      `[0, page width] x [0, page height]` (`padded()` clamps to the page edge,
      `upload_exclusions.rs:368-375`; `validate` refuses `b[2] > width_points`, `:296-300`; e.g.
-     595.2756 would round to 595.28). 036 rounds outward and clamps the old rows in its copy.
+     595.2756 would round to 595.28). Slice 5 rounds outward and clamps new boxes (migration 036 held no rows to convert).
      Confirmed proposals whose rounded boxes coincide are de-duplicated, not refused. Today's proposal rule (`propose_keyed`, `:437`: recur on at least
      max(3, ceil(3n/5)) pages) makes proposals over 64 pages routine from 107 selected pages.
 8. **Proposals stream pages, with bounded memory and time.** `upload_exclusions.rs:141-170` reads
@@ -239,19 +239,20 @@ nothing re-verifies the file. Pages are published inside the render callback
    (sparse padding), xref beyond 4 GiB (sparse, 64-bit seeks), peak RSS far below 75% of
    `RLIMIT_AS`, the gzip-with-`%PDF-` fixture, a missing input. Pinned-profile test unchanged (no
    new grant). Update the DEP-29 sentence.
-2. **Migration 036 (upload tables).** New bounds, `document_changed` in `source_jobs.reason` (026
-   `:122` would otherwise reject it) and `source_uploads.document_changed`, `error_code` mapping
-   (`uploads.rs:1398`). Migrations run in an IMMEDIATE transaction with foreign keys on
-   (`store.rs`): `DROP TABLE source_uploads` cascades into pages, exclusions (audit history) and
-   jobs, and `RENAME` fails while views reference the table. Plan: drop the views
-   (`source_upload_invalid_inspection`, `source_upload_invalid_exclusion`), all triggers and index
-   `source_upload_single_slot`; rename the four old tables to `*_old`; create the four new tables
-   under their final names (keeping `fingerprint_key` from 027); copy the parent, then pages,
-   exclusions with full history, jobs (a leftover `source_png_limit` reason maps to `too_large`);
-   drop the old children, then the old parent; recreate the views, every trigger and the index;
-   `PRAGMA foreign_key_check` must be empty, and both `source_upload_invalid_*` views must return no rows after the triggers are recreated (asserted in the migration). The `boxes` shape change (single box to list, `proposal_fingerprints`) is part of the copy. The migration test seeds rows in all four tables
-   (selection, pages, two exclusion revisions, a job in each state), asserts equality after, and
-   that 20,000-page rows are accepted and the old caps are gone.
+2. **Migration 036 (upload tables), built; remaining: review.** Owner decision 2026-11-11: no
+   release has shipped, so staged uploads are disposable and migration 036 drops and recreates
+   the four upload tables (views, triggers and the single-slot index with them) instead of
+   copying rows. Built: `pdf_page`, `pages_done`/`pages_total`, the inspected count and the
+   selection/exclusion page lists bounded at 20,000; `pdf_bytes` without a size bound (the route
+   and staging limits go in slice 4); `source_jobs.reason` gains `document_changed` and
+   `source_uploads` gains `document_changed` (slice 3 sets it; `error_code` maps it);
+   `fingerprint_key` kept; exclusion `boxes` as 1-8 boxes per page (view: 384 B a page, box keys
+   in `pages` order so the view stays linear) and `proposal_fingerprints` (at most 8 distinct
+   64-hex values). Staged files of the dropped rows are orphan directories that the startup
+   reconciliation already removes without following links (tested). Until slice 5 the exclusion
+   code writes one box per page and at most one fingerprint and refuses more when reading.
+   Migration test: seeded v35 rows in all four tables, tables empty after, foreign-key check
+   empty, 20,000 accepted and 20,001 refused.
 3. **Pins, verification, immutability** (decision 2): O_NOFOLLOW opens, pins into launch, per-job
    hash outside locks, `create` without the locked re-read, `document_changed` handling (delete
    all pages, retry refusal, `contract()` refusal). Tests: change one byte, truncate, append,
@@ -285,6 +286,7 @@ nothing re-verifies the file. Pages are published inside the render callback
    mismatch aborts untouched), an interrupted migration resumes, two sources with one PDF share a
    file, a tampered or missing file is `pdf_corrupt`, a symlink in the store directory is refused,
    orphans are swept, an import (separate process) racing the sweep keeps its file; the hash-mismatch abort and the quarantine command; insufficient free space refuses before the pre-step; the staged file's link count stays 1 after `put`.
+   Question for the coordinator (not changed here): under the 2026-11-11 owner decision (no release, disposable local data) the pre-step that migrates legacy `sources.pdf` blobs, its free-space check, quarantine command and resume logic may be unnecessary; 037 could drop the column and the `sources` rows (or the whole local data set) instead.
 8. **Docs.** Rewrite the reference sections in the table (each kept limit with its reason),
    `release-scope.md`, `limitations.md` (add: damaged-file inspection bound, exclusion history
    growth, CLI memory bounds; reword C5, L-SRC-3, L-SRC-8 as CLI-only), `decisions.md` DEP-29,

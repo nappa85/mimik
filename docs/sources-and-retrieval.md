@@ -2,7 +2,7 @@
 
 A **source** is one prepared extraction run of a locally owned manual: the original PDF, the Marker structured extraction (`source.json`), the prepared manifest (`bundle.json`) and one original-page PNG per selected page. Sources are stored privately in SQLite and reviewed by the Owner. Reviewed units feed lexical lookup. Nothing in this workflow lets a model approve evidence or change sheets or rules.
 
-Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`–`026`, `029`, `assets/source-regions.js`, `assets/source-review.js`. Tests: `tests/source_*.rs`, `src/sources/upload_tests.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
+Code: `src/sources/`, `src/auth/materials.rs`, migrations `003`, `004`, `005`, `007`, `009`, `015`, `017`, `024`–`026`, `029`, `036`, `assets/source-regions.js`, `assets/source-review.js`. Tests: `tests/source_*.rs`, `src/sources/upload_tests.rs`, `src/campaigns/material_tests.rs`, `tools/test_source_tools.py`.
 
 ## Internal PDF worker (Linux)
 
@@ -39,9 +39,8 @@ of its own (a PDF can be larger than 128 MiB, or have its xref beyond 4 GiB). Th
 check (`%PDF-` in the first 1,024 bytes, `%%EOF` in the last 1,024) reads those two windows
 by seek. A failure to open is `Unreadable`; `TooLarge` is only for allocation and limit errors
 after the open. The worker accepts at most 20,000 pages: the inspection record is one 9 MiB frame
-and a page record is at most about 450 bytes. Uploads stay at 2,000 pages until the upload
-tables are migrated (SRC-15 slice 2): a longer document fails as `too_many_pages` after
-inspection.
+and a page record is at most about 450 bytes. The upload tables store the same 20,000 pages (a
+longer document fails as `too_many_pages` after inspection).
 Cancellation/deadlines kill through pinned pidfds, and results wait for tree exit. Stdout
 uses the framed record reader; a separate stderr drain matches at most 64 KiB and discards
 the remainder without logging raw output. The closure executes the explicitly bound loader
@@ -174,14 +173,20 @@ Owner/CSRF-rechecked IMMEDIATE transaction. The original filename is never an ar
 After that commit, `create` returns the upload ID even if worker launch fails; the Owner can
 read the failed job and retry or discard it.
 
-Migration 026's `source_uploads`, `source_upload_pages`, `source_upload_exclusions` and
-`source_jobs` are mutable staging tables with cascading deletion, separate from permanent
-source immutability. They store metadata/hashes, not PDFs, PNGs or extracted text. Files are
+Migrations 026 and 036 define `source_uploads`, `source_upload_pages`, `source_upload_exclusions` and
+`source_jobs`: mutable staging tables with cascading deletion, separate from permanent
+source immutability. Migration 036 (SRC-15) dropped and recreated them (no release had shipped,
+so staged uploads were not copied; the startup reconciliation removes the staged files of dropped
+rows) with the stored bounds that follow the inspection frame: `pdf_page`, `pages_done`/`pages_total`
+and the inspected page count up to 20,000, a selection or exclusion page list of at most 20,000
+entries, and no size bound on `pdf_bytes`. `source_uploads.document_changed` and the job reason
+`document_changed` are reserved for the immutability check (SRC-15 slice 3). They store metadata/hashes, not PDFs, PNGs or extracted text. Files are
 descriptor-relative and no-follow under `data/staging/<32-hex-id>/`: directories 0700,
 `document.pdf`, `page-N.png` and `text-N.json` 0600. Page writes use exclusive temporary names,
 fsync and atomic rename. Newly created files/directories are fchmod-normalized to their private
 modes even under a restrictive umask. The exclusion table holds actor attribution, rationale,
-pages, displayed-space boxes, fingerprint, removal flag and revision. Set, replacement and
+pages, displayed-space boxes (a list of 1-8 per page, at most 384 bytes a page), a list of at most
+8 proposal fingerprints, removal flag and revision. Set, replacement and
 removal append rows; upload deletion/expiry cascades to all exclusion history. It stores no
 proposal text. The current exclusion and its independent revision (zero before the first row)
 are part of the upload model. A removal retains its historical boxes but exposes no current
