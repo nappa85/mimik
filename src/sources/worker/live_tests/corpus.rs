@@ -404,7 +404,23 @@ fn generate(name: &str) -> Vec<u8> {
 enum Expected {
     Inspect(Error),
     RenderOk,
-    RenderTimeout,
+    /// Bounded work whose outcome depends on the machine's speed: it finishes inside the
+    /// deadline under the memory gate (`Ok`) or the parent kills it as `Timeout`; any other
+    /// outcome is a failure.
+    RenderBounded,
+}
+
+/// Whether a bounded-work result is one of the two allowed outcomes.
+fn bounded_outcome(result: &Result<(), Reason>) -> bool {
+    matches!(result, Ok(()) | Err(Reason::Document(Error::Timeout)))
+}
+
+#[test]
+fn bounded_outcome_accepts_completion_and_timeout_only() {
+    assert!(bounded_outcome(&Ok(())));
+    assert!(bounded_outcome(&Err(Error::Timeout.into())));
+    assert!(!bounded_outcome(&Err(Error::TooLarge.into())));
+    assert!(!bounded_outcome(&Err(Error::Unreadable.into())));
 }
 
 fn expected(name: &str) -> Expected {
@@ -415,7 +431,7 @@ fn expected(name: &str) -> Expected {
         }
         "huge-page-count" => Expected::Inspect(Error::TooManyPages),
         "huge-mediabox" | "extreme-userunit" => Expected::Inspect(Error::TooLarge),
-        "flate-gib" | "operators-50m" | "shading-pattern" => Expected::RenderTimeout,
+        "flate-gib" | "operators-50m" | "shading-pattern" => Expected::RenderBounded,
         "nested-filters"
         | "image-bomb"
         | "tiny-images"
@@ -504,12 +520,13 @@ fn run_case(name: &str, valid: bool) {
         );
         println!("corpus {name}: render {result:?}");
         check_rss(name, "render", &opts);
-        let expected_result = match expected {
-            Expected::RenderOk => Ok(()),
-            Expected::RenderTimeout => Err(Error::Timeout.into()),
+        match expected {
+            Expected::RenderOk => assert_eq!(result, Ok(()), "{name}: render class"),
+            Expected::RenderBounded => {
+                assert!(bounded_outcome(&result), "{name}: render class {result:?}");
+            }
             Expected::Inspect(_) => unreachable!(),
-        };
-        assert_eq!(result, expected_result, "{name}: render class");
+        }
     }
     words_case(name, valid, expected, &path, &pages, &mut opts);
     if name == "inert-actions" {
@@ -555,10 +572,9 @@ fn words_case(
     match expected {
         Expected::RenderOk => assert_eq!(result, Ok(()), "{name}: words class"),
         // Extracting text may finish where painting does not; it may never hang or crash.
-        Expected::RenderTimeout => assert!(
-            matches!(result, Ok(()) | Err(Reason::Document(Error::Timeout))),
-            "{name}: words class {result:?}"
-        ),
+        Expected::RenderBounded => {
+            assert!(bounded_outcome(&result), "{name}: words class {result:?}");
+        }
         Expected::Inspect(_) => unreachable!(),
     }
 }
