@@ -1033,10 +1033,8 @@ impl Uploads {
                 if cancelled.load(Ordering::Acquire) {
                     return Err(AppError::Invalid("cancelled"));
                 }
-                // TEMPORARY (SRC-15 slice 1): the worker accepts 20,000 pages, but migration 026
-                // still limits `pdf_page` and the inspection to 2,000. Slice 2 raises the CHECKs
-                // and removes this guard.
-                if inspection.document.pages > 2000 {
+                // The worker refuses more pages itself; the stored bound is the same constant.
+                if inspection.document.pages > worker::records::MAX_PAGES {
                     return Err(AppError::Invalid("too_many_pages"));
                 }
                 let encoded = json(&inspection)?;
@@ -1410,7 +1408,7 @@ fn error_code(e: &AppError) -> &'static str {
         AppError::Invalid("too large for one source: select fewer pages") => "source_png_limit",
         AppError::Invalid(
             s @ ("cancelled" | "unavailable" | "unreadable" | "timeout" | "too_large"
-            | "too_many_pages" | "password_protected" | "unsupported"),
+            | "too_many_pages" | "password_protected" | "unsupported" | "document_changed"),
         ) => s,
         _ => "unreadable",
     }

@@ -108,51 +108,6 @@ fn exclusion_fingerprints_are_upload_private_and_discard_removes_key() {
 }
 
 #[test]
-fn exclusion_migration_removes_legacy_guessable_fingerprints() {
-    let (dir, m, o, _) = fixture();
-    let id = create(&m, &o);
-    selected(&m, &o, &id, &[1, 2, 3]);
-    start(&m, &o, &id);
-    wait(&m);
-    let revision = m.read(&id).unwrap().revision;
-    m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
-        .unwrap();
-    m.0.store
-        .upload_storage(|db| {
-            db.execute(
-                "UPDATE source_upload_exclusions SET proposal_fingerprint=?1",
-                [hash(b"test")],
-            )?;
-            db.execute_batch(crate::auth::DROP_HOME_SCHEMA)?;
-            db.execute_batch(
-                "ALTER TABLE source_uploads DROP COLUMN fingerprint_key; DROP TABLE source_owner_replacements; DROP TABLE source_page_words; DROP TABLE source_owner_tables; PRAGMA user_version=26;",
-            )?;
-            Ok(())
-        })
-        .unwrap();
-    let upgraded = Store::open(&dir.path().join("db")).unwrap();
-    upgraded
-        .upload_storage(|db| {
-            let fingerprint: Option<String> = db.query_row(
-                "SELECT proposal_fingerprint FROM source_upload_exclusions",
-                [],
-                |r| r.get(0),
-            )?;
-            assert!(fingerprint.is_none());
-            assert_eq!(
-                db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-                crate::SCHEMA_VERSION
-            );
-            Ok(())
-        })
-        .unwrap();
-    // Existing staging acquires a fresh getrandom key on first use.
-    let proposed = m.propose_exclusions(&o.auth, &id, revision).unwrap();
-    assert_ne!(proposed[0].fingerprint, hash(b"test"));
-    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
-}
-
-#[test]
 fn exclusion_contract_refuses_a_missing_deselected_rendering() {
     let (_dir, m, o, _) = fixture();
     let id = create(&m, &o);
@@ -705,7 +660,7 @@ fn staged_contract_includes_confirmed_displayed_exclusion() {
             "INSERT INTO source_upload_exclusions
              (upload_id,revision,actor,actor_id,actor_epoch,session_digest,rationale,pages,boxes,created_at)
              VALUES(?1,1,'account:1',1,1,?2,'Synthetic rationale','[1]',
-                    '{\"1\":[1,2,3,4]}',?3)",
+                    '{\"1\":[[1,2,3,4]]}',?3)",
             params![id, o.auth.digest(), now()?],
         )?;
         Ok(())
@@ -959,13 +914,34 @@ fn failed_inspection_can_be_inspected_again_without_losing_the_pdf() {
     assert_eq!(m.read(ID).unwrap().job.state, "succeeded");
 }
 
-// Temporary (SRC-15 slice 1): migration 026 still caps `pdf_page` at 2,000 and slice 2 raises it.
-// Until then a longer document must fail as `too_many_pages`, not as `unreadable` after the
-// update is refused by the CHECK. Slice 2 replaces this test with 20,000-page acceptance.
+// SRC-15 slice 2: the stored bound is the worker's 20,000 pages (migration 036).
 #[test]
-fn a_document_over_the_stored_page_cap_fails_as_too_many_pages() {
+fn a_document_over_the_old_two_thousand_page_cap_is_stored_and_the_upload_proceeds() {
+    for pages in [2001, worker::records::MAX_PAGES] {
+        let (_dir, m, o, f) = fixture();
+        f.inspected_pages.store(pages, Ordering::Release);
+        seed_queued(&m, &o, ID, "inspect");
+        m.launch(ID).unwrap();
+        wait(&m);
+        let u = m.read(ID).unwrap();
+        assert_eq!(u.state, "inspected", "{pages}");
+        assert_eq!(u.job.state, "succeeded", "{pages}");
+        assert_eq!(u.inspection.unwrap().document.pages, pages);
+        // The upload proceeds: any page of the document can be selected and rendered.
+        m.set(&o, ID, u.revision, &metadata(), &[pages]).unwrap();
+        start(&m, &o, ID);
+        wait(&m);
+        let u = m.read(ID).unwrap();
+        assert_eq!(u.state, "rendered", "{pages}");
+        assert_eq!(u.pages[0].pdf_page, pages);
+    }
+}
+
+#[test]
+fn a_document_over_twenty_thousand_pages_fails_as_too_many_pages() {
     let (_dir, m, o, f) = fixture();
-    f.inspected_pages.store(2001, Ordering::Release);
+    f.inspected_pages
+        .store(worker::records::MAX_PAGES + 1, Ordering::Release);
     seed_queued(&m, &o, ID, "inspect");
     m.launch(ID).unwrap();
     wait(&m);
@@ -973,6 +949,39 @@ fn a_document_over_the_stored_page_cap_fails_as_too_many_pages() {
     assert_eq!(u.state, "failed");
     assert_eq!(u.job.reason.as_deref(), Some("too_many_pages"));
     assert!(u.inspection.is_none());
+}
+
+#[test]
+fn files_of_rows_dropped_by_migration_036_are_removed_at_the_next_start() {
+    let (dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    let staged = dir.path().join("staging").join(&id);
+    assert!(staged.join("document.pdf").exists());
+    assert!(staged.join("page-1.png").exists());
+    std::fs::write(dir.path().join("outside"), b"keep").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("outside"), staged.join("link")).unwrap();
+    // The migration drops the four tables (children first) and recreates them.
+    m.0.store
+        .upload_storage(|db| {
+            db.execute_batch(include_str!("../../migrations/036_upload_limits.sql"))?;
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM source_uploads", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+    let store = m.0.store.clone();
+    drop(m);
+    let restarted = Uploads::initialize(store, dir.path(), f, false).unwrap();
+    assert!(!staged.exists());
+    assert_eq!(std::fs::read(dir.path().join("outside")).unwrap(), b"keep");
+    assert_eq!(restarted.0.ledger.usage().unwrap(), (0, 0));
+    assert!(restarted.read(&id).is_err());
 }
 
 #[test]
@@ -2102,7 +2111,7 @@ fn migration_constraints_and_cascade_refuse_bad_rows() {
             for assignment in [
                 "state='bogus'",
                 "revision=0",
-                "pdf_bytes=134217729",
+                "pdf_bytes=0",
                 "pdf_sha256='bad'",
                 "selected_pages='[1,1]'",
                 "selected_pages='[0]'",
@@ -2120,7 +2129,7 @@ fn migration_constraints_and_cascade_refuse_bad_rows() {
                 "state='bogus'",
                 "kind='other'",
                 "reason='raw diagnostics'",
-                "pages_done=65",
+                "pages_done=20001",
                 "pages_total=-1",
                 "pages_done=2",
             ] {
@@ -2149,8 +2158,8 @@ fn migration_constraints_and_cascade_refuse_bad_rows() {
                     "{assignment}"
                 );
             }
-            db.execute("INSERT INTO source_upload_exclusions(upload_id,revision,actor,actor_id,actor_epoch,session_digest,rationale,pages,boxes,created_at) VALUES(?1,1,'account:1',1,1,?2,'Synthetic rationale','[1]','{\"1\":[1,1,2,2]}',?3)",params![id,o.auth.digest(),now()?])?;
-            for assignment in ["revision=0","actor='forged'","actor_epoch=0","session_digest='bad'","rationale=''","pages='[1,1]'","pages='[0]'","boxes='{}'","boxes='{\"1\":[1,1,5000,2]}'","removed=2","proposal_fingerprint='raw text'"] {
+            db.execute("INSERT INTO source_upload_exclusions(upload_id,revision,actor,actor_id,actor_epoch,session_digest,rationale,pages,boxes,created_at) VALUES(?1,1,'account:1',1,1,?2,'Synthetic rationale','[1]','{\"1\":[[1,1,2,2]]}',?3)",params![id,o.auth.digest(),now()?])?;
+            for assignment in ["revision=0","actor='forged'","actor_epoch=0","session_digest='bad'","rationale=''","pages='[1,1]'","pages='[0]'","boxes='{}'","boxes='{\"1\":[[1,1,5000,2]]}'","boxes='{\"1\":[]}'","boxes='{\"1\":[1,1,2,2]}'","removed=2","proposal_fingerprints='[\"raw text\"]'"] {
                 assert!(db.execute(&format!("UPDATE source_upload_exclusions SET {assignment}"),[]).is_err(),"{assignment}");
             }
             db.execute("DELETE FROM source_uploads", [])?;

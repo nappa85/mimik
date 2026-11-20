@@ -44,7 +44,7 @@ pub struct Exclusion {
 pub(super) fn load(db: &Connection, id: &str) -> Result<(i64, Option<Exclusion>), AppError> {
     let row = db
         .query_row(
-            "SELECT revision,pages,boxes,proposal_fingerprint,rationale,removed
+            "SELECT revision,pages,boxes,proposal_fingerprints,rationale,removed
          FROM source_upload_exclusions WHERE upload_id=?1 ORDER BY revision DESC LIMIT 1",
             [id],
             |r| {
@@ -52,7 +52,7 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<(i64, Option<Exclusion>)
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, bool>(5)?,
                 ))
@@ -61,20 +61,43 @@ pub(super) fn load(db: &Connection, id: &str) -> Result<(i64, Option<Exclusion>)
         .optional()?;
     match row {
         None => Ok((0, None)),
-        Some((revision, pages, boxes, proposal_fingerprint, rationale, removed)) => Ok((
+        Some((revision, pages, boxes, fingerprints, rationale, removed)) => Ok((
             revision,
             if removed {
                 None
             } else {
                 Some(Exclusion {
                     pages: parse(&pages)?,
-                    boxes: parse(&boxes)?,
-                    proposal_fingerprint,
+                    boxes: single_boxes(parse(&boxes)?)?,
+                    proposal_fingerprint: single_fingerprint(parse(&fingerprints)?)?,
                     rationale,
                 })
             },
         )),
     }
+}
+
+// The stored shape is a list of boxes per page and a list of fingerprints (SRC-15 slice 2); the
+// Owner flow still confirms one proposal with one box per page until slice 5, so anything else
+// stored is refused instead of silently narrowed.
+fn single_boxes(
+    stored: BTreeMap<u32, Vec<BoxPoints>>,
+) -> Result<BTreeMap<u32, BoxPoints>, AppError> {
+    stored
+        .into_iter()
+        .map(|(page, boxes)| match boxes[..] {
+            [only] => Ok((page, only)),
+            _ => Err(AppError::Invalid("Invalid exclusion boxes.")),
+        })
+        .collect()
+}
+fn single_fingerprint(stored: Vec<String>) -> Result<Option<String>, AppError> {
+    let mut stored = stored.into_iter();
+    let first = stored.next();
+    if stored.next().is_some() {
+        return Err(AppError::Invalid("Invalid exclusion fingerprints."));
+    }
+    Ok(first)
 }
 
 impl Uploads {
@@ -317,7 +340,7 @@ fn append(
     tx.execute(
         "INSERT INTO source_upload_exclusions
         (upload_id,revision,actor,actor_id,actor_epoch,session_digest,rationale,pages,boxes,
-         proposal_fingerprint,removed,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+         proposal_fingerprints,removed,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![
             id,
             revision,
@@ -327,8 +350,13 @@ fn append(
             owner.auth.digest(),
             e.rationale,
             json(&e.pages)?,
-            json(&e.boxes)?,
-            e.proposal_fingerprint,
+            json(
+                &e.boxes
+                    .iter()
+                    .map(|(n, b)| (*n, [*b]))
+                    .collect::<BTreeMap<_, _>>()
+            )?,
+            json(&e.proposal_fingerprint.iter().collect::<Vec<_>>())?,
             removed,
             t
         ],
