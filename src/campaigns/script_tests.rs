@@ -651,6 +651,71 @@ fn the_module_uses_no_html_sinks_or_style_attributes() {
         );
     }
     assert!(!source.contains("formAction") && !source.contains(".src ="));
+    // The combobox's ARIA attributes (step 4) are on the list; nothing else new is.
+    for needed in [
+        "aria-activedescendant",
+        "aria-autocomplete",
+        "aria-controls",
+        "aria-expanded",
+        "aria-selected",
+        "autocomplete",
+    ] {
+        assert!(
+            list.split('\'')
+                .skip(1)
+                .step_by(2)
+                .any(|name| name == needed),
+            "the allowlist lacks {needed}"
+        );
+    }
+}
+
+/// The suggestion combobox and the name match (step 4) keep to what the plan names: href
+/// patterns checked before use, no query while composing, a generation counter and an
+/// `AbortController`, pointer picks that keep focus, and Enter that selects without saving.
+#[test]
+fn the_module_keeps_the_combobox_contract() {
+    let source = module_source();
+    for needed in [
+        "const SUGGEST_PATH = /^\\/private-sheets\\/\\d+\\/suggest\\/\\d+\\/\\d+$/;",
+        "const WHICH_PATH =",
+        "const BROWSE_PATH =",
+        "WHICH_PATH.test(match.which)",
+        "BROWSE_PATH.test(match.browse)",
+        "SUGGEST_PATH.test(path)",
+        "event.isComposing || event.keyCode === 229",
+        "compositionend",
+        "new AbortController()",
+        "gen !== box.gen || control.value.trim() !== typed",
+        "list.addEventListener('pointerdown', (event) => event.preventDefault());",
+        "list.addEventListener('mousedown', (event) => event.preventDefault());",
+        "list.addEventListener('click', (event) => {",
+        "function clearMatch(unit) {",
+        "await whenIdle();",
+        "if (status === 429 || status === 503) {",
+        "event.target.value === 'absent'",
+        "// A busy answer's alert does not outlive the retry that opened the list.\n  clearAlert(unit);",
+        "if (!unit && control.form) {",
+        "aria-labelledby': `${unit.control.id}-use-${at} ${unit.control.id}-line-${at}`",
+        "event.preventDefault();\n      pick(box.active);",
+        "const SUGGEST_DEBOUNCE = 150;",
+        "const SUGGEST_TIMEOUT = 5000;",
+        "control.setAttribute('role', 'combobox');",
+        "dropEntry(unit, flight);",
+    ] {
+        assert!(source.contains(needed), "the module lacks {needed}");
+    }
+    // `describe()` keeps the warning's id: `showUnit` passes the ids `showMatch` returns (the
+    // fresh warning's, or the existing one's when the answer carries no member) and `describe`
+    // writes them into `aria-describedby`.
+    assert!(source.contains("describe(unit, [...noteIds, ...offerIds, ...matchIds]);"));
+    assert!(source.contains("id: `match-${shown.key}`"));
+    assert!(source.contains("return old ? [old.id] : [];"));
+    assert!(source.contains("return [line.id];"));
+    assert!(source.contains("control.setAttribute('aria-describedby', list.join(' '));"));
+    // Option names are drawn as text inside <bdi>, and ids are by index, never by key.
+    assert!(source.contains("element('bdi', {}, one.name)"));
+    assert!(source.contains("id: `${id}-${at}`"));
 }
 
 /// Only exactly one `Accept: application/json` header asks for the JSON answer; anything

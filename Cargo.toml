@@ -64,6 +64,11 @@ unicode-general-category = "=1.1.0"
 unicode-normalization = "=0.1.25"
 # Full Unicode case folding for repeated-text proposals; already locked through mime_guess.
 unicase = "=2.10.0"
+# Typo suggestions (step 4, DEP entry): edit distance with transpositions; already in the release
+# tree through clap.
+strsim = "=0.11.1"
+# The suggest route's LRUs (step 4); follows rusqlite's own hashlink so cargo-deny sees one copy.
+hashlink = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }
 cel = { version = "=0.15.0", default-features = false }
 # Interpretation assistant (step 2c-1, D-H, ASSIST-39): the provider client; Mimik's own

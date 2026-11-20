@@ -71,6 +71,14 @@ article.panel { margin-bottom: 1rem; }
 .row-actions button { margin: 0; min-width: 24px; min-height: 24px; }
 .entry-note { margin: .2rem 0 .6rem; font-size: .9rem; overflow-wrap: anywhere; }
 .entry-actions { margin: .2rem 0 .6rem; font-size: .9rem; }
+.entry-match { margin: .2rem 0 .6rem; font-size: .9rem; overflow-wrap: anywhere; }
+.entry-match button { margin: 0 0 0 .5rem; padding: .3rem .8rem; min-width: 24px; min-height: 24px; }
+[role="listbox"] { list-style: none; margin: .2rem 0 .6rem; padding: 0; border: 1px solid #b9bdb9; border-radius: 6px; background: #fff; color: #1e2420; max-width: 100%; }
+[role="listbox"] li { padding: .4rem .6rem; min-height: 24px; overflow-wrap: anywhere; cursor: pointer; }
+[role="listbox"] li[aria-selected="true"] { background: #dfe9f5; outline: 2px solid #2a5ea8; }
+.which-list { list-style: none; margin: .2rem 0 .6rem; padding: 0; }
+.which-list li { margin: .4rem 0; overflow-wrap: anywhere; }
+.which-list button { margin: 0 0 0 .5rem; min-width: 24px; min-height: 24px; }
 .entry-actions p { margin: .2rem 0; overflow-wrap: anywhere; }
 .entry-actions button { margin: 0 0 0 .5rem; padding: .3rem .8rem; min-width: 24px; min-height: 24px; }
 .entry-actions label { display: inline-block; width: auto; margin: 0 0 0 .5rem; padding: .3rem; min-height: 24px; font-weight: 400; text-decoration: underline; cursor: pointer; }

@@ -100,9 +100,13 @@ or carries a member itself (`catalogue-key-invalid`). The entry type is checked 
 saved and in the publication snapshot, against the linked catalogue's latest sealed version
 (`linked-catalogue-entry-type-unknown`); readiness stays existence-only, and a catalogue
 version cannot drop an entry type, so a published type stays valid. The key property is
-rendered as the entry link and is never a control: no form carries it (a posted value is 400),
-every save keeps its stored value and a new or quick-added row leaves it absent; formulas see
-it as an ordinary optional text property. Linking on view: [assisted-entry.md](assisted-entry.md#catalogue-links).
+rendered as the entry link and is never a control: no form carries it (a posted value is 400).
+Only a pick among several same-named entries writes it: the cell route of the name and the
+new-row route take an optional `entry` (a slug) that stores the key with the name in one
+revision; every other save keeps the stored value while the name's norm stands and removes it
+when the norm changes, and a quick-added row leaves it absent; formulas see it as an ordinary
+optional text property. Linking, the key and suggestions:
+[assisted-entry.md](assisted-entry.md#catalogue-links).
 
 **Formulas and constraints.** A field with `formula: {expr, rule_ids, evidence}` is derived:
 computed on saved-sheet views and history views (including the GET that follows a save) from

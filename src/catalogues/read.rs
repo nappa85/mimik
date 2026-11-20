@@ -21,7 +21,13 @@ pub(crate) const MAX_QUERY_SCALARS: usize = 100;
 /// Displayed description characters per entry (R7: replaces "64 KiB"; at most 80 KB of UTF-8).
 pub(crate) const DISPLAY_CHARACTERS: usize = 20_000;
 /// Byte guard of names, labels and titles (100 scalars of at most 4 bytes).
-const LABEL_BYTES: usize = 400;
+pub(crate) const LABEL_BYTES: usize = 400;
+/// Candidates "Which one?" lists (assisted sheet step 4); more shows Browse.
+pub(crate) const MAX_CANDIDATES: usize = 50;
+/// Characters of an entry's context that tell same-named entries apart: in "Which one?" and in
+/// a duplicate suggestion's hint.
+pub(crate) const CANDIDATE_HINT_CHARACTERS: usize = 120;
+pub(crate) const SUGGESTION_HINT_CHARACTERS: usize = 60;
 /// The effective text of a unit (R21): the correction when the state is `corrected`.
 const EFFECTIVE: &str = "CASE WHEN u.state='corrected' THEN u.correction ELSE u.raw_text END";
 
@@ -32,6 +38,9 @@ pub(crate) struct Linked {
     /// `None` when the stored title is outside its byte bound or not text (damage): readers
     /// degrade to the catalogue id instead of failing the page.
     pub title: Option<String>,
+    /// The version's content hash (64 hex characters; the CHECK of `catalogue_versions`), the
+    /// key the suggest route's name cache pairs with the version id.
+    pub content_hash: String,
 }
 
 /// The latest sealed version of `(game, edition, catalogue)`, or `None` when the catalogue has
@@ -46,7 +55,7 @@ pub(crate) fn latest_sealed(
     catalogue: &str,
 ) -> Result<Option<Linked>, AppError> {
     let sql = format!(
-        "SELECT v.id,c.id,{} FROM catalogues c JOIN catalogue_versions v ON v.catalogue=c.id AND v.game_id=c.game_id AND v.edition_id=c.edition_id AND v.catalogue_id=c.catalogue_id JOIN catalogue_seals s ON s.version_id=v.id WHERE c.game_id=?1 AND c.edition_id=?2 AND c.catalogue_id=?3 ORDER BY v.version DESC LIMIT 1",
+        "SELECT v.id,c.id,{},v.content_hash FROM catalogues c JOIN catalogue_versions v ON v.catalogue=c.id AND v.game_id=c.game_id AND v.edition_id=c.edition_id AND v.catalogue_id=c.catalogue_id JOIN catalogue_seals s ON s.version_id=v.id WHERE c.game_id=?1 AND c.edition_id=?2 AND c.catalogue_id=?3 ORDER BY v.version DESC LIMIT 1",
         guarded("v.title", LABEL_BYTES)
     );
     Ok(db
@@ -55,6 +64,7 @@ pub(crate) fn latest_sealed(
                 version_id: row.get(0)?,
                 surrogate: row.get(1)?,
                 title: row.get(2)?,
+                content_hash: row.get(3)?,
             })
         })
         .optional()?)

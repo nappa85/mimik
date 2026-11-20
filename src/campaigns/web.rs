@@ -110,6 +110,23 @@ pub(crate) fn assistant_answer(response: &Response) -> bool {
             .is_some_and(|value| value == "application/json")
 }
 
+/// Marks the suggest route's JSON answer (step 4): `unavailable` (403), `busy` (429, 503)
+/// and the suggestions. The auth layer keeps such a body instead of its generic one.
+#[derive(Clone)]
+pub(crate) struct SuggestAnswer;
+
+/// Whether the auth layer keeps this response's body as a suggest answer.
+pub(crate) fn suggest_answer(response: &Response) -> bool {
+    matches!(
+        response.status(),
+        StatusCode::FORBIDDEN | StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ) && response.extensions().get::<SuggestAnswer>().is_some()
+        && response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_some_and(|value| value == "application/json")
+}
+
 /// Marks a catalogue route's own explanatory page (plan §19): 400 for a malformed address,
 /// 403 for the uniform refusal, 404 for an entry or type missing from a catalogue the reader
 /// may browse. The auth layer keeps such a body instead of its generic one.
@@ -180,8 +197,12 @@ pub(in crate::campaigns) mod interpret_web;
 mod remind_web;
 #[path = "sheet_json.rs"]
 mod sheet_json;
+#[path = "suggest_web.rs"]
+pub(in crate::campaigns) mod suggest_web;
 #[path = "unit_web.rs"]
 mod unit_web;
+#[path = "which_web.rs"]
+pub(in crate::campaigns) mod which_web;
 
 /// The campaign and sheet routes; `assistant` adds the interpretation routes (step 2c-1),
 /// which do not exist otherwise.
@@ -208,6 +229,10 @@ pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
         .route(
             "/private-sheets/{id}/catalogue/{catalogue}/{key}",
             get(super::catalogue_web::entry),
+        )
+        .route(
+            "/private-sheets/{id}/cells/{f}/{r}/{p}/which",
+            get(which_web::which),
         )
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::from_fn(runtime));
@@ -287,6 +312,16 @@ pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
         .layer(DefaultBodyLimit::max(8192))
         .merge(sheets)
         .merge(units)
+        .merge(suggest_route())
+}
+
+/// The suggest route (step 4): JSON, inside `signed_in`, outside the `runtime` layer (its own
+/// pool of 4; a pin-facts miss takes the runtime permit itself).
+fn suggest_route() -> Router<AuthState> {
+    Router::new().route(
+        "/private-sheets/{id}/suggest/{f}/{p}",
+        get(suggest_web::suggest).route_layer(middleware::from_fn(signed_in)),
+    )
 }
 
 pub(super) fn error(error: impl std::borrow::Borrow<AppError>) -> StatusCode {
@@ -701,6 +736,60 @@ struct CellView {
     focus_set: bool,
     /// The catalogue entry this saved name cell links to (step 3a), if any.
     link: Option<super::catalogue::EntryLink>,
+    /// The warning of a saved name cell with several or no catalogue match (step 4).
+    matched: Option<MatchView>,
+    /// The suggest route of an editable catalogue-backed name input (step 4); the sheet
+    /// module turns the input into a combobox.
+    suggest: Option<String>,
+}
+
+/// Rules 3 and 4 as the page words them (no name echoed): the sentence, the "Which one?" link
+/// of an editor and the Browse link.
+struct MatchView {
+    kind: super::catalogue::Match,
+    text: &'static str,
+    which: Option<String>,
+    browse: Option<String>,
+}
+
+impl MatchView {
+    fn of(
+        kind: super::catalogue::Match,
+        (view, f, r, name): (&SheetView, usize, usize, usize),
+        member: &crate::definitions::CatalogueMember,
+    ) -> Self {
+        use super::catalogue::Match;
+        let sheet = view.snapshot.sheet_id;
+        let browse = Some(which_web::browse_href(
+            sheet,
+            (&member.id, member.entry_type.as_deref()),
+        ));
+        match kind {
+            Match::Several => Self {
+                kind,
+                text: "Several catalogue entries have this name.",
+                which: view.editable.then(|| {
+                    format!(
+                        "/private-sheets/{sheet}/cells/{f}/{r}/{name}/which?base={}",
+                        view.snapshot.revision
+                    )
+                }),
+                browse: None,
+            },
+            Match::None => Self {
+                kind,
+                text: "Not in the catalogue.",
+                which: None,
+                browse,
+            },
+            Match::NoCurrent => Self {
+                kind,
+                text: "No current entry of this type has this name.",
+                which: None,
+                browse,
+            },
+        }
+    }
 }
 
 /// What a saved, editable page offers under a cell from its current note (slice 1.3): the
@@ -822,11 +911,14 @@ fn described_by(
     key: &str,
     note: Option<&NoteLine>,
     actions: Option<&Actions>,
-    unknown: bool,
+    (unknown, matched): (bool, bool),
 ) -> String {
     let mut ids = Vec::new();
     if unknown {
         ids.push("unknown-hint".to_owned());
+    }
+    if matched {
+        ids.push(format!("match-{key}"));
     }
     if note.is_some() {
         ids.push(format!("note-{key}"));
@@ -835,6 +927,20 @@ fn described_by(
         ids.push(format!("offer-{key}"));
     }
     ids.join(" ")
+}
+
+/// The suggest route of property `p` of list field `f` for an editor of a saved sheet whose
+/// definition links the property's catalogue (step 4); `None` otherwise.
+fn suggest_path(
+    view: &SheetView,
+    (f, p): (usize, usize),
+    field: &crate::definitions::Field,
+) -> Option<String> {
+    let pin = view.immutable.as_ref()?;
+    let property = values::properties(field).get(p)?;
+    values::linked_member(pin.definition(), property)?;
+    (view.editable && view.snapshot.sheet_id != 0)
+        .then(|| format!("/private-sheets/{}/suggest/{f}/{p}", view.snapshot.sheet_id))
 }
 
 /// What a sheet page shows next to a cell from its current change note (assisted sheet
@@ -944,7 +1050,10 @@ impl CellView {
             &self.key,
             self.note.as_ref(),
             self.actions.as_ref(),
-            self.integer && self.value.is_empty(),
+            (
+                self.integer && self.value.is_empty(),
+                self.matched.is_some(),
+            ),
         )
     }
     fn valid_boolean(&self) -> bool {
@@ -1126,6 +1235,8 @@ impl ListView {
                             autofocus: false,
                             focus_set: false,
                             link: None,
+                            matched: None,
+                            suggest: None,
                         }
                     })
                     .collect(),
@@ -1147,20 +1258,26 @@ impl ListView {
             kept: None,
         }
     }
-    /// Puts the catalogue entry link on each linked saved row's name cell (step 3a).
+    /// Puts the catalogue entry link, or the warning of rules 3 and 4, on each saved row's name
+    /// cell (steps 3a and 4), and the suggest route on an editor's name inputs.
     fn link(&mut self, view: &SheetView, f: usize, field: &crate::definitions::Field) {
-        let Some(name) = values::properties(field)
-            .iter()
-            .position(|property| property.catalogue.is_some())
-        else {
+        let Some(name) = values::name_property(field) else {
+            return;
+        };
+        let Some(member) = values::properties(field)[name].catalogue.as_ref() else {
             return;
         };
         for row in &mut self.rows {
-            if let Some(link) = view.entry_links.get(&(f, row.id.clone()))
-                && let Some(cell) = row.cells.get_mut(name)
-            {
+            let Some(cell) = row.cells.get_mut(name) else {
+                continue;
+            };
+            let at = (f, row.id.clone());
+            if let Some(link) = view.entry_links.get(&at) {
                 cell.link = Some(link.clone());
+            } else if let Some(kind) = view.entry_matches.get(&at) {
+                cell.matched = Some(MatchView::of(*kind, (view, f, row.r, name), member));
             }
+            cell.suggest = suggest_path(view, (f, name), field);
         }
     }
     /// Adds the switch and Undo of each saved row cell (slice 1.3).
@@ -1301,6 +1418,8 @@ impl ListView {
                     autofocus: submitted.is_some() && p == 0 && !property.optional,
                     focus_set: submitted.is_some() && p == 0 && property.optional,
                     link: None,
+                    matched: None,
+                    suggest: suggest_path(view, (self.f, p), field),
                 })
                 .collect(),
         );
@@ -1389,7 +1508,7 @@ impl FieldView {
             &self.key,
             self.note.as_ref(),
             self.actions.as_ref(),
-            self.control == "integer" && self.value.is_empty(),
+            (self.control == "integer" && self.value.is_empty(), false),
         )
     }
     fn value_excerpt(&self) -> String {

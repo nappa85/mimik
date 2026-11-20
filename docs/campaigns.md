@@ -48,7 +48,9 @@ Routes: `/campaigns` (directory, create), `/campaigns/{id}` (detail),
 
 Routes: `/campaigns/{id}/sheets/new`, `/private-sheets` (personal list),
 `/private-sheets/{id}`, `/private-sheets/{id}/history[/{revision}]`, plus the
-assisted-editing routes (`switch`, `undo`, `meta/{which}`, `fields/{field}`).
+assisted-editing routes (`switch`, `undo`, `meta/{which}`, `fields/{field}`), the catalogue routes
+and, for a catalogue-backed name, `suggest/{f}/{p}` and `cells/{f}/{r}/{p}/which`
+([catalogues.md](catalogues.md#reading-through-a-sheet)).
 
 - A sheet's custodian is its creator; custody never changes. There is no transfer,
   delete, restore, rollback or purge.

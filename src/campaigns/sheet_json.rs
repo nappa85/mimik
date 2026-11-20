@@ -273,6 +273,19 @@ fn unit_json<'a>(
                     Value::Null,
                     |link| json!({"href": link.href(sheet), "catalogue": link.index.to_string()}),
                 );
+                // The warning of rules 3 and 4 (step 4): several matches (with the "Which one?"
+                // route) or none (with Browse); `null` when the row is linked or the lookup
+                // gave no outcome.
+                answer["match"] = cell.matched.as_ref().map_or(Value::Null, |matched| {
+                    use crate::campaigns::catalogue::Match;
+                    match matched.kind {
+                        Match::Several => json!({"kind": "several", "which": matched.which}),
+                        Match::None => json!({"kind": "none", "browse": matched.browse}),
+                        Match::NoCurrent => {
+                            json!({"kind": "none", "browse": matched.browse, "current": false})
+                        }
+                    }
+                });
                 if let Some(host) = host {
                     let address =
                         super::super::notes::cell_address(&list_field.id, host, &property.id);
