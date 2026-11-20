@@ -27,11 +27,42 @@ STRICT_CSP = (
 )
 
 
-def form(page, kind, target=None):
+def reveal(locator):
+    """Opens every closed <details> around `locator`: the work-queue review screen folds each
+    card's Details and decision forms and the page tasks (notes, missing text, primary reading,
+    completeness, lookup, history). A closed disclosure renders nothing, so nothing in it can be
+    focused, filled, clicked, or (for images) requested. A summary click works without script."""
+    closed = locator.first.locator("xpath=ancestor::details[not(@open)]")
+    for _ in range(8):
+        if not closed.count():
+            return
+        closed.first.locator("xpath=./summary").click()
+
+
+def form(page, kind, target=None, open_closed=True):
+    """`open_closed=False` leaves disclosures as the server rendered them (a refused draft must
+    already be open: pair it with `require_open`)."""
     selector = f'form[data-form="{kind}"]'
     if target is not None:
         selector += f'[data-target="{target}"]'
-    return page.locator(selector)
+    found = page.locator(selector)
+    if open_closed and found.count() == 1:
+        reveal(found)
+    return found
+
+
+def unit_form(page, kind, unit, open_closed=True):
+    """A card's own decision form: `accept` (one button), `correct` or `reject` (each folded
+    behind its summary). The `state` is a hidden input of the form, not a choice."""
+    found = page.locator(f"#unit-{kind}-{unit}")
+    if open_closed:
+        reveal(found)
+    return found
+
+
+def require_open(found, what):
+    """The refused draft is in a disclosure the server rendered open, not one a check opened."""
+    require(found.is_visible(), f"{what}: the refused draft was not rendered open")
 
 
 def field(container, name):
@@ -329,17 +360,37 @@ def crop_retries(checks, page, path, units):
     page.route(REGION_CROP, route_crop)
     checks.goto(page, path)
     for unit in (units[1], units[2]):
+        # The crop sits in the card's collapsed "Details" (work-queue layout): a closed
+        # <details> renders no image, so nothing is requested until it is opened.
+        page.locator(f"#unit-{unit} details.unit-details > summary").click()
         page.locator(f"#unit-{unit} .source-region img").scroll_into_view_if_needed()
-    wait_until(
-        page,
-        """({once, always}) => {
-          const status = unit => document.querySelector(`#unit-${unit} .region-status`)?.textContent.trim();
-          return status(once) === 'Region preview loaded.' && status(always) ===
-            'Region preview unavailable; inspect the full-page image or open the region link for details.';
-        }""",
-        arg={"once": units[1], "always": units[2]},
-        timeout=20000,
-    )
+    try:
+        wait_until(
+            page,
+            """({once, always}) => {
+              const status = unit => document.querySelector(`#unit-${unit} .region-status`)?.textContent.trim();
+              return status(once) === 'Region preview loaded.' && status(always) ===
+                'Region preview unavailable; inspect the full-page image or open the region link for details.';
+            }""",
+            arg={"once": units[1], "always": units[2]},
+            timeout=20000,
+        )
+    except AssertionError:
+        # Fixed region texts and counts only: no URLs, owner text or credentials.
+        seen = page.evaluate(
+            """({once, always}) => [once, always].map(unit => {
+              const image = document.querySelector(`#unit-${unit} .source-region img`);
+              return [
+                document.querySelector(`#unit-${unit} .region-status`)?.textContent.trim() ?? null,
+                image === null ? 'no image' : (image.complete ? 'complete' : 'pending'),
+              ];
+            })""",
+            {"once": units[1], "always": units[2]},
+        )
+        raise AssertionError(
+            f"Crop retry states never settled: once={seen[0]}, always={seen[1]}, "
+            f"requests once={len(attempts[once])}, always={len(attempts[always])}"
+        ) from None
     checks.crops_ready(page)
     require(
         len(attempts[once]) >= 2 and "region-retry=1" in attempts[once][1],
@@ -378,12 +429,24 @@ def overlay(checks, page, path, manifest, units, suggestions):
     )
     if checks.javascript:
         # Busy crops are retried by source-regions.js; the first preview must arrive.
-        page.locator(".source-region img").first.scroll_into_view_if_needed()
-        wait_until(
-            page,
-            "() => { const i = document.querySelector('.source-region img');"
-            " return i.complete && i.naturalWidth > 0; }",
-        )
+        first_crop = page.locator(".source-region img").first
+        reveal(first_crop)
+        first_crop.scroll_into_view_if_needed()
+        try:
+            wait_until(
+                page,
+                "() => { const i = document.querySelector('.source-region img');"
+                " return i.complete && i.naturalWidth > 0; }",
+            )
+        except AssertionError:
+            seen = page.evaluate(
+                "() => { const i = document.querySelector('.source-region img');"
+                " return i === null ? 'no image' : [i.complete, i.naturalWidth, i.currentSrc !== '',"
+                " i.closest('details')?.open ?? null]; }"
+            )
+            raise AssertionError(
+                f"First crop never loaded (complete, width, requested, details open): {seen}"
+            ) from None
     modes = ("fit", "one", "two") if checks.javascript else ("fit",)
     polygons = {
         str(units[index + 1]): unit["polygon"]
@@ -438,7 +501,7 @@ def overlay(checks, page, path, manifest, units, suggestions):
         if request.is_navigation_request() and request.frame == page.main_frame
         else None,
     )
-    draft = field(form(page, "unit", units[2]), "rationale")
+    draft = field(unit_form(page, "correct", units[2]), "rationale")
     draft.fill("Synthetic unsaved fragment draft")
     for link in (
         page.locator(f'[data-overlay-unit="{units[3]}"]').locator(".."),
@@ -510,24 +573,32 @@ def overlay(checks, page, path, manifest, units, suggestions):
 
 def decide(checks, page, path, unit, text="", rationale="Synthetic owner comparison"):
     checks.goto(page, path)
-    decision = form(page, "unit", unit)
-    field(decision, "state").select_option("corrected" if text else "accepted")
-    field(decision, "correction").fill(text)
-    field(decision, "rationale").fill(rationale)
+    if text:
+        decision = unit_form(page, "correct", unit)
+        field(decision, "correction").fill(text)
+        field(decision, "rationale").fill(rationale)
+    else:
+        # Accepting is one button; an acceptance carries no rationale (SRC-4).
+        decision = unit_form(page, "accept", unit)
     checks.submit(page, decision)
 
 
 def applied(checks, page, path, suggestion, unit=None, text=None):
     checks.goto(page, path)
     card = page.locator(f'[data-suggestion="{suggestion}"]').first
+    reveal(card)
     require("— applied" in card.locator("h3").inner_text(), "Suggestion not shown as applied")
     if unit is not None:
+        card_lookup = page.locator(f"#unit-{unit} pre.evidence-text")
+        reveal(card_lookup)
         require(
-            page.locator(f"#unit-{unit} pre.evidence-text").inner_text() == text,
+            card_lookup.inner_text() == text,
             "Card lookup does not contain the applied text",
         )
+        panel_lookup = page.locator(f'[data-lookup-unit="{unit}"]')
+        reveal(panel_lookup)
         require(
-            page.locator(f'[data-lookup-unit="{unit}"]').inner_text() == text,
+            panel_lookup.inner_text() == text,
             "Lookup panel does not contain the applied text",
         )
 
@@ -547,11 +618,23 @@ def shortcuts(checks, page, path, units):
     page.on(
         "request", lambda request: posts.append(request.url) if request.method == "POST" else None
     )
+    # `a` focuses the card's Accept button (a decision is never sent by a shortcut); `j` and
+    # `k` still move on from it.
     page.keyboard.press("a")
-    rationale = first.locator("[data-accept-rationale]")
+    accept = first.locator("[data-accept-unit]")
+    require(accept.evaluate("node => node === document.activeElement"), "a did not focus Accept")
+    page.keyboard.press("j")
     require(
-        rationale.evaluate("node => node === document.activeElement"), "a did not focus rationale"
+        second.evaluate("node => node === document.activeElement"),
+        "j on Accept did not focus the next card",
     )
+    page.keyboard.press("k")
+    require(
+        first.evaluate("node => node === document.activeElement") and not posts,
+        "k did not return to the first card, or a shortcut submitted",
+    )
+    # Typing in a field is never a shortcut: the correction's rationale keeps its letters.
+    rationale = field(unit_form(page, "correct", units[1]), "rationale")
     rationale.fill("Synthetic shortcut draft ")
     for key in ("j", "k", "a"):
         page.keyboard.press(key)
@@ -562,14 +645,7 @@ def shortcuts(checks, page, path, units):
         rationale.input_value() == "Synthetic shortcut draft jka" and not posts,
         "Shortcut submitted or swallowed input",
     )
-    field(form(page, "unit", units[1]), "state").focus()
-    page.keyboard.press("j")
-    require(
-        field(form(page, "unit", units[1]), "state").evaluate(
-            "node => node === document.activeElement"
-        ),
-        "Shortcut escaped select",
-    )
+    first.focus()
     page.get_by_text("Review keyboard help", exact=True).click()
     page.locator("#review-shortcuts").uncheck()
     checks.goto(page, path)
@@ -639,8 +715,10 @@ def add_text(checks, page, path, directory):
     checks.goto(page, path)
     link = page.locator(f'[data-overlay-unit="{saved[0][0]}"]').locator("..")
     checks.goto(page, link.get_attribute("href"))
+    owner_lookup = page.locator(f"#unit-{saved[0][0]} pre.evidence-text")
+    reveal(owner_lookup)
     require(
-        text == page.locator(f"#unit-{saved[0][0]} pre.evidence-text").inner_text(),
+        text == owner_lookup.inner_text(),
         "New owner text not shown on its card",
     )
 
@@ -758,7 +836,8 @@ def form_conflicts(checks, page, other, path, directory, source, units):
             checks.submit(other, competing)
         before = stored_review(directory)
         checks.submit(page, draft, status=409)
-        kept = form(page, kind)
+        kept = form(page, kind, open_closed=False)
+        require_open(kept, f"409 {kind}")
         require(values(kept) == submitted, f"409 lost {kind} values/tokens: {values(kept)}")
         require(stored_review(directory) == before, f"Rejected {kind} changed stored state")
         if kind == "owner" and checks.javascript:
@@ -789,6 +868,7 @@ def drawn_matches(page, polygon, what):
 
 
 def draw_box(page):
+    reveal(page.locator("#draw-region"))
     page.locator("#draw-region").click()
     page.locator("#review-overlay").scroll_into_view_if_needed()
     box = page.locator("#review-image > img").bounding_box()
@@ -803,8 +883,7 @@ def conflicts(checks, page, path, units, suggestions, directory):
     other = checks.page()
     # Unit decision: both pages read revision 1; the first commit invalidates the draft.
     checks.goto(page, path)
-    draft = form(page, "unit", units[9])
-    field(draft, "state").select_option("corrected")
+    draft = unit_form(page, "correct", units[9])
     field(draft, "correction").fill("Synthetic unit draft <b>&\nsecond line")
     field(draft, "rationale").fill("Synthetic unit draft reason")
     revision = field(draft, "revision").input_value()
@@ -812,7 +891,8 @@ def conflicts(checks, page, path, units, suggestions, directory):
     decide(checks, other, path, units[9])
     before = stored_review(directory)
     checks.submit(page, draft, status=409)
-    kept = form(page, "unit", units[9])
+    kept = unit_form(page, "correct", units[9], open_closed=False)
+    require_open(kept, "409 unit decision")
     require(values(kept) == submitted, "409 lost unit values/tokens")
     require(stored_review(directory) == before, "Rejected unit decision changed stored state")
     require(
@@ -902,6 +982,7 @@ def scenario(
     edit = page.locator(f'[data-suggestion="{suggestions[1]}"]').get_by_role(
         "link", name=f"Edit suggestion #{suggestions[1]}", exact=True
     )
+    reveal(edit)
     with page.expect_navigation(wait_until="load"):
         edit.click()
     edited = "Synthetic edited correction <b>& literal text"
@@ -934,6 +1015,8 @@ def scenario(
     decide(checks, page, path, units[2])
     checks.goto(page, path)
     stale = page.locator(f'[data-suggestion="{suggestions[2]}"]')
+    # Role queries skip hidden content: open the notes so "no Edit link" is a real check.
+    reveal(stale)
     require(
         "— stale" in stale.locator("h3").inner_text()
         and form(page, "accept", suggestions[2]).locator("button").is_disabled()
@@ -956,12 +1039,16 @@ def scenario(
     checks.goto(page, path)
     checks.submit(page, form(page, "accept", suggestions[4]))
     applied(checks, page, path, suggestions[4])
-    require("rejected" in page.locator(f"#unit-{units[3]} h2").inner_text(), "Reject not applied")
+    # The card's state is its badge; the heading is only "Unit N".
+    require(
+        page.locator(f"#unit-{units[3]} .unit-head .badge").inner_text() == "rejected",
+        "Reject not applied",
+    )
     checks.submit(page, form(page, "accept", suggestions[5]))
     applied(checks, page, path, suggestions[5])
     for index in (4, 5):
         require(
-            "rejected" in page.locator(f"#unit-{units[index]} h2").inner_text(),
+            page.locator(f"#unit-{units[index]} .unit-head .badge").inner_text() == "rejected",
             "Merge target not rejected",
         )
     merged = rows(
@@ -1017,6 +1104,7 @@ def scenario(
         checks.goto(page, path)
         for index in (1, 2, 3, 4, 5):
             image = page.locator(f"#unit-{units[index]} .source-region img")
+            reveal(image)
             image.scroll_into_view_if_needed()
             wait_until(
                 page,

@@ -1,4 +1,4 @@
-use super::operations::{inspect, render};
+use super::operations::{WORDS_FLAGS, inspect, render, words_each};
 use super::*;
 use lopdf::{Document, Object, Stream, dictionary};
 use std::io::Write as _;
@@ -753,6 +753,68 @@ fn long_normal_page_renders() {
     assert_eq!(
         (result[0].width_px, result[0].height_px),
         pixel_size(4000.0, 100.0).unwrap()
+    );
+}
+
+/// The words stage keeps no image block, so a page of many full-page shading paints costs no
+/// memory per paint (the hostile corpus's `shading-pattern` case measured 1.58 GiB of the
+/// worker's address space in 5 s). Fails with `PRESERVE_IMAGES` in `WORDS_FLAGS`: the stext
+/// device then adds one image block per `sh` (`fz_stext_fill_shade`), so the block assertion
+/// finds about 2,000 blocks with a `ctm`.
+#[test]
+fn words_of_a_page_of_shading_paints_keep_no_image_blocks() {
+    let mut doc = Document::load_mem(&fixture(0, [0, 0, 200, 300], 1.0, false)).unwrap();
+    let page = doc.get_pages()[&1];
+    let resources = doc
+        .get_dictionary(page)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let shading = doc.add_object(dictionary! {
+        "ShadingType" => 2,
+        "ColorSpace" => "DeviceRGB",
+        "Coords" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+        "Function" => dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into()],
+            "C1" => vec![1.into(), 1.into(), 1.into()],
+            "N" => 1,
+        },
+        "Extend" => vec![true.into(), true.into()],
+    });
+    doc.get_dictionary_mut(resources)
+        .unwrap()
+        .set("Shading", dictionary! {"S" => shading});
+    let mut content = b"BT /F1 10 Tf 35 60 Td (Corner) Tj ET\n".to_vec();
+    content.extend(b"/S sh\n".repeat(2000));
+    let stream = doc.add_object(Stream::new(dictionary! {}, content));
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("Contents", stream);
+    let bytes = saved(&mut doc);
+
+    let file = on_disk(&bytes);
+    let mut words = Vec::new();
+    words_each(Input::Path(file.path()), &[1], |page| {
+        words.extend(page.words.into_iter().map(|word| word.text));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(words, ["Corner"]);
+
+    let (_file, native) = open_native(&bytes);
+    let text = native
+        .load_pdf_page(0)
+        .unwrap()
+        .to_text_page(WORDS_FLAGS)
+        .unwrap();
+    assert_eq!(
+        text.blocks().filter(|block| block.ctm().is_some()).count(),
+        0,
+        "the words stage kept image blocks"
     );
 }
 
