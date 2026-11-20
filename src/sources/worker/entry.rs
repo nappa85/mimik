@@ -59,38 +59,38 @@ pub fn run_entry(spec_path: &Path) -> Result<(), Error> {
     }
     let output = protect_stdout()?;
     let mut writer = RecordWriter::new(output, spec.operation, spec.pages.len());
-    let result = (|| {
-        let mut bytes = Vec::new();
-        std::fs::File::open(&spec.input)
-            .map_err(|_| Error::Unreadable)?
-            .take(128 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Error::Unreadable)?;
-        if bytes.len() > 128 * 1024 * 1024 {
-            return Err(Error::TooLarge);
-        }
-        // /in is closed and neither the context nor any MuPDF parser exists yet.
-        if super::filter::install().is_err() {
-            std::process::exit(super::filter::INSTALL_FAILED);
-        }
-        #[cfg(test)]
-        super::live_tests::misbehave()?;
-        match spec.operation {
-            Operation::Inspect => writer.inspection(&operations::inspect(Input::Bytes(&bytes))?),
-            Operation::Words => {
-                operations::words_each(Input::Bytes(&bytes), &spec.pages, |p| writer.words(&p))
-            }
-            Operation::Render => operations::render_each(Input::Bytes(&bytes), &spec.pages, |p| {
-                writer.rendered(&p)?;
-                #[cfg(test)]
-                if std::env::var("MIMIK_PDF_TEST").as_deref() == Ok("mid-render") {
-                    std::thread::sleep(std::time::Duration::from_secs(60));
-                }
-                Ok(())
-            }),
-        }
-    })();
+    let result = run(&spec, &mut writer);
     complete(writer, result)
+}
+
+fn run<W: std::io::Write>(spec: &Spec, writer: &mut RecordWriter<W>) -> Result<(), Error> {
+    let input = Input::Path(&spec.input);
+    // No `MuPDF` parser exists yet; the document is opened by path after the filter, which
+    // permits reading the bound `/in` (the filter kills clone, exec and sockets, not openat).
+    if super::filter::install().is_err() {
+        std::process::exit(super::filter::INSTALL_FAILED);
+    }
+    #[cfg(test)]
+    super::live_tests::misbehave()?;
+    match spec.operation {
+        Operation::Inspect => {
+            let writer = std::cell::RefCell::new(writer);
+            operations::inspect_each(
+                input,
+                |document| writer.borrow_mut().inspection_document(document),
+                |page| writer.borrow_mut().inspection_page(&page),
+            )
+        }
+        Operation::Words => operations::words_each(input, &spec.pages, |p| writer.words(&p)),
+        Operation::Render => operations::render_each(input, &spec.pages, |p| {
+            writer.rendered(&p)?;
+            #[cfg(test)]
+            if std::env::var("MIMIK_PDF_TEST").as_deref() == Ok("mid-render") {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+            Ok(())
+        }),
+    }
 }
 
 pub(super) fn complete<W: std::io::Write>(

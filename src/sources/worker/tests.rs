@@ -1,6 +1,30 @@
 use super::operations::{inspect, render};
 use super::*;
 use lopdf::{Document, Object, Stream, dictionary};
+use std::io::Write as _;
+
+/// The worker opens its input by path, so every fixture goes through a file named like the
+/// bound input (`document.pdf`: the extension takes part in `MuPDF`'s format recognition).
+pub(super) fn on_disk(bytes: &[u8]) -> tempfile::NamedTempFile {
+    let mut file = tempfile::Builder::new().suffix(".pdf").tempfile().unwrap();
+    file.write_all(bytes).unwrap();
+    file.flush().unwrap();
+    file
+}
+fn inspect_bytes(bytes: &[u8]) -> Result<Inspection, Error> {
+    let file = on_disk(bytes);
+    inspect(Input::Path(file.path()))
+}
+fn render_bytes(bytes: &[u8], pages: &[u32]) -> Result<Vec<RenderedPage>, Error> {
+    let file = on_disk(bytes);
+    render(Input::Path(file.path()), pages)
+}
+/// `MuPDF`'s own view of a fixture, opened by path like the worker does; keep the file alive.
+pub(super) fn open_native(bytes: &[u8]) -> (tempfile::NamedTempFile, mupdf::pdf::PdfDocument) {
+    let file = on_disk(bytes);
+    let document = mupdf::pdf::PdfDocument::open(file.path()).unwrap();
+    (file, document)
+}
 
 fn saved(doc: &mut Document) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -82,10 +106,8 @@ fn font_fixture(kind: &str) -> Vec<u8> {
 
 fn diagnostic_fonts(kind: &str) {
     let bytes = font_fixture(kind);
-    let native = mupdf::pdf::PdfDocument::from_bytes(&bytes)
-        .unwrap()
-        .load_pdf_page(0)
-        .unwrap();
+    let (_file, document) = open_native(&bytes);
+    let native = document.load_pdf_page(0).unwrap();
     native
         .to_pixmap(
             &mupdf::Matrix::IDENTITY,
@@ -94,7 +116,7 @@ fn diagnostic_fonts(kind: &str) {
             false,
         )
         .unwrap();
-    let output = render(Input::Bytes(&bytes), &[1]);
+    let output = render_bytes(&bytes, &[1]);
     assert!(output.is_ok(), "{kind}: {output:?}");
     let stats = serde_json::to_value(&output.unwrap()[0].stats).unwrap();
     if kind == "sjis" {
@@ -173,18 +195,15 @@ fn font_budget() {
 fn eof_tolerates_trailing_bytes() {
     let mut bytes = fixture(0, [0, 0, 200, 300], 1.0, false);
     bytes.extend_from_slice(b"\0\0 trailing garbage");
-    assert!(inspect(Input::Bytes(&bytes)).is_ok());
+    assert!(inspect_bytes(&bytes).is_ok());
     bytes.extend_from_slice(&[b'x'; 1024]);
-    assert_eq!(
-        inspect(Input::Bytes(&bytes)).unwrap_err(),
-        Error::Unreadable
-    );
+    assert_eq!(inspect_bytes(&bytes).unwrap_err(), Error::Unreadable);
 }
 
 #[test]
 fn reversed_box_corners_are_normalized() {
     let bytes = fixture(0, [200, 300, 0, 0], 1.0, false);
-    let page = inspect(Input::Bytes(&bytes)).unwrap().pages.remove(0);
+    let page = inspect_bytes(&bytes).unwrap().pages.remove(0);
     assert_eq!((page.width, page.height), (200.0, 300.0));
 }
 
@@ -192,8 +211,8 @@ fn reversed_box_corners_are_normalized() {
 fn rotated_render_exclusion_round_trip_uses_displayed_points() {
     for rotation in [90, 180, 270] {
         let bytes = fixture(rotation, [10, 20, 180, 270], 2.0, true);
-        let inspected = inspect(Input::Bytes(&bytes)).unwrap();
-        let image = render(Input::Bytes(&bytes), &[1]).unwrap().remove(0);
+        let inspected = inspect_bytes(&bytes).unwrap();
+        let image = render_bytes(&bytes, &[1]).unwrap().remove(0);
         crate::sources::uploads::tests::assert_rendered_exclusion_round_trip(inspected, image);
     }
 }
@@ -237,7 +256,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .unwrap()
         .set("Contents", content);
     let bytes = saved(&mut doc);
-    let output = render(Input::Bytes(&bytes), &[1]).unwrap();
+    let output = render_bytes(&bytes, &[1]).unwrap();
     assert_eq!(output[0].lines.len(), 1);
     assert_eq!(output[0].lines[0].text, "ABC");
     assert_eq!(output[0].stats.chars, 3);
@@ -246,7 +265,7 @@ endcmap CMapName currentdict /CMap defineresource pop end end"
         .unwrap()
         .set("CropBox", vec![0.into(), 0.into(), 200.into(), 300.into()]);
     let bytes = saved(&mut doc);
-    let full = render(Input::Bytes(&bytes), &[1]).unwrap();
+    let full = render_bytes(&bytes, &[1]).unwrap();
     assert_eq!(full[0].lines[0].text, "ABCDE\u{fffd}");
     assert_eq!(full[0].stats.chars, 6);
     assert_eq!(full[0].stats.unmapped, 1);
@@ -262,7 +281,7 @@ fn hidden_zero_size_text_is_dropped() {
     ));
     doc.get_dictionary_mut(p).unwrap().set("Contents", content);
     let bytes = saved(&mut doc);
-    let output = render(Input::Bytes(&bytes), &[1]).unwrap();
+    let output = render_bytes(&bytes, &[1]).unwrap();
     assert!(output[0].lines.is_empty());
     assert!(
         serde_json::to_value(&output[0].stats).unwrap()["dropped_lines"]
@@ -281,10 +300,7 @@ fn tagged_requires_catalog_marking_and_structure() {
         catalog.set("MarkInfo", dictionary! {"Marked"=>marked});
         catalog.set("StructTreeRoot", dictionary! {"Type"=>"StructTreeRoot"});
         let bytes = saved(&mut doc);
-        assert_eq!(
-            inspect(Input::Bytes(&bytes)).unwrap().pages[0].tagged,
-            marked
-        );
+        assert_eq!(inspect_bytes(&bytes).unwrap().pages[0].tagged, marked);
     }
 }
 
@@ -318,10 +334,7 @@ fn reported_version_matches_bundled_header() {
         })
         .unwrap();
     let bytes = fixture(0, [0, 0, 200, 300], 1.0, false);
-    assert_eq!(
-        inspect(Input::Bytes(&bytes)).unwrap().document.mupdf,
-        version
-    );
+    assert_eq!(inspect_bytes(&bytes).unwrap().document.mupdf, version);
 }
 
 pub(super) fn fixture(rotate: i32, crop: [i32; 4], unit: f32, inherited: bool) -> Vec<u8> {
@@ -436,14 +449,12 @@ fn geometry_landmarks() {
 }
 
 fn check_geometry(bytes: &[u8], size: (f64, f64), transform: [f64; 6], centre: (f64, f64)) {
-    let inspection = inspect(Input::Bytes(bytes)).unwrap();
+    let inspection = inspect_bytes(bytes).unwrap();
     let info = &inspection.pages[0];
     assert_eq!((info.width, info.height), size);
     assert_eq!(info.transform, transform);
-    let native = mupdf::pdf::PdfDocument::from_bytes(bytes)
-        .unwrap()
-        .load_pdf_page(0)
-        .unwrap();
+    let (_file, document) = open_native(bytes);
+    let native = document.load_pdf_page(0).unwrap();
     let ctm = native.ctm().unwrap();
     assert_eq!(
         [ctm.a, ctm.b, ctm.c, ctm.d, ctm.e, ctm.f].map(f64::from),
@@ -454,7 +465,7 @@ fn check_geometry(bytes: &[u8], size: (f64, f64), transform: [f64; 6], centre: (
         (f64::from(bounds.width()), f64::from(bounds.height())),
         size
     );
-    let page = render(Input::Bytes(bytes), &[1]).unwrap().remove(0);
+    let page = render_bytes(bytes, &[1]).unwrap().remove(0);
     assert!(page.lines.iter().any(|l| l.text == "Corner"));
     let b = geometry::transformed_box([35.0, 45.0, 45.0, 55.0], info.transform);
     assert_eq!((b[0].midpoint(b[2]), b[1].midpoint(b[3])), centre);
@@ -489,28 +500,16 @@ fn check_geometry(bytes: &[u8], size: (f64, f64), transform: [f64; 6], centre: (
 
 #[test]
 fn refusals_and_inspection_wire() {
-    assert_eq!(
-        inspect(Input::Bytes(b"not a PDF")).unwrap_err(),
-        Error::Unreadable
-    );
+    assert_eq!(inspect_bytes(b"not a PDF").unwrap_err(), Error::Unreadable);
     let mut bytes = fixture(0, [0, 0, 200, 300], 1.0, false);
     bytes.truncate(bytes.len() / 2);
+    assert_eq!(inspect_bytes(&bytes).unwrap_err(), Error::Unreadable);
     assert_eq!(
-        inspect(Input::Bytes(&bytes)).unwrap_err(),
-        Error::Unreadable
-    );
-    assert_eq!(
-        inspect(Input::Bytes(&fixture(
-            0,
-            [0, 0, 200, 300],
-            100_000.0,
-            false
-        )))
-        .unwrap_err(),
+        inspect_bytes(&fixture(0, [0, 0, 200, 300], 100_000.0, false)).unwrap_err(),
         Error::TooLarge
     );
     let bytes = fixture(0, [0, 0, 200, 300], 1.0, false);
-    let inspection = inspect(Input::Bytes(&bytes)).unwrap();
+    let inspection = inspect_bytes(&bytes).unwrap();
     let mut wire = Vec::new();
     let mut writer = records::RecordWriter::new(&mut wire, records::Operation::Inspect, 1);
     writer.inspection(&inspection).unwrap();
@@ -544,10 +543,10 @@ fn password_and_claimed_page_count() {
         doc.encrypt(&encryption).unwrap();
         let mut encrypted = Vec::new();
         doc.save_to(&mut encrypted).unwrap();
-        let result = inspect(Input::Bytes(&encrypted));
+        let result = inspect_bytes(&encrypted);
         if password.is_empty() {
             assert!(result.unwrap().document.encrypted);
-            assert!(render(Input::Bytes(&encrypted), &[1]).is_ok());
+            assert!(render_bytes(&encrypted, &[1]).is_ok());
         } else {
             assert_eq!(result.unwrap_err(), Error::PasswordProtected);
         }
@@ -561,13 +560,183 @@ fn password_and_claimed_page_count() {
         .unwrap()
         .as_reference()
         .unwrap();
-    doc.get_dictionary_mut(pages).unwrap().set("Count", 2001);
+    doc.get_dictionary_mut(pages)
+        .unwrap()
+        .set("Count", i64::from(records::MAX_PAGES) + 1);
     let mut many = Vec::new();
     doc.save_to(&mut many).unwrap();
-    assert_eq!(
-        inspect(Input::Bytes(&many)).unwrap_err(),
-        Error::TooManyPages
+    assert_eq!(inspect_bytes(&many).unwrap_err(), Error::TooManyPages);
+}
+
+/// A minimal PDF with a hole of `pad` bytes inside an unused stream object (object 4). The page
+/// object (3), the xref and the `%%EOF` tail all lie after the hole, so reading the document
+/// seeks past `pad` for the xref and again for the page. The file is sparse: the hole takes no
+/// disk, which is asserted at once (a filesystem without sparse files fails here instead of
+/// writing gigabytes). Returns a temp file named `.pdf`.
+pub(super) fn sparse_pdf(pad: u64) -> tempfile::NamedTempFile {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::MetadataExt;
+    let mut file = tempfile::Builder::new().suffix(".pdf").tempfile().unwrap();
+    let mut offsets = [0_u64; 4];
+    file.write_all(b"%PDF-1.7\n").unwrap();
+    let mut put = |file: &mut tempfile::NamedTempFile, id: usize, text: &str| {
+        offsets[id - 1] = file.stream_position().unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    };
+    put(
+        &mut file,
+        1,
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
     );
+    put(
+        &mut file,
+        2,
+        "2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n",
+    );
+    put(
+        &mut file,
+        4,
+        &format!("4 0 obj\n<< /Length {pad} >>\nstream\n"),
+    );
+    let hole = file.stream_position().unwrap() + pad;
+    file.as_file().set_len(hole).unwrap();
+    let meta = file.as_file().metadata().unwrap();
+    assert!(
+        meta.blocks() * 512 < (1 << 20),
+        "the temporary directory does not support sparse files"
+    );
+    file.seek(SeekFrom::Start(hole)).unwrap();
+    file.write_all(b"\nendstream\nendobj\n").unwrap();
+    put(
+        &mut file,
+        3,
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] >>\nendobj\n",
+    );
+    let xref = file.stream_position().unwrap();
+    let mut table = b"xref\n0 5\n0000000000 65535 f \n".to_vec();
+    for offset in offsets {
+        writeln!(table, "{offset:010} 00000 n ").unwrap();
+    }
+    write!(
+        table,
+        "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+    )
+    .unwrap();
+    file.write_all(&table).unwrap();
+    file.flush().unwrap();
+    file
+}
+
+#[test]
+fn a_pdf_over_128_mib_is_opened_by_path_without_a_size_limit() {
+    let file = sparse_pdf(129 << 20);
+    assert!(file.as_file().metadata().unwrap().len() > 128 << 20);
+    let inspection = inspect(Input::Path(file.path())).unwrap();
+    assert_eq!(inspection.document.pages, 1);
+    assert_eq!(
+        (inspection.pages[0].width, inspection.pages[0].height),
+        (100.0, 200.0)
+    );
+    assert_eq!(render(Input::Path(file.path()), &[1]).unwrap().len(), 1);
+}
+
+#[test]
+fn an_xref_beyond_4_gib_is_reached_with_64_bit_seeks() {
+    let file = sparse_pdf(4608 << 20);
+    assert!(file.as_file().metadata().unwrap().len() > 1 << 32);
+    assert_eq!(inspect(Input::Path(file.path())).unwrap().document.pages, 1);
+}
+
+#[test]
+fn more_than_2000_pages_are_inspected_and_the_maximum_is_enforced_on_the_claim() {
+    let mut doc = Document::with_version("1.7");
+    let pages = doc.new_object_id();
+    let kids: Vec<Object> = (0..2500)
+        .map(|_| {
+            doc.add_object(dictionary! {"Type"=>"Page","Parent"=>pages,"MediaBox"=>vec![0.into(),0.into(),100.into(),100.into()]})
+                .into()
+        })
+        .collect();
+    doc.objects.insert(
+        pages,
+        Object::Dictionary(dictionary! {"Type"=>"Pages","Count"=>2500,"Kids"=>kids}),
+    );
+    let root = doc.add_object(dictionary! {"Type"=>"Catalog","Pages"=>pages});
+    doc.trailer.set("Root", root);
+    let inspection = inspect_bytes(&saved(&mut doc)).unwrap();
+    assert_eq!(inspection.document.pages, 2500);
+    assert_eq!(inspection.pages.len(), 2500);
+    assert_eq!(inspection.pages[2499].n, 2500);
+}
+
+#[test]
+fn open_stage_failures_are_unreadable_not_too_large() {
+    let failure = |code| {
+        mupdf::Error::MuPdf(mupdf::error::MuPdfError {
+            code,
+            message: String::new(),
+        })
+    };
+    // FZ_ERROR_SYSTEM (2) and FZ_ERROR_LIMIT (5) after the open still mean "too large" ...
+    assert_eq!(Error::from(failure(2)), Error::TooLarge);
+    assert_eq!(Error::from(failure(5)), Error::TooLarge);
+    // ... but a failure to open the file is not a size problem.
+    assert_eq!(operations::open_error(failure(2)), Error::Unreadable);
+    assert_eq!(operations::open_error(failure(5)), Error::Unreadable);
+    assert_eq!(operations::open_error(failure(6)), Error::Unsupported);
+    assert_eq!(operations::open_error(failure(7)), Error::Unreadable);
+}
+
+#[test]
+fn a_missing_or_unreadable_input_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in [dir.path().join("absent.pdf"), dir.path().to_path_buf()] {
+        assert_eq!(inspect(Input::Path(&path)).unwrap_err(), Error::Unreadable);
+        assert_eq!(
+            render(Input::Path(&path), &[1]).unwrap_err(),
+            Error::Unreadable
+        );
+    }
+}
+
+#[test]
+fn marker_windows_are_read_from_the_file_ends() {
+    // %PDF- must start within the first 1,024 bytes and %%EOF lie in the last 1,024.
+    let good = fixture(0, [0, 0, 200, 300], 1.0, false);
+    let late_header = [&[b' '; 1030][..], &good[..]].concat();
+    assert_eq!(inspect_bytes(&late_header).unwrap_err(), Error::Unreadable);
+    let early_header = [&[b'\n'; 1000][..], &good[..]].concat();
+    assert!(!operations::has_pdf_markers(on_disk(b"").path()).unwrap());
+    assert!(operations::has_pdf_markers(on_disk(&early_header).path()).unwrap());
+    assert!(!operations::has_pdf_markers(on_disk(&late_header).path()).unwrap());
+    let long_tail = [&good[..], &[b'x'; 1100][..]].concat();
+    assert!(!operations::has_pdf_markers(on_disk(&long_tail).path()).unwrap());
+}
+
+/// A gzip stream whose FNAME header holds `%PDF-` and whose tail holds `%%EOF` passes the marker
+/// check. `MuPDF`'s gzip handler would decompress it into memory (here to a valid PDF); the PDF
+/// handler must win, so the file fails to parse as a PDF and is never decompressed.
+pub(super) fn gzip_pdf_disguise() -> Vec<u8> {
+    let inner = fixture(0, [0, 0, 200, 300], 1.0, false);
+    let mut gzip = flate2::GzBuilder::new()
+        .filename("%PDF-1.7")
+        .write(Vec::new(), flate2::Compression::fast());
+    gzip.write_all(&inner).unwrap();
+    let mut bytes = gzip.finish().unwrap();
+    bytes.extend_from_slice(b"\n%%EOF\n");
+    bytes
+}
+
+#[test]
+fn a_gzip_with_pdf_markers_is_refused_not_decompressed() {
+    let bytes = gzip_pdf_disguise();
+    assert!(bytes.windows(5).take(1024).any(|w| w == b"%PDF-"));
+    assert!(operations::has_pdf_markers(on_disk(&bytes).path()).unwrap());
+    // Positive control: the same stream is a document for the gzip handler.
+    let decompressed = mupdf::Document::from_bytes(&bytes, "application/x-gzip-compressed");
+    assert!(decompressed.is_ok());
+    assert_eq!(inspect_bytes(&bytes).unwrap_err(), Error::Unreadable);
+    assert_eq!(render_bytes(&bytes, &[1]).unwrap_err(), Error::Unreadable);
 }
 
 #[test]
@@ -580,7 +749,7 @@ fn long_normal_page_renders() {
     );
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).unwrap();
-    let result = render(Input::Bytes(&bytes), &[1]).unwrap();
+    let result = render_bytes(&bytes, &[1]).unwrap();
     assert_eq!(
         (result[0].width_px, result[0].height_px),
         pixel_size(4000.0, 100.0).unwrap()
@@ -611,7 +780,7 @@ fn overlapping_images_count_once() {
         .set("Contents", content);
     let mut bytes = Vec::new();
     doc.save_to(&mut bytes).unwrap();
-    let page = render(Input::Bytes(&bytes), &[1]).unwrap().remove(0);
+    let page = render_bytes(&bytes, &[1]).unwrap().remove(0);
     assert!((page.stats.image_area - 1.0 / 6.0).abs() < 1e-6);
 }
 
@@ -1976,7 +2145,7 @@ fn boundary_matchers_cover_aliases_and_imports() {
         "use crate::sources::worker::{operations as pdf};",
         "use crate::sources::worker::operations::{inspect as i};",
         "crate::sources::worker::operations::render(input)",
-        "render(Input::Bytes(bytes), &[1])",
+        "render(Input::Path(path), &[1])",
     ] {
         assert!(operations.is_match(text), "{text}");
     }
@@ -2002,10 +2171,8 @@ fn boundary_matchers_cover_aliases_and_imports() {
 #[test]
 fn vendored_mupdf_fork_exposes_text_direction() {
     let bytes = fixture(0, [0, 0, 200, 300], 1.0, false);
-    let page = mupdf::pdf::PdfDocument::from_bytes(&bytes)
-        .unwrap()
-        .load_pdf_page(0)
-        .unwrap();
+    let (_file, document) = open_native(&bytes);
+    let page = document.load_pdf_page(0).unwrap();
     let text = page.to_text_page(mupdf::TextPageFlags::empty()).unwrap();
     let mut chars = 0;
     for block in text.blocks() {

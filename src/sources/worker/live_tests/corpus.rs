@@ -563,14 +563,14 @@ fn words_case(
     }
 }
 
-fn check_rss(name: &str, operation: &str, opts: &Options) {
+pub(super) fn check_rss(name: &str, operation: &str, opts: &Options) {
     use std::sync::atomic::Ordering;
     let rss = opts.peak_rss_kib.load(std::sync::atomic::Ordering::Acquire);
     let worker = opts.worker_peak_rss_kib.load(Ordering::Acquire);
     let killed = opts.parent_killed.load(Ordering::Acquire);
     let exit = opts.observed_exit.load(Ordering::Acquire);
     println!(
-        "corpus {name} {operation}: exit={exit}, parent_killed={killed}, wait4 RSS={rss} KiB (worker upper bound only for natural exits), pinned worker VmHWM={worker} KiB (sampled before parent kill; RLIMIT_AS=2097152 KiB; Vec and MuPDF buffer both present)"
+        "corpus {name} {operation}: exit={exit}, parent_killed={killed}, wait4 RSS={rss} KiB (worker upper bound only for natural exits), pinned worker VmHWM={worker} KiB (sampled before parent kill; RLIMIT_AS=2097152 KiB; the input is opened by path, never buffered)"
     );
     assert!(
         rss_within_bound(opts),

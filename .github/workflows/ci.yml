@@ -378,14 +378,14 @@ jobs:
             --skip live_gpu_ \
             2>&1 | tee target/confinement.log
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          # Includes two PDF re-exec helpers, 17 live checks and the generator bound check.
+          # Includes two PDF re-exec helpers, 27 live checks and the generator bound check.
           if [ "${ran:-0}" -lt 60 ]; then
             echo "only ${ran:-0} confinement tests ran; expected at least 60"
             exit 1
           fi
-          workers=$(grep -cE '^test sources::worker::live_tests::(corpus::)?live_[^ ]+ \.\.\. ok$' target/confinement.log)
-          if [ "$workers" -ne 17 ]; then
-            echo "only $workers PDF worker confinement tests ran; expected 17"
+          workers=$(grep -cE '^test sources::worker::live_tests::(corpus::|large_inputs::)?live_[^ ]+ \.\.\. ok$' target/confinement.log)
+          if [ "$workers" -ne 27 ]; then
+            echo "only $workers PDF worker confinement tests ran; expected 27"
             exit 1
           fi
           # On a runner with Landlock the kernel-level check of the rule semantics (`hako_tests`,

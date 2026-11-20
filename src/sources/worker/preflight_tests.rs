@@ -99,7 +99,7 @@ fn dump_page(page: &mupdf::pdf::PdfPage, flags: TextPageFlags) -> Dump {
 }
 
 fn dump_bytes(bytes: &[u8], page: i32, flags: TextPageFlags) -> Dump {
-    let doc = mupdf::pdf::PdfDocument::from_bytes(bytes).unwrap();
+    let (_file, doc) = super::tests::open_native(bytes);
     dump_page(&doc.load_pdf_page(page).unwrap(), flags)
 }
 
@@ -289,7 +289,7 @@ fn api_fit_structure_traversal_needs_collect_structure() {
     assert_eq!(tagged.lines[0].block_path, ["Document", "H1"]);
     assert_eq!(tagged.lines[1].block_path, ["Document", "P"]);
     // The flat top-level iteration alone sees no text lines.
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&bytes).unwrap();
+    let (_file, doc) = super::tests::open_native(&bytes);
     let page = doc.load_pdf_page(0).unwrap();
     let text = page
         .to_text_page(BASE | TextPageFlags::COLLECT_STRUCTURE)
@@ -669,7 +669,7 @@ fn serialized_size_columnar_vs_verbose_on_64_pages() {
         })
         .collect();
     let doc_bytes = build(&specs, false);
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&doc_bytes).unwrap();
+    let (_file, doc) = super::tests::open_native(&doc_bytes);
     let (mut verbose_total, mut columnar_total, mut glyph_total) = (0usize, 0usize, 0usize);
     let (mut verbose_gz, mut columnar_gz) = (0usize, 0usize);
     let (mut worst_page_verbose, mut worst_page_columnar) = (0usize, 0usize);
@@ -844,7 +844,7 @@ fn page_box_coordinates_rotation_and_user_unit() {
         doc.get_dictionary_mut(page).unwrap().set("Rotate", 90);
     });
     for (label, pdf) in [("Rotate 0", &plain), ("Rotate 90", &rotated)] {
-        let doc = mupdf::pdf::PdfDocument::from_bytes(pdf).unwrap();
+        let (_file, doc) = super::tests::open_native(pdf);
         let page = doc.load_pdf_page(0).unwrap();
         let b = page.bounds().unwrap();
         let g = dump_page(&page, BASE).glyphs[0].clone();
@@ -858,7 +858,7 @@ fn page_box_coordinates_rotation_and_user_unit() {
     }
     // Rotate 90: bounds 300x200; PDF (x, y) = (50, 100) maps to page space (y, x) = (100, 50),
     // and the quad corners are rotated with the glyph (ul keeps the glyph's own corner).
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&rotated).unwrap();
+    let (_file, doc) = super::tests::open_native(&rotated);
     let page = doc.load_pdf_page(0).unwrap();
     let b = page.bounds().unwrap();
     assert_eq!((b.x1 - b.x0, b.y1 - b.y0), (300.0, 200.0));
@@ -869,7 +869,7 @@ fn page_box_coordinates_rotation_and_user_unit() {
     let user_unit = edit_first_page(&plain, |doc, page, _| {
         doc.get_dictionary_mut(page).unwrap().set("UserUnit", 2.0);
     });
-    let doc = mupdf::pdf::PdfDocument::from_bytes(&user_unit).unwrap();
+    let (_file, doc) = super::tests::open_native(&user_unit);
     let page = doc.load_pdf_page(0).unwrap();
     let b = page.bounds().unwrap();
     let g = dump_page(&page, BASE).glyphs[0].clone();

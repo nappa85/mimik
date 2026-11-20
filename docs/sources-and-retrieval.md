@@ -29,8 +29,19 @@ stdin. It has an empty network namespace, no proc, sysfs, GPU or shared-memory m
 64 KiB JSON spec. The scratch Landlock grant permits regular-file operations only.
 
 The sandbox closure, after mount setup, sets address space to 2 GiB, file size to 16 MiB, descriptors to 64, core size to
-zero, nice to 10, and equal soft/hard CPU limits (20 seconds for inspection, 25 seconds per
-rendered page). The parent enforces 30 seconds for inspection or 30 seconds per render page.
+zero, nice to 10, and equal soft/hard CPU limits (inspection: 20 seconds plus one second per
+32 MiB of PDF, at most 200 seconds, because the page count is not yet known; 25 seconds per
+rendered page). The parent enforces 30 seconds for inspection plus 0.1 second for each page
+record received and validated (not for a claimed count), or 30 seconds per render page. The inspection
+constants are provisional pending the large-input measurements (SRC-15). The worker opens the bound `/in/document.pdf` by path with MuPDF's stdio stream, which seeks and reads on
+demand: the PDF is never copied into memory, so its size adds no address space and no limit
+of its own (a PDF can be larger than 128 MiB, or have its xref beyond 4 GiB). The pre-open
+check (`%PDF-` in the first 1,024 bytes, `%%EOF` in the last 1,024) reads those two windows
+by seek. A failure to open is `Unreadable`; `TooLarge` is only for allocation and limit errors
+after the open. The worker accepts at most 20,000 pages: the inspection record is one 9 MiB frame
+and a page record is at most about 450 bytes. Uploads stay at 2,000 pages until the upload
+tables are migrated (SRC-15 slice 2): a longer document fails as `too_many_pages` after
+inspection.
 Cancellation/deadlines kill through pinned pidfds, and results wait for tree exit. Stdout
 uses the framed record reader; a separate stderr drain matches at most 64 KiB and discards
 the remainder without logging raw output. The closure executes the explicitly bound loader
@@ -38,7 +49,7 @@ with Mimik as its program argument; no loader file bind overlays a system-librar
 Cleanup kills all verified pins before a bounded five-second wait. A cleanup timeout
 interrupts transport readers and reports upload unavailable, never a successful tree exit.
 
-After closing the bounded input and before any MuPDF call, the worker installs a second
+Before any MuPDF call, the worker installs a second
 seccomp filter with the raw seccomp syscall and `SECCOMP_FILTER_FLAG_TSYNC`. It kills process/thread creation, exec, socket
 creation, memfd, userfaultfd, ptrace and further seccomp calls; installation failure exits
 26 before parsing. A missing closure marker is `upload unavailable`, with a fixed setup-step
@@ -65,8 +76,8 @@ host `/proc/<inner pid>/status` VmHWM, sampled through the verified worker pin d
 run and just before killing. The pidfd must be live before and after the read; an absent
 measurement fails the gate. This figure covers execution through the pre-kill sample,
 not the subsequent kill/reap interval. A separate 256 MiB touch-and-wait control tests it;
-both figures are reported independently. Both the input Vec and MuPDF's input buffer are
-present during measurement. The default MuPDF store is used because mupdf 0.8.0 exposes no
+both figures are reported independently. The input is opened by path and never buffered; sparse
+inputs over 128 MiB and with an xref beyond 4 GiB must stay far below the 75% gate. The default MuPDF store is used because mupdf 0.8.0 exposes no
 store-size setter. Fresh generator
 subprocesses enforce 64 MiB peak RSS per case, with 8 MiB output and five-second generation
 bounds; full-flush block repetition avoids compressing expanded bombs on the test host.
