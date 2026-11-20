@@ -740,7 +740,31 @@ def corrected_evidence(html):
     return '<pre class="evidence-text">\n\nVerified fixture correction' in html
 
 
-def smoke_sources():
+def choose_primary_reading(binary, directory, fixture, source_key):
+    """Lookup uses only each document page's primary reading. The fixture's sources share one
+    original PDF and the unknown-game source is imported first, so it holds page 1 until the
+    operator chooses this one (`set-primary-source`, as the docs describe)."""
+    with sqlite3.connect(directory / "smoke.sqlite3") as db:
+        (source_id,) = db.execute(
+            "SELECT id FROM sources WHERE source_id=?", (source_key,)
+        ).fetchone()
+    manifest = json.loads((fixture / "bundle/bundle.json").read_text())
+    registry_cli(
+        binary,
+        directory,
+        "set-primary-source",
+        "--document-pdf-sha256",
+        manifest["source_sha256"],
+        "--pages",
+        "1",
+        "--source",
+        str(source_id),
+        "--rationale",
+        "Synthetic lookup reading",
+    )
+
+
+def smoke_sources(binary, directory, fixture):
     sources = request("/sources")[2]
     lookup = re.search(r"<h2>Synthetic source</h2>.*?</section>", sources, re.DOTALL)
     require(lookup is not None, "Lookup-only synthetic source missing")
@@ -755,6 +779,8 @@ def smoke_sources():
         {"system": "mork-borg", "edition": "fixture-edition", "query": "capacity"}
     )
     require("No reviewed match" in request(query)[2], "Unreviewed source entered search")
+    choose_primary_reading(binary, directory, fixture, "synthetic-core")
+    require("No reviewed match" in request(query)[2], "Unreviewed primary source entered search")
     image = request(path + "/image")
     require(
         image[0] == 200
@@ -2217,7 +2243,9 @@ def main():
             )
             assert_fields(request(sheet_path)[2], dict(sheet_state, revision=final_revision))
             smoke_positive_advice()
-            correction_query = smoke_sources() if args.source_fixture else None
+            correction_query = (
+                smoke_sources(binary, directory, fixture) if args.source_fixture else None
+            )
         finally:
             stop(process, log)
         process, log = start(binary, directory)
