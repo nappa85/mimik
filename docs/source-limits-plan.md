@@ -251,14 +251,6 @@ nothing re-verifies the file. Pages are published inside the render callback
    code writes one box per page and at most one fingerprint and refuses more when reading.
    Migration test: seeded v35 rows in all four tables, tables empty after, foreign-key check
    empty, 20,000 accepted and 20,001 refused.
-3. **Pins, verification, immutability** (decision 2): O_NOFOLLOW opens, pins into launch, per-job
-   hash outside locks, `create` without the locked re-read, `document_changed` handling (delete
-   all pages, retry refusal, `contract()` refusal). Tests: change one byte, truncate, append,
-   replace by rename, symlink and hard link at the final component, change between batches and
-   during the last batch (no page remains), a legacy 0600 upload, cancel during the hash.
-   A change to the file during a worker run must be `document_changed` even when the worker
-   succeeded: the worker now reads the file lazily for the whole run, so pins are re-checked
-   after every exit regardless of the worker's result.
 4. **Free-space admission and upload route** (decisions 3-4): slot first, reserve after
    admission, per-chunk `written`, top-up, explicit unknown state, no static limits, idle-only
    deadline, 507; `publish_current` narrowed. Tests: body over 128 MiB declared and chunked

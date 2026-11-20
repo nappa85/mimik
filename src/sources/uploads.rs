@@ -2,7 +2,7 @@
 //! The manager is process-wide; job publication and deletion share one lock.
 use super::{
     staging::{Files, Ledger, MIB, RENDER_RESERVATION, Reservation, UPLOAD_RESERVATION},
-    worker::{self, Cancel, Inspection, Page, Reason, RenderSettings, RenderedPage},
+    worker::{self, Cancel, Inspection, Page, Pins, Reason, RenderSettings, RenderedPage},
 };
 use crate::{
     AppError, Store,
@@ -11,8 +11,7 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Seek};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::{
     path::Path,
     sync::{
@@ -81,12 +80,13 @@ pub trait Worker: Send + Sync + 'static {
     }
     /// # Errors
     /// Returns bounded document, cancellation or confinement failures.
-    fn inspect(&self, path: &Path, cancel: &Cancel) -> Result<Inspection, Reason>;
+    fn inspect(&self, path: &Path, pins: &Pins, cancel: &Cancel) -> Result<Inspection, Reason>;
     /// # Errors
     /// Returns bounded document, cancellation, callback or confinement failures.
     fn render(
         &self,
         path: &Path,
+        pins: &Pins,
         pages: &[Page],
         cancel: &Cancel,
         publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
@@ -94,17 +94,18 @@ pub trait Worker: Send + Sync + 'static {
 }
 struct PdfWorker;
 impl Worker for PdfWorker {
-    fn inspect(&self, path: &Path, cancel: &Cancel) -> Result<Inspection, Reason> {
-        worker::inspect_cancellable(path, cancel)
+    fn inspect(&self, path: &Path, pins: &Pins, cancel: &Cancel) -> Result<Inspection, Reason> {
+        worker::inspect_pinned(path, pins, cancel)
     }
     fn render(
         &self,
         path: &Path,
+        pins: &Pins,
         pages: &[Page],
         cancel: &Cancel,
         publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
     ) -> Result<(), Reason> {
-        worker::render(path, pages.to_vec(), cancel, publish)
+        worker::render_pinned(path, pins, pages.to_vec(), cancel, publish)
     }
 }
 
@@ -228,6 +229,9 @@ pub struct Upload {
     pub pdf_bytes: u64,
     pub revision: i64,
     pub state: String,
+    /// The staged file stopped matching its admitted hash or pins (SRC-15 slice 3): only
+    /// discard remains.
+    pub document_changed: bool,
     pub metadata: Metadata,
     pub inspection: Option<InspectionData>,
     pub selected_pages: Vec<u32>,
@@ -360,6 +364,18 @@ impl Uploads {
                  (SELECT upload_id FROM source_jobs WHERE state IN ('queued','running'))",
                 [],
             )?;
+            // An interrupted render may have published pages while the staged file changed
+            // (its pins died with it): drop its upload's pages, whose files the reconciliation
+            // below then removes, so a later run after a restore cannot vouch for them.
+            tx.execute(
+                "DELETE FROM source_upload_pages WHERE upload_id IN
+                 (SELECT upload_id FROM source_jobs WHERE state='running' AND kind='render')",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE source_jobs SET pages_done=0 WHERE state='running' AND kind='render'",
+                [],
+            )?;
             tx.execute(
                 "UPDATE source_jobs SET state='failed', reason='interrupted', finished_at=?1
                  WHERE state IN ('queued','running')",
@@ -488,7 +504,9 @@ impl Uploads {
             return Err(AppError::Invalid("Wrong upload reservation."));
         }
         self.write(owner, |tx| metadata.validate(tx))?;
-        verify_spool(&mut phase.file, sha256, size)?;
+        // The route's streaming hash is trusted for the stream; the first job hashes the stored
+        // bytes outside every lock. No full read of the spool happens under the mutexes.
+        check_spool(&phase.file, sha256, size)?;
         let mut random = [0; 16];
         getrandom::fill(&mut random).map_err(|_| AppError::Worker)?;
         let id = hex::encode(random);
@@ -721,6 +739,7 @@ impl Uploads {
         self.write(owner, |tx| {
             let u = load(tx, id)?;
             if u.revision != revision
+                || u.document_changed
                 || (!inspect && (u.inspection.is_none() || u.selected_pages.is_empty()))
             {
                 return Err(AppError::Conflict);
@@ -870,7 +889,12 @@ impl Uploads {
     /// Refuses incomplete selection, settings mismatch, over-budget images or corrupt rows.
     pub fn contract(&self, id: &str) -> Result<StagedContract, AppError> {
         let u = self.read(id)?;
-        if u.selected_pages.is_empty()
+        // Only a render job that ran to its end vouches for the rows: a changed upload, a
+        // failed or cancelled job and an inspection-only job refuse.
+        if u.document_changed
+            || u.job.kind != "render"
+            || u.job.state != "succeeded"
+            || u.selected_pages.is_empty()
             || !remaining(&u).is_empty()
             || u.pages.iter().map(|p| p.png_bytes).sum::<u64>() > 128 * MIB
         {
@@ -1017,88 +1041,193 @@ impl Uploads {
             Ok(u)
         })
     }
+    /// Open the staged file (never following a link), take the pins, then hash it once on the
+    /// job thread in cancel-aware 1 MiB reads and compare with the stored hash. Holds no lock.
+    fn hold_document(
+        &self,
+        id: &str,
+        sha256: &str,
+        cancel: &Cancel,
+    ) -> Result<worker::Held, AppError> {
+        let held = self
+            .0
+            .files
+            .open_document(id)
+            .map_err(|r| reason_error(&r))?;
+        let digest = held.sha256(cancel).map_err(|r| reason_error(&r))?;
+        if digest != sha256 || !held.unchanged() {
+            return Err(AppError::Invalid("document_changed"));
+        }
+        Ok(held)
+    }
+    /// The pinned inspection: the worker runs, the pins are compared (a changed file outranks
+    /// every other outcome), then the validated result is stored under the gate.
+    fn inspect_step(&self, job: &JobRun<'_>) -> Result<(), AppError> {
+        let result = self.0.worker.inspect(job.path, job.held.pins(), job.cancel);
+        if !job.held.unchanged() {
+            return Err(AppError::Invalid("document_changed"));
+        }
+        let inspection: InspectionData = result.map_err(|r| reason_error(&r))?.into();
+        if job.cancelled.load(Ordering::Acquire) {
+            return Err(AppError::Invalid("cancelled"));
+        }
+        // The worker refuses more pages itself; the stored bound is the same constant.
+        if inspection.document.pages > worker::records::MAX_PAGES {
+            return Err(AppError::Invalid("too_many_pages"));
+        }
+        let encoded = json(&inspection)?;
+        if encoded.len() > worker::records::INSPECT_LIMIT {
+            return Err(AppError::Invalid("too_large"));
+        }
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current_revision = job.revision.load(Ordering::Acquire);
+        self.0.store.upload_storage(|db| {
+            db.execute(
+                "UPDATE source_uploads SET inspection=?3, state='inspected', updated_at=?4
+                 WHERE id=?1 AND revision=?2 AND EXISTS
+                 (SELECT 1 FROM source_jobs WHERE upload_id=?1
+                  AND state='running' AND upload_revision=?2)",
+                params![job.id, current_revision, encoded, now()?],
+            )?;
+            Ok(())
+        })
+    }
+    fn render_steps(&self, job: &JobRun<'_>, pages: &[Page]) -> Result<(), AppError> {
+        for batch in pages.chunks(8) {
+            if job.cancelled.load(Ordering::Acquire) {
+                return Err(AppError::Invalid("cancelled"));
+            }
+            self.render_batch(job, batch)?;
+        }
+        Ok(())
+    }
+    /// One worker launch of at most eight pages. The pins are compared before any other
+    /// outcome counts and before the next batch is reserved: the pages of a changed file are
+    /// deleted by `finish_job`.
+    fn render_batch(&self, job: &JobRun<'_>, batch: &[Page]) -> Result<(), AppError> {
+        let reservation = Mutex::new(self.0.ledger.reserve(RENDER_RESERVATION)?);
+        let callback_error = Mutex::new(None);
+        let result = self
+            .0
+            .worker
+            .render(job.path, job.held.pins(), batch, job.cancel, &mut |p| {
+                let mut reserved = reservation.lock().map_err(|_| worker::Error::Unreadable)?;
+                let result = batch
+                    .iter()
+                    .find(|page| page.n == p.n)
+                    .ok_or(AppError::Conflict)
+                    .and_then(|page| {
+                        self.publish_current(
+                            job.id,
+                            job.revision,
+                            page,
+                            &p,
+                            &mut reserved,
+                            job.cancelled,
+                        )
+                    });
+                if let Err(e) = result {
+                    *callback_error
+                        .lock()
+                        .map_err(|_| worker::Error::Unreadable)? = Some(e);
+                    return Err(worker::Error::Unreadable);
+                }
+                Ok(())
+            });
+        if !job.held.unchanged() {
+            return Err(AppError::Invalid("document_changed"));
+        }
+        if let Some(e) = callback_error.into_inner().map_err(|_| AppError::Worker)? {
+            return Err(e);
+        }
+        result.map_err(|r| reason_error(&r))?;
+        Ok(())
+    }
+    /// After a panicking render run: remove every page row and file of the upload, because the
+    /// file may have changed during the run and a later retry (after a restore) would pass the
+    /// hash and keep pages rendered from other bytes.
+    fn drop_running_render_pages(&self, id: &str) -> Result<(), AppError> {
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dropped = self.0.store.upload_storage(|db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let render = tx
+                .query_row(
+                    "SELECT 1 FROM source_jobs WHERE upload_id=?1 AND kind='render'
+                     AND state='running'",
+                    [id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_some();
+            if !render {
+                return Ok(Vec::new());
+            }
+            let pages = load_pages(&tx, id)?
+                .iter()
+                .map(|p| p.pdf_page)
+                .collect::<Vec<_>>();
+            tx.execute("DELETE FROM source_upload_pages WHERE upload_id=?1", [id])?;
+            tx.execute(
+                "UPDATE source_jobs SET pages_done=0 WHERE upload_id=?1",
+                [id],
+            )?;
+            tx.commit()?;
+            Ok(pages)
+        })?;
+        // Unlinked under the gate, like `finish_job` (accounting versus the sweep).
+        for n in dropped {
+            if self.remove_page(id, n).is_err() {
+                tracing_sweep_failure();
+            }
+        }
+        Ok(())
+    }
     fn run_job(&self, id: &str, cancel: &Cancel, cancelled: &AtomicBool, revision: &AtomicI64) {
         let mut claimed_revision = None;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let u = self.claim_job(id)?;
             claimed_revision = Some(u.revision);
             let path = self.0.files.path(id)?;
-            if u.job.kind == "inspect" {
-                let inspection: InspectionData = self
-                    .0
-                    .worker
-                    .inspect(&path, cancel)
-                    .map_err(|r| reason_error(&r))?
-                    .into();
-                if cancelled.load(Ordering::Acquire) {
-                    return Err(AppError::Invalid("cancelled"));
-                }
-                // The worker refuses more pages itself; the stored bound is the same constant.
-                if inspection.document.pages > worker::records::MAX_PAGES {
-                    return Err(AppError::Invalid("too_many_pages"));
-                }
-                let encoded = json(&inspection)?;
-                if encoded.len() > worker::records::INSPECT_LIMIT {
-                    return Err(AppError::Invalid("too_large"));
-                }
-                let _gate = self
-                    .0
-                    .gate
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let current_revision = revision.load(Ordering::Acquire);
-                self.0.store.upload_storage(|db| {
-                    db.execute(
-                        "UPDATE source_uploads SET inspection=?3, state='inspected', updated_at=?4
-                         WHERE id=?1 AND revision=?2 AND EXISTS
-                         (SELECT 1 FROM source_jobs WHERE upload_id=?1
-                          AND state='running' AND upload_revision=?2)",
-                        params![id, current_revision, encoded, now()?],
-                    )?;
-                    Ok(())
-                })?;
+            // Outside every lock: open without following links, pin, hash, compare.
+            let held = self.hold_document(id, &u.pdf_sha256, cancel)?;
+            let job = JobRun {
+                id,
+                path: &path,
+                held: &held,
+                cancel,
+                cancelled,
+                revision,
+            };
+            let outcome = if u.job.kind == "inspect" {
+                self.inspect_step(&job)
             } else {
-                let pages = remaining(&u);
-                for batch in pages.chunks(8) {
-                    if cancelled.load(Ordering::Acquire) {
-                        return Err(AppError::Invalid("cancelled"));
-                    }
-                    let reservation = Mutex::new(self.0.ledger.reserve(RENDER_RESERVATION)?);
-                    let callback_error = Mutex::new(None);
-                    let result = self.0.worker.render(&path, batch, cancel, &mut |p| {
-                        let mut reserved =
-                            reservation.lock().map_err(|_| worker::Error::Unreadable)?;
-                        let result = batch
-                            .iter()
-                            .find(|page| page.n == p.n)
-                            .ok_or(AppError::Conflict)
-                            .and_then(|page| {
-                                self.publish_current(
-                                    id,
-                                    revision,
-                                    page,
-                                    &p,
-                                    &mut reserved,
-                                    cancelled,
-                                )
-                            });
-                        if let Err(e) = result {
-                            *callback_error
-                                .lock()
-                                .map_err(|_| worker::Error::Unreadable)? = Some(e);
-                            return Err(worker::Error::Unreadable);
-                        }
-                        Ok(())
-                    });
-                    if let Some(e) = callback_error.into_inner().map_err(|_| AppError::Worker)? {
-                        return Err(e);
-                    }
-                    result.map_err(|r| reason_error(&r))?;
-                }
+                self.render_steps(&job, &remaining(&u))
+            };
+            // The job end: the same check on the held descriptor, then the hardening (which
+            // changes the change time, so it comes last).
+            if !held.unchanged() {
+                return Err(AppError::Invalid("document_changed"));
             }
-            Ok(())
+            if held.harden().is_err() {
+                eprintln!("Source staging could not make the document read-only.");
+            }
+            outcome
         }))
-        .unwrap_or(Err(AppError::Invalid("unavailable")));
+        .unwrap_or_else(|_| {
+            // A panic loses the pin state: pages this run published cannot be vouched for.
+            if claimed_revision.is_some() && self.drop_running_render_pages(id).is_err() {
+                tracing_sweep_failure();
+            }
+            Err(AppError::Invalid("unavailable"))
+        });
         #[cfg(test)]
         if let Some(hook) = self.0.before_finish.lock().unwrap().take() {
             hook(revision);
@@ -1123,11 +1252,29 @@ impl Uploads {
             .gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.0.store.upload_storage(|db| {
+        let dropped = self.0.store.upload_storage(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let u = load(&tx, id)?;
             if u.job.state != "running" || !claimed {
-                return Ok(());
+                return Ok(Vec::new());
+            }
+            if matches!(result, Err(AppError::Invalid("document_changed"))) {
+                // The staged file is not the one that was admitted: the upload fails for good.
+                // Every page row goes (not only the batch in flight: nothing rendered from a
+                // changed file stays), whatever cancellation or revision change also happened.
+                tx.execute("DELETE FROM source_upload_pages WHERE upload_id=?1", [id])?;
+                tx.execute(
+                    "UPDATE source_jobs SET state='failed', reason='document_changed',
+                     pages_done=0, finished_at=?2 WHERE upload_id=?1 AND state='running'",
+                    params![id, now()?],
+                )?;
+                tx.execute(
+                    "UPDATE source_uploads SET state='failed', document_changed=1, updated_at=?2
+                     WHERE id=?1",
+                    params![id, now()?],
+                )?;
+                tx.commit()?;
+                return Ok(u.pages.iter().map(|p| p.pdf_page).collect());
             }
             let (state, reason) = if cancelled.load(Ordering::Acquire)
                 || u.revision != u.job.revision
@@ -1154,8 +1301,17 @@ impl Uploads {
                 params![id, upload_state, now()?],
             )?;
             tx.commit()?;
-            Ok(())
-        })
+            Ok(Vec::new())
+        })?;
+        // Unlink under the gate: the sweep reconciles accounting under it, and an unlink
+        // outside would race its absolute usage figure. A failure leaves orphans that the next
+        // sweep or start removes (no row keeps them).
+        for n in dropped {
+            if self.remove_page(id, n).is_err() {
+                tracing_sweep_failure();
+            }
+        }
+        Ok(())
     }
     #[cfg(test)]
     fn publish(
@@ -1289,6 +1445,16 @@ impl Uploads {
     }
 }
 
+/// What one running job shares between its steps.
+struct JobRun<'a> {
+    id: &'a str,
+    path: &'a Path,
+    held: &'a worker::Held,
+    cancel: &'a Cancel,
+    cancelled: &'a AtomicBool,
+    revision: &'a AtomicI64,
+}
+
 fn tracing_sweep_failure() {
     eprintln!("Source staging maintenance failed; inspect local storage.");
 }
@@ -1356,38 +1522,38 @@ fn retained_files(
     tx.commit()?;
     Ok(keep)
 }
-fn verify_spool(file: &mut std::fs::File, sha256: &str, size: u64) -> Result<(), AppError> {
-    if !(1..=128 * MIB).contains(&size) || file.metadata()?.len() != size {
-        return Err(AppError::Invalid("Invalid spooled PDF."));
-    }
-    file.rewind()?;
-    let mut digest = Sha256::new();
-    let mut header = Vec::with_capacity(1024);
-    let mut total = 0_u64;
-    let mut buffer = [0; 16384];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        total += count as u64;
-        if total > size {
-            return Err(AppError::Invalid("Invalid spooled PDF."));
-        }
-        header.extend_from_slice(&buffer[..count.min(1024 - header.len())]);
-        digest.update(&buffer[..count]);
-    }
-    if total != size
-        || hex::encode(digest.finalize()) != sha256
-        || !header.windows(5).any(|s| s == b"%PDF-")
+/// What `create` checks under the locks: the declared size by `fstat`, a well-formed hash and
+/// `%PDF-` in the first 1,024 bytes. The content hash is not recomputed here.
+fn check_spool(file: &std::fs::File, sha256: &str, size: u64) -> Result<(), AppError> {
+    let invalid = || AppError::Invalid("Invalid spooled PDF.");
+    if !(1..=128 * MIB).contains(&size)
+        || file.metadata()?.len() != size
+        || sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(AppError::Invalid("Invalid spooled PDF."));
+        return Err(invalid());
+    }
+    let mut header = [0; 1024];
+    let mut filled = 0;
+    while filled < header.len() {
+        match file.read_at(&mut header[filled..], filled as u64) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !header[..filled].windows(5).any(|s| s == b"%PDF-") {
+        return Err(invalid());
     }
     Ok(())
 }
 fn reason_error(r: &Reason) -> AppError {
     AppError::Invalid(match r {
         Reason::Cancelled => "cancelled",
+        Reason::DocumentChanged => "document_changed",
         Reason::Unavailable(_) => "unavailable",
         Reason::Document(e) => match e {
             worker::Error::Unreadable => "unreadable",
@@ -1461,7 +1627,7 @@ fn settled_state(upload: &Upload) -> &'static str {
     }
 }
 fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), AppError> {
-    if revision != u.revision {
+    if revision != u.revision || u.document_changed {
         return Err(AppError::Conflict);
     }
     if u.exclusion
@@ -1496,7 +1662,8 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
     let mut u = db
         .query_row(
             "SELECT id, pdf_sha256, pdf_bytes, revision, state, system_id, edition, language,
-         (SELECT id FROM source_documents WHERE pdf_sha256=source_uploads.pdf_sha256)
+         (SELECT id FROM source_documents WHERE pdf_sha256=source_uploads.pdf_sha256),
+         document_changed
          FROM source_uploads WHERE id=?1",
             [id],
             |r| {
@@ -1504,6 +1671,7 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
                     exclusion_revision: 0,
                     exclusion: None,
                     already_document: r.get(8)?,
+                    document_changed: r.get::<_, i64>(9)? != 0,
                     id: r.get(0)?,
                     pdf_sha256: r.get(1)?,
                     pdf_bytes: r.get(2)?,

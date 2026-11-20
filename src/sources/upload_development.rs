@@ -32,6 +32,7 @@ impl Worker for Synthetic {
     fn inspect(
         &self,
         path: &Path,
+        _: &worker::Pins,
         cancel: &worker::Cancel,
     ) -> Result<worker::Inspection, worker::Reason> {
         let bytes = crate::local_file::read_path(path, PDF.len())
@@ -63,6 +64,7 @@ impl Worker for Synthetic {
     fn render(
         &self,
         _: &Path,
+        _: &worker::Pins,
         pages: &[worker::Page],
         cancel: &worker::Cancel,
         publish: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
@@ -122,12 +124,16 @@ mod tests {
         let worker = Synthetic {
             delay: Duration::ZERO,
         };
-        let inspection = worker.inspect(&path, &worker::Cancel::default()).unwrap();
+        let pins = worker::Pins::of(&std::fs::metadata(&path).unwrap());
+        let inspection = worker
+            .inspect(&path, &pins, &worker::Cancel::default())
+            .unwrap();
         assert_eq!(inspection.document.pages, 3);
         let mut rendered = Vec::new();
         worker
             .render(
                 &path,
+                &pins,
                 &inspection.pages,
                 &worker::Cancel::default(),
                 &mut |p| {
@@ -139,14 +145,18 @@ mod tests {
         assert_eq!(rendered.len(), 3);
         assert!(rendered.iter().all(|p| p.png == rendered[0].png));
         std::fs::write(&path, b"%PDF-1.7\nother file").unwrap();
-        assert!(worker.inspect(&path, &worker::Cancel::default()).is_err());
+        assert!(
+            worker
+                .inspect(&path, &pins, &worker::Cancel::default())
+                .is_err()
+        );
         let cancel = worker::Cancel::default();
         cancel.cancel();
         let delayed = Synthetic {
             delay: Duration::from_secs(60),
         };
         assert!(matches!(
-            delayed.render(&path, &inspection.pages, &cancel, &mut |_| panic!(
+            delayed.render(&path, &pins, &inspection.pages, &cancel, &mut |_| panic!(
                 "cancelled page published"
             )),
             Err(worker::Reason::Cancelled)

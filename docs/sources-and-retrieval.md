@@ -113,7 +113,8 @@ polling. A second upload returns 409: an active stream is in progress, or a reta
 is already staged with a link to open or discard it.
 An asynchronous-safe RAII wrapper schedules partial-file deletion and slot release on a
 blocking thread on disconnect, refusal or future cancellation. Hashing is incremental;
-publication rechecks Owner/CSRF and the PDF's size, hash and first-1,024-byte magic.
+publication rechecks Owner/CSRF and the PDF's size and first-1,024-byte magic; the stream's hash is
+trusted there and the first job verifies the stored bytes (see Job pins below).
 Original filenames are neither application arguments nor stored/logged identifiers.
 
 `/admin/materials/uploads/{id}` shows size, hash prefix, matching permanent document,
@@ -167,8 +168,10 @@ settling the upload state and retained job progress in the same transaction.
 `begin_upload` reserves 128 MiB + 64 KiB and returns an RAII stream slot with a private spool
 file. The route must enforce its stream/body limits, hash the stream, and finish authentication
 and CSRF admission before writing PDF bytes. Dropping the phase unlinks its spool and releases
-the slot/reservation. `create` rechecks the supplied size, hash and `%PDF-` magic without parsing
-the PDF, fsyncs and renames the spool, then inserts the upload and queued inspection in one
+the slot/reservation. `create` checks the declared size by `fstat`, the hash's form and `%PDF-`
+magic without parsing the PDF and without re-reading the spool (the route's streaming hash is
+trusted for the stream; no multi-GB read happens under the control and gate mutexes), fsyncs and
+renames the spool, then inserts the upload and queued inspection in one
 Owner/CSRF-rechecked IMMEDIATE transaction. The original filename is never an argument.
 After that commit, `create` returns the upload ID even if worker launch fails; the Owner can
 read the failed job and retry or discard it.
@@ -179,10 +182,37 @@ source immutability. Migration 036 (SRC-15) dropped and recreated them (no relea
 so staged uploads were not copied; the startup reconciliation removes the staged files of dropped
 rows) with the stored bounds that follow the inspection frame: `pdf_page`, `pages_done`/`pages_total`
 and the inspected page count up to 20,000, a selection or exclusion page list of at most 20,000
-entries, and no size bound on `pdf_bytes`. `source_uploads.document_changed` and the job reason
-`document_changed` are reserved for the immutability check (SRC-15 slice 3). They store metadata/hashes, not PDFs, PNGs or extracted text. Files are
+entries, and no size bound on `pdf_bytes`. They store metadata/hashes, not PDFs, PNGs or extracted text.
+
+**Job pins (SRC-15).** The worker reads the staged PDF lazily for the whole run, so every job
+(inspect or render) first opens `document.pdf` relative to its staging directory descriptor with
+`O_NOFOLLOW`, requires a regular file with one link owned by the effective user, takes **pins**
+(device, inode, size, mtime and ctime in nanoseconds; the change time cannot be set by an
+unprivileged user) and only then hashes the whole file once on the job thread (1 MiB reads,
+cancel-aware, outside every lock), comparing with the stored `pdf_sha256`. Pins are per job and
+never stored: an upload staged before this check (0600) simply gets its pins at its next job. The
+launch (`prepare`) opens the file again without following links, requires its `fstat` to equal the
+pins before the profile is built, and hands the pinned device/inode to the sandbox's bind check,
+so a name that resolves to another object fails the mount check; after the worker exits (whatever
+its result) the launch descriptor is compared with the pins again. The job repeats the comparison
+on its own descriptor after every worker exit, before the next batch is reserved, and at the job
+end, where it also `fchmod`s a still-0600 file to 0400 (hardening, not a boundary). Any mismatch,
+a symbolic link, a second link, a non-regular file or a wrong hash is `document_changed`: the
+upload fails permanently, **every** page row and file is removed (not only the batch in flight),
+`source_uploads.document_changed` is set, the job reason is `document_changed` (shown as "the
+staged file changed after it was uploaded; discard this upload and upload the PDF again"), and
+inspect, render, retry and selection changes are refused; only discard remains. `contract` also
+refuses a changed upload and requires the last job to be a render job that `succeeded`.
+Limits: the pins see a write only to the clock's granularity, so a same-size write that lands in
+the same coarse timestamp tick as the file's last change time, after the hash has read that
+region, is not seen (kernels from 6.13 with multigrain timestamps may narrow this; not verified
+here). A process of the same user that already holds a writable descriptor or a `MAP_SHARED`
+writable mapping from before the job can change bytes without any timestamp update, and
+`fchmod 0400` does not revoke it; only the application's user and root can reach `data/staging`
+(0700). A read lease is a possible follow-up (`docs/limitations.md`). A restart or a panic during
+a render drops that upload's pages, since their pins are gone. Files are
 descriptor-relative and no-follow under `data/staging/<32-hex-id>/`: directories 0700,
-`document.pdf`, `page-N.png` and `text-N.json` 0600. Page writes use exclusive temporary names,
+`document.pdf` (0400 after its first job), `page-N.png` and `text-N.json` 0600. Page writes use exclusive temporary names,
 fsync and atomic rename. Newly created files/directories are fchmod-normalized to their private
 modes even under a restrictive umask. The exclusion table holds actor attribution, rationale,
 pages, displayed-space boxes (a list of 1-8 per page, at most 384 bytes a page), a list of at most
@@ -304,7 +334,7 @@ Only the operator imports prepared sources, through the CLI. Browser PDF uploads
 - Size limits: PDF 128 MiB, `source.json` 32 MiB, `bundle.json` 8 MiB, 64 pages, 20,000 units, 64 KiB HTML per unit, 12 MiB per PNG and 128 MiB of PNGs in total. Over-limit input is rejected, never truncated.
 - Every unit's HTML must pass the sanitiser and both text projections, or the import fails.
 
-**Word boxes** (migration 029, SRC-20). After `load_import` has the hash-verified PDF, the CLI asks the confined worker for the words of every bundle page that has none: it writes the PDF to a private 0600 file (`O_EXCL|O_NOFOLLOW`) in the data directory's own 0700 `import-spool` folder (never the system temporary directory, and not `staging`, whose upload sweep deletes unknown files; stale `import-*.part` files over an hour old are removed at the start of an import), hashes it through the same descriptor, hands the worker that file by path (its launch API pins the file's identity between its own open and the sandbox bind, so only another process of the same user could swap it), runs `inspect` (page sizes must be within 2 points of the bundle's, else the page is skipped) and then `Words` in batches of at most eight pages, each with the render deadline (30 s a page) and the same sandbox; a batch that fails is retried page by page so one hostile page costs only itself, a word whose box collapses when narrowed to `f32` is dropped, and the file is removed afterwards. Word text with a control character is refused by the parent and the reader (the worker splits words at control characters like whitespace). Size-mismatched pages are counted apart in the report (running again cannot help), and a worker that goes away after some pages were stored is reported as partial. The worker never runs inside the write transaction: the validated, encoded rows are inserted in it. A `Words` record is a JSON array of `{text, box}` per page in the same corrected page space as `TextLine` (PDF points, y down), at most 20,000 words of 1 to 256 bytes with finite boxes inside the page (a 8 MiB frame, parent-validated). `source_page_words(page_id, words)` is append-only (insert once, update/delete triggers, a one-row-per-page insert trigger because `OR REPLACE` skips delete triggers): byte `1`, then per word four little-endian `f32` (`x0 y0 x1 y1`) and a little-endian `u16` text length with 1 to 256 bytes of UTF-8, at most 5,480,001 bytes; a page with no words is the version byte alone. A stored row is validated again when read (version, lengths, UTF-8, finite boxes, no box past 4,000 points) and an invalid row is treated as absent. The rows are never evidence, never shown as text of their own and not indexed for search. Re-running `import-source` on an existing matching source inserts rows only for its pages that have none and touches no review history. Without a usable worker (no sandbox, a platform without one) the import succeeds without words and prints why; run it again where the worker works. The table form reads the stored row (no worker, cache or busy state on the review screens).
+**Word boxes** (migration 029, SRC-20). After `load_import` has the hash-verified PDF, the CLI asks the confined worker for the words of every bundle page that has none: it writes the PDF to a private 0600 file (`O_EXCL|O_NOFOLLOW`) in the data directory's own 0700 `import-spool` folder (never the system temporary directory, and not `staging`, whose upload sweep deletes unknown files; stale `import-*.part` files over an hour old are removed at the start of an import), pins the descriptor (device, inode, size, mtime, ctime), hashes it through the same descriptor and hands the worker that file by path through the pinned launch (it compares the file with the pins before the sandbox starts and after each worker exits; the same residual limits as for staged uploads apply), runs `inspect` (page sizes must be within 2 points of the bundle's, else the page is skipped) and then `Words` in batches of at most eight pages, each with the render deadline (30 s a page) and the same sandbox; a batch that fails is retried page by page so one hostile page costs only itself, a word whose box collapses when narrowed to `f32` is dropped, and the file is removed afterwards. Word text with a control character is refused by the parent and the reader (the worker splits words at control characters like whitespace). Size-mismatched pages are counted apart in the report (running again cannot help), and a worker that goes away after some pages were stored is reported as partial. The worker never runs inside the write transaction: the validated, encoded rows are inserted in it. A `Words` record is a JSON array of `{text, box}` per page in the same corrected page space as `TextLine` (PDF points, y down), at most 20,000 words of 1 to 256 bytes with finite boxes inside the page (a 8 MiB frame, parent-validated). `source_page_words(page_id, words)` is append-only (insert once, update/delete triggers, a one-row-per-page insert trigger because `OR REPLACE` skips delete triggers): byte `1`, then per word four little-endian `f32` (`x0 y0 x1 y1`) and a little-endian `u16` text length with 1 to 256 bytes of UTF-8, at most 5,480,001 bytes; a page with no words is the version byte alone. A stored row is validated again when read (version, lengths, UTF-8, finite boxes, no box past 4,000 points) and an invalid row is treated as absent. The rows are never evidence, never shown as text of their own and not indexed for search. Re-running `import-source` on an existing matching source inserts rows only for its pages that have none and touches no review history. Without a usable worker (no sandbox, a platform without one) the import succeeds without words and prints why; run it again where the worker works. The table form reads the stored row (no worker, cache or busy state on the review screens).
 
 **Storage.** A `sources` row holds the PDF, raw JSON and prepared JSON as BLOBs under a unique `bundle_hash` (SHA-256 of `bundle.json`). Pages hold their PNG; units hold raw HTML, `raw_text` (html2text, width 120) and a `source_search_text` row. All units start `unreviewed`.
 

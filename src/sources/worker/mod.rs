@@ -8,7 +8,12 @@ pub(crate) use launch::stderr_fixture;
 mod live_tests;
 #[cfg(test)]
 pub(crate) use launch::RenderHook;
-pub use launch::{Cancel, Reason, inspect, inspect_cancellable, render, words};
+pub use launch::{
+    Cancel, Reason, inspect, inspect_cancellable, inspect_pinned, render, render_pinned, words,
+    words_pinned,
+};
+mod pins;
+pub use pins::{Held, Pins};
 mod entry;
 mod filter;
 mod geometry;

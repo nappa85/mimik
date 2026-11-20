@@ -25,6 +25,9 @@ use super::{
     worker::{self, Cancel, Reason},
 };
 
+/// Why a run stops when the spool file stopped matching its pins.
+const CHANGED: &str = "the import spool file changed during the import";
+
 /// The folder of the data directory holding import spool files.
 pub(crate) const SPOOL_DIR: &str = "import-spool";
 const SPOOL_PREFIX: &str = "import-";
@@ -166,9 +169,14 @@ impl WordSource for WorkerWords {
         if file.write_all(pdf).and_then(|()| file.sync_all()).is_err() {
             return unavailable("the import spool file could not be written");
         }
-        // The worker reads the file, not the verified bytes: hash what the descriptor holds.
+        // The worker reads the file, not the verified bytes: pin the descriptor, then hash what
+        // it holds; every launch compares the file with the pins (content-pinned, not only
+        // identity-pinned: a same-uid in-place write during a run is `DocumentChanged`).
+        let Ok(pins) = file.metadata().map(|meta| worker::Pins::of(&meta)) else {
+            return unavailable("the import spool file could not be examined");
+        };
         if sha256_of(&mut file).is_ok_and(|hash| hash == pdf_sha256) {
-            run(&self.path.join(&name), pages)
+            run(&self.path.join(&name), &pins, pages)
         } else {
             unavailable("the import spool file did not match the verified PDF")
         }
@@ -190,12 +198,16 @@ fn convert(words: &[worker::Word]) -> Vec<PageWord> {
         .collect()
 }
 
-fn run(path: &Path, wanted: &[WantedPage]) -> Fetched {
+fn run(path: &Path, pins: &worker::Pins, wanted: &[WantedPage]) -> Fetched {
     let mut out = Fetched::default();
-    let inspection = match worker::inspect(path) {
+    let inspection = match worker::inspect_pinned(path, pins, &Cancel::default()) {
         Ok(inspection) => inspection,
         Err(Reason::Unavailable(reason)) => {
             out.unavailable = Some(reason);
+            return out;
+        }
+        Err(Reason::DocumentChanged) => {
+            out.unavailable = Some(CHANGED.into());
             return out;
         }
         Err(_) => {
@@ -221,7 +233,7 @@ fn run(path: &Path, wanted: &[WantedPage]) -> Fetched {
         }
     }
     for batch in usable.chunks(BATCH) {
-        if !batch_words(path, batch, &mut out) {
+        if !batch_words(path, pins, batch, &mut out) {
             return out;
         }
     }
@@ -230,10 +242,16 @@ fn run(path: &Path, wanted: &[WantedPage]) -> Fetched {
 
 /// Run one batch; on a document error retry its pages one by one, so one hostile page costs only
 /// itself. Returns false when the worker is unavailable (the rest is not attempted).
-fn batch_words(path: &Path, batch: &[(WantedPage, worker::Page)], out: &mut Fetched) -> bool {
+fn batch_words(
+    path: &Path,
+    pins: &worker::Pins,
+    batch: &[(WantedPage, worker::Page)],
+    out: &mut Fetched,
+) -> bool {
     let mut collected = BTreeMap::new();
-    let result = worker::words(
+    let result = worker::words_pinned(
         path,
+        pins,
         batch.iter().map(|(_, page)| page.clone()).collect(),
         &Cancel::default(),
         |page| {
@@ -247,9 +265,13 @@ fn batch_words(path: &Path, batch: &[(WantedPage, worker::Page)], out: &mut Fetc
             out.unavailable = Some(reason);
             return false;
         }
+        Err(Reason::DocumentChanged) => {
+            out.unavailable = Some(CHANGED.into());
+            return false;
+        }
         Err(_) if batch.len() > 1 => {
             for single in batch.chunks(1) {
-                if !batch_words(path, single, out) {
+                if !batch_words(path, pins, single, out) {
                     return false;
                 }
             }
