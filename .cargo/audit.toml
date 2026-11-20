@@ -7,4 +7,32 @@ ignore = [
     # x86_64-unknown-linux-gnu; the lock file only lists it.
     # Remove when hakoniwa drops postcard's default features.
     "RUSTSEC-2023-0089",
+
+    # RUSTSEC-2026-0574 to -0582, heapless 0.7.17 (unsound: Deque, IndexMap/FnvIndexMap,
+    # SortedLinkedList, Treiber stack/pool, spsc, FindMutView, Deque::make_contiguous,
+    # TryFrom for Deque). No fix exists for 0.7. User-approved exception, 2026-11-20
+    # (docs/decisions.md, DEP-24). Path: hakoniwa 1.8.0 -> postcard 1.1.3 (default features,
+    # `heapless-cas`) -> heapless 0.7. Does not apply: postcard uses only `heapless::Vec` and
+    # `heapless::String` (the `to_vec` flavor and the `MaxSize` impls); no affected type is used
+    # by its library code (`FnvIndexMap` appears only in its tests), and hakoniwa calls only
+    # `postcard::to_allocvec` and `postcard::from_bytes`, with no heapless type. Mimik uses
+    # neither crate directly.
+    # Remove when hakoniwa drops postcard's default features (or heapless 0.7).
+    "RUSTSEC-2026-0574",
+    "RUSTSEC-2026-0575",
+    "RUSTSEC-2026-0576",
+    "RUSTSEC-2026-0577",
+    "RUSTSEC-2026-0578",
+    "RUSTSEC-2026-0579",
+    "RUSTSEC-2026-0580",
+    "RUSTSEC-2026-0581",
+    "RUSTSEC-2026-0582",
+
+    # RUSTSEC-2026-0543, chrono 0.4.45 (unmaintained; no unsoundness). User-approved
+    # exception, 2026-11-20 (DEP-24). Path: procfs 0.18 / procfs-core 0.18 (default
+    # `chrono` feature, enabled by hakoniwa's own procfs request and so also for Mimik's
+    # `/proc` reads). procfs uses chrono only to turn boot time and the kernel build date
+    # into `DateTime` values (`boot_time`, `extra_date`); Mimik does not call them.
+    # Remove when procfs drops chrono.
+    "RUSTSEC-2026-0543",
 ]

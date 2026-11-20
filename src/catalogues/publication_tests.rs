@@ -189,10 +189,26 @@ async fn projection_steps(entries: usize) -> u64 {
     drop(permit);
     let mut db = Connection::open(&path).unwrap();
     db.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+    // The handler needs exclusive access to the connection, so it is set before the transaction
+    // starts and counts only between the Projections and NameIndex stages.
+    let steps = Arc::new(AtomicU64::new(0));
+    let counting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (steps, counting) = (steps.clone(), counting.clone());
+        db.progress_handler(
+            100,
+            Some(move || {
+                if counting.load(Ordering::Relaxed) {
+                    steps.fetch_add(100, Ordering::Relaxed);
+                }
+                false
+            }),
+        )
+        .unwrap();
+    }
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .unwrap();
-    let steps = Arc::new(AtomicU64::new(0));
     let request = PublishRequest {
         comparison_hash: ticket,
         actor: "fixture".into(),
@@ -200,17 +216,8 @@ async fn projection_steps(entries: usize) -> u64 {
     };
     publish_in(&tx, &draft, &request, &|stage| {
         match stage {
-            Stage::Projections => {
-                let steps = steps.clone();
-                tx.progress_handler(
-                    100,
-                    Some(move || {
-                        steps.fetch_add(100, Ordering::Relaxed);
-                        false
-                    }),
-                );
-            }
-            Stage::NameIndex => tx.progress_handler(0, None::<fn() -> bool>),
+            Stage::Projections => counting.store(true, Ordering::Relaxed),
+            Stage::NameIndex => counting.store(false, Ordering::Relaxed),
             Stage::Seal => {}
         }
         Ok(())

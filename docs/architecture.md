@@ -86,9 +86,9 @@ Rebuilt refusals and the unauthenticated navigation's login redirect keep only
 ## Storage
 
 One SQLite database, default `data/mimik.sqlite3` (`--database`, `MIMIK_DATABASE`). rusqlite
-0.37 with bundled SQLite (FTS5 included). Migrations are embedded (`src/store.rs`, `MIGRATIONS`)
+0.43 with bundled SQLite (FTS5 included). Migrations are embedded (`src/store.rs`, `MIGRATIONS`)
 and applied in one `IMMEDIATE` transaction; `PRAGMA user_version` holds the schema version
-(`SCHEMA_VERSION = 22`). A database from a newer schema is refused. There are no down
+(`SCHEMA_VERSION` in `src/store.rs`). A database from a newer schema is refused. There are no down
 migrations.
 
 | Migration | Holds |

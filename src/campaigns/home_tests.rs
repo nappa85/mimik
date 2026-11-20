@@ -86,7 +86,8 @@ where
                     sink.lock().unwrap().push(table_name.to_owned());
                 }
                 rusqlite::hooks::Authorization::Allow
-            }));
+            }))
+            .unwrap();
             Ok(())
         })
         .await
@@ -96,7 +97,8 @@ where
         .run(|db| {
             db.authorizer(
                 None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
-            );
+            )
+            .unwrap();
             Ok(())
         })
         .await
