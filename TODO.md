@@ -86,7 +86,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   and skips limited models, `~/.local/state/external-agents/limits.json`).
 
 - Hakoniwa audit exception: check new Hakoniwa releases; when one drops postcard's default
-  features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
+  features, remove the RUSTSEC-2023-0089 and RUSTSEC-2026-0574..0582 ignores from `.cargo/audit.toml`
+  (DEP-24); likewise RUSTSEC-2026-0543 (chrono) when procfs drops chrono.
 
 ## Next steps
 

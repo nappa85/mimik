@@ -310,10 +310,66 @@ pub(crate) fn match_sql(registered: bool) -> String {
     )
 }
 
-/// Clears the progress handler however the guarded statement ends.
+/// How many VM operations pass between two calls of the connection's progress handler. A
+/// production connection checks every `BUDGET_CHECK_OPS`; test builds call the handler on every
+/// operation so `Budget::checking_every` can ask for any interval. That costs a call per VM
+/// operation on every Store connection of every unit test; integration tests under `tests/` link the
+/// library without `cfg(test)` and use the production interval.
+#[cfg(not(test))]
+const HANDLER_OPS: i32 = BUDGET_CHECK_OPS;
+#[cfg(test)]
+const HANDLER_OPS: i32 = 1;
+
+/// The time budgets armed on this thread (a stack), read by the progress handler of the connection that
+/// executes the guarded statements (SQLite runs it on the calling thread).
+struct Active {
+    deadline: Instant,
+    every: i32,
+    seen: i32,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+thread_local! {
+    static ACTIVE: std::cell::RefCell<Vec<Active>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn budget_exceeded() -> bool {
+    ACTIVE.with(|active| {
+        let mut active = active.borrow_mut();
+        let Some(budget) = active.last_mut() else {
+            return false;
+        };
+        budget.seen = budget.seen.saturating_add(HANDLER_OPS);
+        if budget.seen < budget.every {
+            return false;
+        }
+        budget.seen = 0;
+        let expired = Instant::now() >= budget.deadline;
+        if expired {
+            budget
+                .fired
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        expired
+    })
+}
+
+/// Installs the progress handler that enforces `Budget` on `db`. rusqlite 0.43 needs exclusive
+/// access to set a handler, so it is installed once, when the store opens its connection, and
+/// stays: with no `Budget` running on the thread it never interrupts. A connection without it
+/// ignores every `Budget`.
+///
+/// # Errors
+/// SQLite refuses the handler.
+pub(crate) fn install_budget_handler(db: &mut Connection) -> rusqlite::Result<()> {
+    db.progress_handler(HANDLER_OPS, Some(budget_exceeded as fn() -> bool))
+}
+
+/// Arms the time budget of the statements run on this thread until it is dropped. Budgets form a
+/// stack (the innermost one is checked); a drop removes its own entry whatever the order.
 pub(crate) struct Budget<'a> {
-    db: &'a Connection,
     interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    db: std::marker::PhantomData<&'a Connection>,
 }
 
 impl<'a> Budget<'a> {
@@ -322,21 +378,19 @@ impl<'a> Budget<'a> {
     }
 
     /// `start` with another check interval (tests that must interrupt very short reads).
-    pub(crate) fn checking_every(db: &'a Connection, budget: Duration, ops: i32) -> Self {
-        let deadline = Instant::now() + budget;
+    pub(crate) fn checking_every(_db: &'a Connection, budget: Duration, ops: i32) -> Self {
         let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let fired = interrupted.clone();
-        db.progress_handler(
-            ops,
-            Some(move || {
-                let expired = Instant::now() >= deadline;
-                if expired {
-                    fired.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                expired
-            }),
-        );
-        Self { db, interrupted }
+        let armed = Active {
+            deadline: Instant::now() + budget,
+            every: ops,
+            seen: 0,
+            fired: interrupted.clone(),
+        };
+        ACTIVE.with(|active| active.borrow_mut().push(armed));
+        Self {
+            interrupted,
+            db: std::marker::PhantomData,
+        }
     }
 
     pub(crate) fn fired(&self) -> bool {
@@ -346,7 +400,12 @@ impl<'a> Budget<'a> {
 
 impl Drop for Budget<'_> {
     fn drop(&mut self) {
-        self.db.progress_handler(0, None::<fn() -> bool>);
+        let ours = &self.interrupted;
+        ACTIVE.with(|active| {
+            active
+                .borrow_mut()
+                .retain(|armed| !std::sync::Arc::ptr_eq(&armed.fired, ours));
+        });
     }
 }
 
@@ -585,6 +644,38 @@ pub(crate) fn drop_schema(db: &Connection) -> Result<(), AppError> {
 mod tests {
     use super::*;
 
+    fn armed() -> usize {
+        ACTIVE.with(|active| active.borrow().len())
+    }
+
+    #[test]
+    fn nested_budgets_restore_the_outer_one_and_leave_nothing_armed() {
+        let db = Connection::open_in_memory().unwrap();
+        {
+            let _outer = Budget::start(&db, Duration::from_secs(60));
+            assert_eq!(armed(), 1);
+            {
+                let _inner = Budget::start(&db, Duration::ZERO);
+                assert_eq!(armed(), 2);
+            }
+            assert_eq!(armed(), 1);
+            assert!(ACTIVE.with(|active| active.borrow()[0].deadline > Instant::now()));
+        }
+        assert_eq!(armed(), 0);
+    }
+
+    #[test]
+    fn out_of_order_drops_never_leave_an_expired_budget_armed() {
+        let db = Connection::open_in_memory().unwrap();
+        let outer = Budget::start(&db, Duration::ZERO);
+        let inner = Budget::start(&db, Duration::from_secs(60));
+        drop(outer);
+        assert_eq!(armed(), 1);
+        assert!(ACTIVE.with(|active| active.borrow()[0].deadline > Instant::now()));
+        drop(inner);
+        assert_eq!(armed(), 0);
+    }
+
     #[test]
     fn normaliser_output_is_golden() {
         // If this fails after a dependency upgrade, bump SEARCH_NORMALISER and update.
@@ -627,7 +718,7 @@ mod tests {
             "{:?}",
             result.err()
         );
-        // The handler is removed afterwards: a statement well past BUDGET_CHECK_OPS runs.
+        // No budget stays armed afterwards: a statement well past BUDGET_CHECK_OPS runs.
         let counted = rt
             .block_on(store.run(|db| {
                 Ok(db.query_row("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<100000) SELECT count(*) FROM c", [], |row| row.get::<_, i64>(0))?)
