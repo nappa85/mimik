@@ -219,13 +219,19 @@ pub(crate) struct Status {
 impl Status {
     /// A CPU start whose stored reminder choice is not on does not prime the reminder prompt:
     /// the step counts in neither the step number nor the total (plan 3c-1c), from the first
-    /// step on.
+    /// step on. When, at the manager's next update, the start has moved to the GPU path or
+    /// reminders are on, it counts again. From the reminder step on, the attempt's own decision
+    /// (`plan_reminders`) stands.
     fn skip_idle_prime(&mut self, choice: Option<bool>) {
         self.prime_idle = self.path == Path::Cpu && choice != Some(true);
-        if self.prime_idle
-            && let State::Starting(progress) = &mut self.state
+        if let State::Starting(progress) = &mut self.state
+            && !progress.reached(Phase::Reminders)
         {
-            progress.skip(Phase::PrimingReminders);
+            if self.prime_idle {
+                progress.skip(Phase::PrimingReminders);
+            } else {
+                progress.unskip(Phase::PrimingReminders);
+            }
         }
     }
 
