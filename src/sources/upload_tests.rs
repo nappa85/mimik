@@ -483,13 +483,14 @@ fn exclusion_stderr_helper_discards_markers_and_maps_exit() {
     // Helper-level drain/exit mapping through a fake Worker, not runner launch coverage.
     struct StderrWorker(bool);
     impl Worker for StderrWorker {
-        fn inspect(&self, _: &Path, _: &Cancel) -> Result<Inspection, Reason> {
+        fn inspect(&self, _: &Path, _: &Pins, _: &Cancel) -> Result<Inspection, Reason> {
             worker::stderr_fixture(self.0)?;
             Ok(inspection())
         }
         fn render(
             &self,
             _: &Path,
+            _: &Pins,
             _: &[Page],
             _: &Cancel,
             _: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
@@ -554,12 +555,13 @@ pub(crate) fn assert_rendered_exclusion_round_trip(inspection: Inspection, rende
         rendered: Mutex<Option<RenderedPage>>,
     }
     impl Worker for Synthetic {
-        fn inspect(&self, _: &Path, _: &Cancel) -> Result<Inspection, Reason> {
+        fn inspect(&self, _: &Path, _: &Pins, _: &Cancel) -> Result<Inspection, Reason> {
             Ok(self.inspection.clone())
         }
         fn render(
             &self,
             _: &Path,
+            _: &Pins,
             _: &[Page],
             _: &Cancel,
             publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
@@ -740,12 +742,25 @@ struct Fake {
     fail: AtomicBool,
     inspect_failure: AtomicBool,
     panic: AtomicBool,
+    /// Panics inside `render` after the first page was published.
+    panic_after_page: AtomicBool,
     large: AtomicBool,
     /// When nonzero, inspection reports this many pages (a stand-in for a very large PDF).
     inspected_pages: std::sync::atomic::AtomicU32,
+    /// Runs inside the worker call, after it has produced its output: a stand-in for a change
+    /// to the staged file while a worker has it open.
+    during_run: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+impl Fake {
+    fn change_during_run(&self) {
+        if let Some(change) = self.during_run.lock().unwrap().as_ref() {
+            change();
+        }
+    }
 }
 impl Worker for Fake {
-    fn inspect(&self, _: &std::path::Path, _: &Cancel) -> Result<Inspection, Reason> {
+    fn inspect(&self, _: &std::path::Path, _: &Pins, _: &Cancel) -> Result<Inspection, Reason> {
+        self.change_during_run();
         if self.inspect_failure.load(Ordering::Acquire) {
             return Err(worker::Error::Unsupported.into());
         }
@@ -765,6 +780,7 @@ impl Worker for Fake {
     fn render(
         &self,
         _: &std::path::Path,
+        _: &Pins,
         pages: &[Page],
         cancel: &Cancel,
         publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
@@ -799,10 +815,16 @@ impl Worker for Fake {
                 rendered.height_px = 1800;
             }
             publish(rendered)?;
+            assert!(
+                !self.panic_after_page.load(Ordering::Acquire),
+                "injected panic after a published page"
+            );
             if self.fail.load(Ordering::Acquire) {
+                self.change_during_run();
                 return Err(worker::Error::Unreadable.into());
             }
         }
+        self.change_during_run();
         Ok(())
     }
 }
@@ -1064,9 +1086,25 @@ fn upload_slot_spool_drop_hash_and_owner_admission() {
     );
     let mut phase = m.begin_upload().unwrap();
     phase.file().write_all(PDF).unwrap();
+    // `create` checks size, magic and the hash's form; the content hash is the first job's.
     assert!(
-        m.create(&o, phase, &"0".repeat(64), PDF.len() as u64, &metadata())
-            .is_err()
+        m.create(&o, phase, &"0".repeat(63), PDF.len() as u64, &metadata())
+            .is_err(),
+        "a malformed hash"
+    );
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(PDF).unwrap();
+    assert!(
+        m.create(&o, phase, &hash(PDF), PDF.len() as u64 + 1, &metadata())
+            .is_err(),
+        "a size that is not the file's"
+    );
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(b"not a pdf at all").unwrap();
+    assert!(
+        m.create(&o, phase, &hash(b"not a pdf at all"), 16, &metadata())
+            .is_err(),
+        "no %PDF- magic"
     );
     let mut phase = m.begin_upload().unwrap();
     phase.file().write_all(PDF).unwrap();
@@ -1797,6 +1835,63 @@ fn restart_reconciliation_fails_queued_and_running_and_removes_orphans() {
 }
 
 #[test]
+fn a_render_that_panics_after_publishing_a_page_leaves_no_page() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2]);
+    f.panic_after_page.store(true, Ordering::Release);
+    start(&m, &o, &id);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    assert_eq!(
+        (u.job.state.as_str(), u.job.reason.as_deref()),
+        ("failed", Some("unavailable"))
+    );
+    assert!(
+        u.pages.is_empty(),
+        "pages of a run without pins are dropped"
+    );
+    assert_eq!(u.job.done, 0);
+    assert!(!u.document_changed);
+    let folder = m.0.files.path(&id).unwrap();
+    assert_eq!(
+        std::fs::read_dir(folder.parent().unwrap()).unwrap().count(),
+        1
+    );
+    assert_eq!(m.0.ledger.usage().unwrap(), (PDF.len() as u64, 0));
+}
+
+#[test]
+fn restart_drops_the_pages_of_an_interrupted_render() {
+    let (dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2]);
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().pages.len(), 2);
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_jobs SET state='running', reason=NULL, finished_at=NULL",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let restarted = Uploads::initialize(m.0.store.clone(), dir.path(), f, false).unwrap();
+    let u = restarted.read(&id).unwrap();
+    assert_eq!(u.job.reason.as_deref(), Some("interrupted"));
+    assert_eq!(u.job.done, 0);
+    assert!(u.pages.is_empty(), "pages of an unpinned run are not kept");
+    let folder = restarted.0.files.path(&id).unwrap();
+    assert_eq!(
+        std::fs::read_dir(folder.parent().unwrap()).unwrap().count(),
+        1
+    );
+    assert!(restarted.contract(&id).is_err());
+}
+
+#[test]
 fn private_files_no_follow_and_atomic_rename_failure_release() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let dir = tempfile::tempdir().unwrap();
@@ -2177,4 +2272,322 @@ fn migration_constraints_and_cascade_refuse_bad_rows() {
             Ok(())
         })
         .unwrap();
+}
+
+// SRC-15 slice 3: job pins, per-job verification and `document_changed`.
+fn tamper(path: &Path, change: impl FnOnce(&std::fs::File)) {
+    use std::os::unix::fs::PermissionsExt;
+    // A finished job leaves the file 0400; the test plays a writer that can still reach it.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    change(&file);
+    file.sync_all().unwrap();
+}
+fn append_byte(path: &Path) {
+    use std::os::unix::fs::FileExt;
+    tamper(path, |f| f.write_all_at(b"x", PDF.len() as u64).unwrap());
+}
+/// A different file with the same bytes (or other bytes) renamed over the staged name.
+fn replace_by_rename(path: &Path, bytes: &[u8]) {
+    let new = path.with_file_name("replacement.tmp");
+    std::fs::write(&new, bytes).unwrap();
+    std::fs::rename(&new, path).unwrap();
+}
+fn assert_document_changed(m: &Uploads, id: &str) {
+    let u = m.read(id).unwrap();
+    assert!(u.document_changed);
+    assert_eq!(u.state, "failed");
+    assert_eq!(
+        (u.job.state.as_str(), u.job.reason.as_deref()),
+        ("failed", Some("document_changed"))
+    );
+    assert!(u.pages.is_empty(), "no page of a changed file remains");
+    let directory = m.0.files.path(id).unwrap();
+    let leftovers = std::fs::read_dir(directory.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.starts_with("page-") || n.starts_with("text-"))
+        .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "page files remain: {leftovers:?}");
+}
+
+#[test]
+fn a_staged_file_that_is_not_the_admitted_one_fails_the_first_job_as_document_changed() {
+    use std::os::unix::fs::FileExt;
+    type Change = Box<dyn Fn(&Path)>;
+    let cases: Vec<(&str, Change)> = vec![
+        (
+            "one byte",
+            Box::new(|p: &Path| tamper(p, |f| f.write_all_at(b"X", 10).unwrap())),
+        ),
+        (
+            "truncation",
+            Box::new(|p: &Path| tamper(p, |f| f.set_len(PDF.len() as u64 - 3).unwrap())),
+        ),
+        ("append", Box::new(append_byte)),
+        (
+            "replacement by rename",
+            Box::new(|p: &Path| replace_by_rename(p, &PDF.to_ascii_uppercase())),
+        ),
+        (
+            "symlink at the final component",
+            Box::new(|p: &Path| {
+                let real = p.with_file_name("real.pdf");
+                std::fs::rename(p, &real).unwrap();
+                std::os::unix::fs::symlink(&real, p).unwrap();
+            }),
+        ),
+        (
+            "hard link",
+            Box::new(|p: &Path| std::fs::hard_link(p, p.with_file_name("alias.pdf")).unwrap()),
+        ),
+    ];
+    for (name, change) in cases {
+        let (_dir, m, o, _) = fixture();
+        seed_queued(&m, &o, ID, "inspect");
+        change(&m.0.files.path(ID).unwrap());
+        m.launch(ID).unwrap();
+        wait(&m);
+        assert_document_changed(&m, ID);
+        assert!(m.read(ID).unwrap().inspection.is_none(), "{name}");
+    }
+}
+
+#[test]
+fn a_replacement_with_the_same_bytes_is_caught_by_the_pins_not_the_hash() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2]);
+    let path = m.0.files.path(&id).unwrap();
+    *f.during_run.lock().unwrap() = Some(Box::new(move || replace_by_rename(&path, PDF)));
+    start(&m, &o, &id);
+    wait(&m);
+    assert_document_changed(&m, &id);
+}
+
+#[test]
+fn a_change_during_the_last_batch_that_the_worker_survives_leaves_no_page() {
+    for worker_fails in [false, true] {
+        let (_dir, m, o, f) = fixture();
+        let id = create(&m, &o);
+        selected(&m, &o, &id, &[1, 2, 3]);
+        let path = m.0.files.path(&id).unwrap();
+        *f.during_run.lock().unwrap() = Some(Box::new(move || append_byte(&path)));
+        f.fail.store(worker_fails, Ordering::Release);
+        start(&m, &o, &id);
+        wait(&m);
+        assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+        assert_document_changed(&m, &id);
+        assert_eq!(
+            m.0.ledger.usage().unwrap(),
+            (PDF.len() as u64, 0),
+            "the bytes of the removed pages are released"
+        );
+    }
+}
+
+#[test]
+fn a_change_between_batches_stops_the_next_batch_and_removes_every_page() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &(1..=17).collect::<Vec<_>>());
+    let path = m.0.files.path(&id).unwrap();
+    let once = AtomicBool::new(false);
+    *f.during_run.lock().unwrap() = Some(Box::new(move || {
+        if !once.swap(true, Ordering::AcqRel) {
+            append_byte(&path);
+        }
+    }));
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(
+        f.calls.load(Ordering::SeqCst),
+        1,
+        "the next batch is never reserved"
+    );
+    assert_document_changed(&m, &id);
+}
+
+#[test]
+fn a_change_during_inspection_is_document_changed_and_stores_nothing() {
+    let (_dir, m, o, f) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    let path = m.0.files.path(ID).unwrap();
+    *f.during_run.lock().unwrap() = Some(Box::new(move || append_byte(&path)));
+    m.launch(ID).unwrap();
+    wait(&m);
+    assert_document_changed(&m, ID);
+    assert!(m.read(ID).unwrap().inspection.is_none());
+}
+
+/// Makes the file writable and opens the writer now; the returned call only writes (so the
+/// chmod's own change-time update is not what the pins see).
+fn same_size_writer(path: &Path) -> Box<dyn Fn() + Send> {
+    use std::os::unix::fs::{FileExt, PermissionsExt};
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let writer = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    let path = path.to_path_buf();
+    Box::new(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        writer.write_all_at(b"X", 10).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), PDF.len() as u64);
+    })
+}
+
+#[test]
+fn a_same_size_in_place_write_during_inspection_is_document_changed() {
+    let (_dir, m, o, f) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    let path = m.0.files.path(ID).unwrap();
+    *f.during_run.lock().unwrap() = Some(same_size_writer(&path));
+    m.launch(ID).unwrap();
+    wait(&m);
+    assert_document_changed(&m, ID);
+}
+
+#[test]
+fn a_same_size_in_place_write_during_a_render_is_document_changed() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2]);
+    let path = m.0.files.path(&id).unwrap();
+    *f.during_run.lock().unwrap() = Some(same_size_writer(&path));
+    start(&m, &o, &id);
+    wait(&m);
+    assert_document_changed(&m, &id);
+}
+
+#[test]
+fn a_changed_upload_refuses_everything_but_discard() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    assert!(m.contract(&id).is_ok());
+    // A render job that is not `succeeded`, and an inspection job, are not a basis.
+    for (kind, state) in [
+        ("render", "failed"),
+        ("render", "cancelled"),
+        ("inspect", "succeeded"),
+    ] {
+        m.0.store
+            .upload_storage(|db| {
+                db.execute(
+                    "UPDATE source_jobs SET kind=?2, state=?3, reason=NULL WHERE upload_id=?1",
+                    params![id, kind, state],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(m.contract(&id).is_err(), "{kind} {state}");
+    }
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_jobs SET kind='render', state='succeeded' WHERE upload_id=?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(m.contract(&id).is_ok());
+    // The flag alone refuses the contract, however good the rows look.
+    m.0.store
+        .upload_storage(|db| {
+            db.execute("UPDATE source_uploads SET document_changed=1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(m.contract(&id).is_err());
+    let revision = m.read(&id).unwrap().revision;
+    assert!(m.start(&o, &id, revision, true).is_err(), "inspect");
+    assert!(m.start(&o, &id, revision, false).is_err(), "render / retry");
+    assert!(m.set(&o, &id, revision, &metadata(), &[1]).is_err(), "set");
+    assert!(m.read(&id).unwrap().document_changed);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    m.discard(&o, &id).unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+}
+
+#[test]
+fn create_does_not_hash_the_spool_and_the_first_job_catches_a_wrong_hash() {
+    let (_dir, m, o, _) = fixture();
+    let mut phase = m.begin_upload().unwrap();
+    phase.file().write_all(PDF).unwrap();
+    // A well-formed hash that is not the file's: the route's streaming hash is trusted for the
+    // stream, so `create` accepts it and the first job's hash verifies the stored bytes.
+    let id = m
+        .create(
+            &o,
+            phase,
+            &hash(b"another file"),
+            PDF.len() as u64,
+            &metadata(),
+        )
+        .unwrap();
+    wait(&m);
+    assert_document_changed(&m, &id);
+}
+
+#[test]
+fn the_job_hash_is_cancel_aware() {
+    let (_dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    let cancel = Cancel::default();
+    cancel.cancel();
+    assert!(matches!(
+        m.hold_document(ID, &hash(PDF), &cancel),
+        Err(AppError::Invalid("cancelled"))
+    ));
+    assert!(m.hold_document(ID, &hash(PDF), &Cancel::default()).is_ok());
+    assert!(matches!(
+        m.hold_document(ID, &hash(b"other"), &Cancel::default()),
+        Err(AppError::Invalid("document_changed"))
+    ));
+}
+
+#[test]
+fn a_legacy_private_upload_without_pins_is_hashed_run_and_then_hardened() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    let path = m.0.files.path(ID).unwrap();
+    let mode = || std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(), 0o600);
+    m.launch(ID).unwrap();
+    wait(&m);
+    let u = m.read(ID).unwrap();
+    assert_eq!((u.state.as_str(), u.document_changed), ("inspected", false));
+    assert_eq!(mode(), 0o400, "hardened at the job end");
+    selected(&m, &o, ID, &[1, 2]);
+    start(&m, &o, ID);
+    wait(&m);
+    assert_eq!(m.read(ID).unwrap().state, "rendered");
+    assert_eq!(mode(), 0o400);
+    assert!(m.contract(ID).is_ok());
+}
+
+#[test]
+fn a_document_that_is_not_a_private_regular_file_is_refused_by_open_document() {
+    let (_dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    let path = m.0.files.path(ID).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert_eq!(
+        m.0.files.open_document(ID).err(),
+        Some(Reason::DocumentChanged),
+        "a directory"
+    );
+    std::fs::remove_dir(&path).unwrap();
+    assert_eq!(
+        m.0.files.open_document(ID).err(),
+        Some(Reason::Document(worker::Error::Unreadable)),
+        "a missing file is unreadable, not changed"
+    );
 }

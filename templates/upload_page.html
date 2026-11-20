@@ -4,15 +4,15 @@
 <h1>Staged PDF</h1><p>{{ upload.pdf_bytes }} bytes · SHA-256 {{ self.hash() }} · {{ upload.state }}</p>
 {% if let Some(document) = upload.already_document %}<p>already document {{ document }}; this upload can become a separate reading.</p>{% endif %}
 {% include "upload_progress.html" %}
-<form method="post" action="/admin/materials/uploads/{{ upload.id }}/set" data-form="set">
+{% if !upload.document_changed %}<form method="post" action="/admin/materials/uploads/{{ upload.id }}/set" data-form="set">
 <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}">
 <label>System id<input name="system" value="{{ upload.metadata.system_id }}" required maxlength="100"></label>
 <label>Edition<input name="edition" value="{{ upload.metadata.edition }}" required maxlength="100"></label>
 <label>Language<input name="language" value="{{ upload.metadata.language }}" required maxlength="30"></label>
 {% if let Some(inspection) = upload.inspection %}<h2>Inspection: {{ inspection.document.pages }} pages</h2><p>{% if inspection.document.encrypted %}Encrypted PDF opened without a password.{% else %}Not encrypted.{% endif %}</p>
 <fieldset><legend>Select at most 64 pages</legend>{% for page in inspection.pages %}<label><input type="checkbox" name="page_{{ page.n }}" value="1" {% if self.selected(*page.n) %}checked{% endif %}>Page {{ page.n }} · {{ page.width }} × {{ page.height }} pt · rotation {{ page.rotate }}°</label>{% endfor %}</fieldset>{% endif %}
-<button>Save metadata and selection</button></form>
-{% if !self.busy() %}<form method="post" action="/admin/materials/uploads/{{ upload.id }}/inspect" data-form="inspect"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}"><button>Inspect again</button></form>
+<button>Save metadata and selection</button></form>{% else %}<p>Discard this upload and upload the PDF again.</p>{% endif %}
+{% if !self.busy() && !upload.document_changed %}<form method="post" action="/admin/materials/uploads/{{ upload.id }}/inspect" data-form="inspect"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}"><button>Inspect again</button></form>
 {% if upload.inspection.is_some() %}<form method="post" action="/admin/materials/uploads/{{ upload.id }}/render" data-form="render"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}"><button>Render the remaining pages</button></form>{% endif %}{% endif %}
 <section class="panel" id="repeated-text"><h2>Repeated text</h2>
 <p>Optional: exclude repeated text after inspecting the original. Running headers may also repeat. Marks drawn as paths or images cannot be proposed; draw a box instead. Exclusion revision {{ upload.exclusion_revision }}.</p>

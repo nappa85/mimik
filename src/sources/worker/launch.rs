@@ -1,6 +1,6 @@
 //! Synchronous, streaming parent API. The watchdog owns and reaps the process tree.
 use super::{
-    Error, Inspection, Page, PageWords, RenderSettings, RenderedPage, Spec, profile, records,
+    Error, Inspection, Page, PageWords, Pins, RenderSettings, RenderedPage, Spec, profile, records,
 };
 use crate::sandbox::{
     self,
@@ -59,6 +59,9 @@ pub enum Reason {
     Unavailable(String),
     #[error("cancelled")]
     Cancelled,
+    /// The staged file is no longer the pinned one (SRC-15 slice 3): never retried.
+    #[error("document changed")]
+    DocumentChanged,
 }
 impl From<Error> for Reason {
     fn from(error: Error) -> Self {
@@ -77,9 +80,22 @@ pub fn inspect(path: &Path) -> Result<Inspection, Reason> {
 /// # Errors
 /// As for [`inspect`], or cancellation.
 pub fn inspect_cancellable(path: &Path, cancel: &Cancel) -> Result<Inspection, Reason> {
+    inspect_with(path, None, cancel)
+}
+
+/// Inspect a staged file whose identity the caller pinned: the launch refuses (and the run
+/// ends as) `DocumentChanged` if the file is not the pinned one before the sandbox starts or
+/// after the worker exits.
+/// # Errors
+/// As for [`inspect_cancellable`], or `DocumentChanged`.
+pub fn inspect_pinned(path: &Path, pins: &Pins, cancel: &Cancel) -> Result<Inspection, Reason> {
+    inspect_with(path, Some(pins), cancel)
+}
+
+fn inspect_with(path: &Path, pins: Option<&Pins>, cancel: &Cancel) -> Result<Inspection, Reason> {
     super::availability::require()?;
     let spec = spec(records::Operation::Inspect, vec![]);
-    execute(path, &spec, cancel, &Options::production()?, |pipe| {
+    execute_with(path, pins, &spec, cancel, &Options::production()?, |pipe| {
         let extension = pipe.wall_extension();
         records::read_inspection_observed(pipe, || {
             extension.fetch_add(INSPECT_WALL_PER_PAGE_MS, Ordering::AcqRel);
@@ -115,6 +131,29 @@ pub fn render(
     path: &Path,
     pages: Vec<Page>,
     cancel: &Cancel,
+    page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
+) -> Result<(), Reason> {
+    render_with(path, None, pages, cancel, page)
+}
+
+/// [`render`] of a staged file whose identity the caller pinned (see [`inspect_pinned`]).
+/// # Errors
+/// As for [`render`], or `DocumentChanged`.
+pub fn render_pinned(
+    path: &Path,
+    pins: &Pins,
+    pages: Vec<Page>,
+    cancel: &Cancel,
+    page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
+) -> Result<(), Reason> {
+    render_with(path, Some(pins), pages, cancel, page)
+}
+
+fn render_with(
+    path: &Path,
+    pins: Option<&Pins>,
+    pages: Vec<Page>,
+    cancel: &Cancel,
     mut page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
 ) -> Result<(), Reason> {
     // Validate geometry and request cardinality before spawning anything.
@@ -124,7 +163,7 @@ pub fn render(
         records::Operation::Render,
         pages.iter().map(|p| p.n).collect(),
     );
-    execute(path, &spec, cancel, &Options::production()?, |pipe| {
+    execute_with(path, pins, &spec, cancel, &Options::production()?, |pipe| {
         #[cfg(test)]
         let pipe = {
             let mut pipe = pipe;
@@ -173,6 +212,29 @@ pub fn words(
     path: &Path,
     pages: Vec<Page>,
     cancel: &Cancel,
+    page: impl FnMut(PageWords) -> Result<(), Error> + Send,
+) -> Result<(), Reason> {
+    words_with(path, None, pages, cancel, page)
+}
+
+/// [`words`] of a file whose identity the caller pinned (see [`inspect_pinned`]).
+/// # Errors
+/// As for [`words`], or `DocumentChanged`.
+pub fn words_pinned(
+    path: &Path,
+    pins: &Pins,
+    pages: Vec<Page>,
+    cancel: &Cancel,
+    page: impl FnMut(PageWords) -> Result<(), Error> + Send,
+) -> Result<(), Reason> {
+    words_with(path, Some(pins), pages, cancel, page)
+}
+
+fn words_with(
+    path: &Path,
+    pins: Option<&Pins>,
+    pages: Vec<Page>,
+    cancel: &Cancel,
     mut page: impl FnMut(PageWords) -> Result<(), Error> + Send,
 ) -> Result<(), Reason> {
     records::WordsReader::new(std::io::empty(), pages.clone())?;
@@ -181,7 +243,7 @@ pub fn words(
         records::Operation::Words,
         pages.iter().map(|p| p.n).collect(),
     );
-    execute(path, &spec, cancel, &Options::production()?, |pipe| {
+    execute_with(path, pins, &spec, cancel, &Options::production()?, |pipe| {
         let mut reader = match records::WordsReader::new(pipe, pages) {
             Ok(reader) => reader,
             Err(error) => return (Err(error), None),
@@ -334,20 +396,34 @@ impl Drop for Root {
     }
 }
 
-fn open(path: &Path) -> Result<(File, PathBuf, sandbox::Identity), Reason> {
-    let file = File::options()
+/// Open a file for the sandbox: its descriptor, canonical name and identity. With `pins` (a
+/// staged upload) the final component is never followed and the descriptor's `fstat` must equal
+/// the pins, else `DocumentChanged`; the identity handed to the sandbox's bind check is then the
+/// pinned one, so a name that resolves to something else is refused after the mounts.
+fn open(path: &Path, pins: Option<&Pins>) -> Result<(File, PathBuf, sandbox::Identity), Reason> {
+    let follow = if pins.is_some() { libc::O_NOFOLLOW } else { 0 };
+    let file = match File::options()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | follow)
         .open(path)
-        .map_err(|_| Reason::from(Error::Unreadable))?;
+    {
+        Ok(file) => file,
+        Err(error) if pins.is_some() && error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(Reason::DocumentChanged);
+        }
+        Err(_) => return Err(Error::Unreadable.into()),
+    };
     let metadata = file.metadata().map_err(|_| Error::Unreadable)?;
-    if !metadata.is_file() {
-        return Err(Error::Unreadable.into());
+    match pins {
+        Some(pins) if !pins.holds(&metadata) => return Err(Reason::DocumentChanged),
+        None if !metadata.is_file() => return Err(Error::Unreadable.into()),
+        _ => {}
     }
+    let identity = pins.map_or_else(|| (metadata.dev(), metadata.ino()), Pins::identity);
     Ok((
         file,
         std::fs::canonicalize(path).map_err(|_| Error::Unreadable)?,
-        (metadata.dev(), metadata.ino()),
+        identity,
     ))
 }
 
@@ -538,13 +614,14 @@ fn pin(tree: &mut Tree, report: Started) -> std::io::Result<()> {
 
 fn prepare(
     path: &Path,
+    pins: Option<&Pins>,
     spec: &Spec,
     options: &Options,
 ) -> Result<(Root, File, File, sandbox::Profile), Reason> {
     sandbox::host::namespaces(Path::new("/proc")).map_err(|e| unavailable(&e.to_string()))?;
     let root = Root::new().map_err(|_| unavailable("private root"))?;
-    let (input_file, input, identity) = open(path)?;
-    let (exe, executable, exe_identity) = open(&options.executable)?;
+    let (input_file, input, identity) = open(path, pins)?;
+    let (exe, executable, exe_identity) = open(&options.executable, None)?;
     let loader = loader(&exe)?;
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
         .map_err(|_| unavailable("mount discovery"))?;
@@ -700,10 +777,24 @@ pub(super) fn execute<T: Send>(
     options: &Options,
     read: impl FnOnce(Output) -> (Result<T, Error>, Option<Error>) + Send,
 ) -> Result<T, Reason> {
+    execute_with(path, None, spec, cancel, options, read)
+}
+
+/// One worker run. With `pins` the launch descriptor must equal them before the profile is
+/// built, and after the worker has exited (whatever its result: it reads the file lazily for
+/// the whole run) the same descriptor must still equal them, else `DocumentChanged`.
+pub(super) fn execute_with<T: Send>(
+    path: &Path,
+    pins: Option<&Pins>,
+    spec: &Spec,
+    cancel: &Cancel,
+    options: &Options,
+    read: impl FnOnce(Output) -> (Result<T, Error>, Option<Error>) + Send,
+) -> Result<T, Reason> {
     if cancel.cancelled() {
         return Err(Reason::Cancelled);
     }
-    let (_root, input, _exe, plan) = prepare(path, spec, options)?;
+    let (_root, input, _exe, plan) = prepare(path, pins, spec, options)?;
     let size = input.metadata().map_or(0, |meta| meta.len());
     let (wall, cpu_seconds) = budgets(spec, options, size)?;
     let pipe = || {
@@ -761,7 +852,7 @@ pub(super) fn execute<T: Send>(
     let stderr = Interruptible::new(stderr, &stop);
     let marker = Interruptible::new(File::from(marker), &stop);
     let status = Interruptible::new(File::from(status), &stop);
-    std::thread::scope(|scope| {
+    let result = std::thread::scope(|scope| {
         let err = scope.spawn(move || drain_stderr(stderr));
         let marker = scope.spawn(move || reached_exec(marker));
         let (tx, rx) = mpsc::channel();
@@ -782,7 +873,14 @@ pub(super) fn execute<T: Send>(
         let reached_exec = marker.join().unwrap_or(false);
         let _ = err.join();
         reconcile_output(exit, reached_exec, result, terminal, empty, parent)
-    })
+    });
+    // The worker is gone (or killed). A changed file outranks every other outcome.
+    if let Some(pins) = pins
+        && !input.metadata().is_ok_and(|meta| pins.holds(&meta))
+    {
+        return Err(Reason::DocumentChanged);
+    }
+    result
 }
 
 fn read_started(status: impl Read) -> Option<Started> {
@@ -988,6 +1086,62 @@ pub(super) fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn pinned_file(dir: &Path) -> (PathBuf, Pins) {
+        let path = dir.join("document.pdf");
+        std::fs::write(&path, b"%PDF-1.7\n%%EOF\n").unwrap();
+        let pins = Pins::of(&std::fs::metadata(&path).unwrap());
+        (path, pins)
+    }
+
+    #[test]
+    fn the_launch_descriptor_must_equal_the_pins_and_hands_their_identity_to_the_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, pins) = pinned_file(dir.path());
+        let (_file, canonical, identity) = open(&path, Some(&pins)).unwrap();
+        assert_eq!(canonical, std::fs::canonicalize(&path).unwrap());
+        assert_eq!(identity, pins.identity());
+        // Any change since the pins were taken (here an append) is refused before the profile.
+        std::thread::sleep(Duration::from_millis(20));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"x").unwrap();
+        assert_eq!(
+            open(&path, Some(&pins)).err(),
+            Some(Reason::DocumentChanged)
+        );
+    }
+
+    #[test]
+    fn a_replacement_by_rename_or_a_symlink_at_the_final_component_is_document_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, pins) = pinned_file(dir.path());
+        let other = dir.path().join("other.pdf");
+        std::fs::write(&other, b"%PDF-1.7\n%%EOF\n").unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert_eq!(
+            open(&path, Some(&pins)).err(),
+            Some(Reason::DocumentChanged),
+            "a different inode"
+        );
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let (path, pins) = pinned_file(&sub);
+        let target = dir.path().join("target.pdf");
+        std::fs::rename(&path, &target).unwrap();
+        symlink(&target, &path).unwrap();
+        assert_eq!(
+            open(&path, Some(&pins)).err(),
+            Some(Reason::DocumentChanged),
+            "O_NOFOLLOW refuses the link"
+        );
+        // Without pins (the CLI) a link is still followed, as before.
+        assert!(open(&path, None).is_ok());
+    }
+
     #[test]
     fn worker_hwm_requires_a_live_pin_even_if_numeric_proc_path_exists() {
         let me = i32::try_from(std::process::id()).unwrap();

@@ -29,6 +29,7 @@ impl Worker for Unavailable {
     fn inspect(
         &self,
         _: &std::path::Path,
+        _: &worker::Pins,
         _: &worker::Cancel,
     ) -> Result<worker::Inspection, worker::Reason> {
         unreachable!()
@@ -36,6 +37,7 @@ impl Worker for Unavailable {
     fn render(
         &self,
         _: &std::path::Path,
+        _: &worker::Pins,
         _: &[worker::Page],
         _: &worker::Cancel,
         _: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
@@ -67,6 +69,7 @@ impl Worker for Refuse {
     fn inspect(
         &self,
         _: &std::path::Path,
+        _: &worker::Pins,
         _: &worker::Cancel,
     ) -> Result<worker::Inspection, worker::Reason> {
         Err(worker::Reason::Document(worker::Error::Unsupported))
@@ -74,6 +77,7 @@ impl Worker for Refuse {
     fn render(
         &self,
         _: &std::path::Path,
+        _: &worker::Pins,
         _: &[worker::Page],
         _: &worker::Cancel,
         _: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
@@ -603,18 +607,20 @@ async fn upload_route_comparison_budget_explains_manual_remedy_in_html() {
         fn inspect(
             &self,
             path: &std::path::Path,
+            pins: &worker::Pins,
             cancel: &worker::Cancel,
         ) -> Result<worker::Inspection, worker::Reason> {
-            self.0.inspect(path, cancel)
+            self.0.inspect(path, pins, cancel)
         }
         fn render(
             &self,
             path: &std::path::Path,
+            pins: &worker::Pins,
             pages: &[worker::Page],
             cancel: &worker::Cancel,
             emit: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
         ) -> Result<(), worker::Reason> {
-            self.0.render(path, pages, cancel, &mut |mut page| {
+            self.0.render(path, pins, pages, cancel, &mut |mut page| {
                 page.lines = (0..2001)
                     .map(|i| {
                         let left = f64::from(i) / 100.;
@@ -771,6 +777,7 @@ impl Worker for Waiting {
     fn inspect(
         &self,
         _: &std::path::Path,
+        _: &worker::Pins,
         cancel: &worker::Cancel,
     ) -> Result<worker::Inspection, worker::Reason> {
         while !cancel.cancelled() {
@@ -781,6 +788,7 @@ impl Worker for Waiting {
     fn render(
         &self,
         _: &std::path::Path,
+        _: &worker::Pins,
         _: &[worker::Page],
         _: &worker::Cancel,
         _: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),

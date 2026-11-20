@@ -73,6 +73,15 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   outside `fz_try`. A throw there would unwind over Rust frames. Follow up with upstream
   exception-safe closing and the worker fuzzing corpus; ordinary render tests do not establish
   that this cannot throw.
+- **SRC-PIN-LEASE** [staged PDF immutability] The job pins (`docs/sources-and-retrieval.md`) do
+  not catch a same-uid process that held a writable descriptor or `MAP_SHARED` mapping of
+  `document.pdf` before the job, nor a same-size write within the timestamp granularity.
+  Possible follow-up: a read lease (`F_SETLEASE` `F_RDLCK` on the held descriptor, `F_GETLEASE`
+  checked after each worker exit; it breaks when another opener writes).
+- **SRC-PIN-OWNER** [staged PDF immutability] A staged `document.pdf` that is not owned by the
+  effective user or has more than one link at open (a hard-linking backup tool, a restore under
+  another owner) is classified `document_changed`, and the upload's staged pages are deleted.
+  Acceptable before release; discard and upload again.
 - **SRC-PNG-END** [bundle compatibility] Bundle import refuses bytes after a PNG's IEND,
   stricter than before. Bundles with trailing PNG bytes must be regenerated with clean PNGs.
 

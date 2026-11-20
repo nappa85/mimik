@@ -1,4 +1,5 @@
 //! Private, descriptor-relative staging and reservation accounting.
+use super::worker::{Error, Held, Reason};
 use crate::AppError;
 use rustix::{
     fd::OwnedFd,
@@ -267,6 +268,24 @@ impl Files {
     pub fn path(&self, id: &str) -> Result<PathBuf, AppError> {
         valid_id(id)?;
         Ok(self.path.join(id).join("document.pdf"))
+    }
+    /// Open the staged PDF relative to its directory descriptor without following links and
+    /// pin it (regular file, one link, owned by the effective user).
+    /// # Errors
+    /// `DocumentChanged` for a symbolic link or a file that fails the pin checks; `Unreadable`
+    /// for a missing file, an invalid id or any other failure.
+    pub fn open_document(&self, id: &str) -> Result<Held, Reason> {
+        let dir = self.dir(id).map_err(|_| Reason::from(Error::Unreadable))?;
+        match rustix::fs::openat(
+            &dir,
+            "document.pdf",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+            Mode::empty(),
+        ) {
+            Ok(fd) => Held::new(File::from(fd)),
+            Err(rustix::io::Errno::LOOP) => Err(Reason::DocumentChanged),
+            Err(_) => Err(Error::Unreadable.into()),
+        }
     }
     /// # Errors
     /// Returns filesystem-statistics failures.

@@ -30,6 +30,7 @@ impl crate::sources::uploads::Worker for Available {
     fn inspect(
         &self,
         _: &std::path::Path,
+        _: &crate::sources::worker::Pins,
         _: &crate::sources::worker::Cancel,
     ) -> Result<crate::sources::worker::Inspection, crate::sources::worker::Reason> {
         unreachable!()
@@ -37,6 +38,7 @@ impl crate::sources::uploads::Worker for Available {
     fn render(
         &self,
         _: &std::path::Path,
+        _: &crate::sources::worker::Pins,
         _: &[crate::sources::worker::Page],
         _: &crate::sources::worker::Cancel,
         _: &mut (
