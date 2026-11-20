@@ -17,7 +17,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   ran (`docs/results.md`). Steps 3a (catalogue member, linking on view), 3b (bundles), 3c-0's CPU part
   (prompt cache), 3c-1 (reminders with item names), 3c-1b (the cache on the GPU path), 3c-1c
   (reminders that fit) and 3c-2 (catalogue entry text, sources, apply recheck; 2026-11-19) are
-  merged; owed: 3c-2's live `run-reminder` with rm-09/rm-10 on both paths (plan). Step 4 (suggestions, "Which one?") is merged (2026-11-20); open: the p95 over HTTP and IME through CDP (CAT-L23). Next: step 5 (docs, release scope, gate).
+  merged; owed: 3c-2's live `run-reminder` with rm-09/rm-10 on both paths (plan). Step 4 (suggestions, "Which one?") is merged (2026-11-20); open: the p95 over HTTP and IME through CDP (CAT-L23). Step 5 (docs, release scope, the assistant-on release smoke) is merged (2026-11-20); owed: its first CI run (`llama-runtime`, SmolLM2-135M must reach Ready on the runner; it reached Ready in about 10 s on the dev host), which needs a push.
   Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
@@ -119,22 +119,19 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
    against the test suite (flags, output parsing, grammar conversion, the confinement suite),
    before the first release; (b) the system-llama.cpp mode with distribution packaging
    (compatibility checks instead of a version pin; its own design).
-1. 3 bundles and reminders, 4 suggestions, 5 docs and gate (includes the
-   `docs/release-scope.md` update for schema 23, the assisted scope and the system CA store
-   requirement of the downloads).
-2. Owed: a live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU
+1. Owed: a live trial of a second model through `/admin/assistant` (`local:`), CPU first, GPU
    at a weekend (ASSIST-L47). The CPU and GPU start-up with the shipped prefix ran 2026-11-16
    (`docs/results.md`). The general 104-reply screen with D ran
    (`docs/results.md`): Granite 37/8/5, 9B on the GPU 42/4/4. Measured 2026-11-16
    (`docs/results.md`): the prefix is reused across reply schemas and the grammar costs under 30
    ms.
-3. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
+2. Older-ABI Landlock evidence (below ABI 6; the Ubuntu VM has ABI 4 and fails the two
    ABI-6 live checks, as documented).
-4. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
+3. Owed measurements: the minimum-host and AppArmor VM checks (ASSIST-L36); GPU-path checks
    at each llama.cpp pin change (`tools/assist_gpu_live.py`); a trace of the GPU path on another
    driver (AMDVLK, Intel, NVIDIA) for ASSIST-L44/L45; the superseding-job (cancel) timings on CPU and GPU with the fixed
    helper.
-5. 2c-2b-1 review leftovers (Minor): `tools/assist_runtime_measure.py` stop-reason race
+4. 2c-2b-1 review leftovers (Minor): `tools/assist_runtime_measure.py` stop-reason race
    between the watchdog and `wait_healthy` (set the reason before killing), and `poll()`
    reaping the leader before `killpg`.
 

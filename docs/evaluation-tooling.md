@@ -4,11 +4,14 @@ Python evaluation tooling under `tools/`. Results are in [results.md](results.md
 
 ## Scope
 
-- **The Rust application has no provider or model integration.** `Cargo.toml` has no LLM
-  client crate, and nothing in `src/` calls a model. Every model use today is prototype tooling
-  under `tools/` that runs in containers; it is not part of the runtime binary, but ships in
-  the corresponding source package.
-- The provider direction is a decision (D-H in [decisions.md](decisions.md)), not code.
+- **The Rust application integrates one local model endpoint.** The optional interpretation
+  assistant (`src/assistant/`) talks through `rig-core` to a pinned llama.cpp `llama-server`
+  that Mimik starts as its own confined child ([model-runtime.md](model-runtime.md)); it
+  proposes readings and reminders the player confirms. There is no API-provider client. Every
+  other model use is prototype tooling under `tools/` that runs in containers; it is not part
+  of the runtime binary, but ships in the corresponding source package.
+- The provider direction is a decision (D-H in [decisions.md](decisions.md)); vendor expansion
+  is a roadmap item.
 
 ## Model registry and downloads
 

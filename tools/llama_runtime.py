@@ -2,10 +2,10 @@
 files of `schemas/llama-runtime-v1.json`, the manifest Mimik embeds.
 
   python tools/llama_runtime.py fetch --out target/llama-fetch
-      downloads each pinned release asset, the external licence notices, the test model and
+      downloads each pinned release asset, the external licence notices, the CI test models and
       the pinned source (a shallow fetch of the commit, then `git archive`), verifies every
       hash, and writes <out>/llama/<build dir>/<file>, <out>/notices/<notice>, <out>/<source
-      tar> and <out>/models/<test model>.
+      tar> and <out>/models/<each test model>.
   python tools/llama_runtime.py verify --dir <llama dir> [--models <dir>]
       re-hashes every file against the manifest (an extra, missing or changed file fails),
       then reapplies the manifest's modes (artifact hand-offs drop them).
@@ -108,13 +108,19 @@ def verify(llama_dir, data=None):
     os.chmod(llama_dir, 0o755)
 
 
+def pinned_models(data):
+    """The CI-only models the manifest pins: the confinement test model, and the assistant-on
+    smoke's model when present."""
+    return [data[key] for key in ("test_model", "smoke_model") if key in data]
+
+
 def verify_model(models_dir, data=None):
     data = data or manifest()
-    model = data["test_model"]
-    path = Path(models_dir) / model["name"]
-    if path.stat().st_size != model["size"] or sha256(path) != model["sha256"]:
-        raise ValueError(f"{path}: differs from the pinned test model")
-    os.chmod(path, 0o644)
+    for model in pinned_models(data):
+        path = Path(models_dir) / model["name"]
+        if path.stat().st_size != model["size"] or sha256(path) != model["sha256"]:
+            raise ValueError(f"{path}: differs from the pinned test model")
+        os.chmod(path, 0o644)
     os.chmod(models_dir, 0o700)
 
 
@@ -191,9 +197,9 @@ def fetch(out, data=None):
             extract(asset, build, out / "llama" / build["directory"])
     verify(out / "llama", data)
     fetch_notices(out, data)
-    model = data["test_model"]
     (out / "models").mkdir(mode=0o700)
-    download(model["url"], out / "models" / model["name"], model["sha256"], model["size"])
+    for model in pinned_models(data):
+        download(model["url"], out / "models" / model["name"], model["sha256"], model["size"])
     verify_model(out / "models", data)
     source_archive(data, out)
 

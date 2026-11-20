@@ -77,8 +77,8 @@ the 14 `libggml-cpu-<variant>.so` backends and `LICENSE`; the RPC backend is not
 with size, SHA-256 and mode, the system libraries they need (`libc.so.6`, `libm.so.6`,
 `libstdc++.so.6`, `libgcc_s.so.1`, `libgomp.so.1`, `libssl.so.3`, `libcrypto.so.3`; symbol
 floors GLIBC 2.34, GLIBCXX 3.4.30, OpenSSL 3.0.0), the documented minimum host (Ubuntu 22.04
-`x86_64`), the source archive (`git archive` of the commit, tar SHA-256; a build-time input for the notice texts only, never shipped, ASSIST-47) and the CI test model
-(`ggml-org/models-moved` at `499bc88…`, `tinyllamas/stories260K.gguf`, upstream MIT). ggml
+`x86_64`), the source archive (`git archive` of the commit, tar SHA-256; a build-time input for the notice texts only, never shipped, ASSIST-47) and the two CI test models
+(never shipped: `ggml-org/models-moved` at `499bc88…`, `tinyllamas/stories260K.gguf`, upstream MIT, for the confinement tests; `bartowski/SmolLM2-135M-Instruct-GGUF` at `09816ac…`, `SmolLM2-135M-Instruct-Q4_K_M.gguf`, apache-2.0 per the repository's card for the base model HuggingFaceTB/SmolLM2-135M-Instruct, 105,454,432 bytes, for the assistant-on release smoke, which stories260K cannot start: its priming request is refused). ggml
 loads every `libggml-cpu-<variant>.so` beside the server and uses the best one the CPU
 supports. The Vulkan asset `llama-b12110-bin-ubuntu-vulkan-x64.tar.gz` (SHA-256
 `a5d74194…`, ASSIST-42) holds the same 22 files byte for byte plus `libggml-vulkan.so` (the

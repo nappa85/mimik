@@ -2,7 +2,10 @@
 
 Read-only game catalogues (spells, items, other entries) that players browse and read through
 a sheet. The Owner publishes them from the CLI. A sheet links a list row to an entry by name
-on view (step 3a) but writes no catalogue reference yet (`CAT-L9` in [limitations.md](limitations.md)). Decisions: "Catalogues" in
+on view, offers name suggestions, and stores the entry key beside the name only when the player
+picks one of several same-named entries ("Which one?"); the key is advisory and a dangling one
+shows nothing (`CAT-L9` in [limitations.md](limitations.md);
+[assisted-entry.md](assisted-entry.md#catalogue-links)). Decisions: "Catalogues" in
 [decisions.md](decisions.md).
 
 Code: `src/catalogues/` (`decode`, `admission`, `store`, `publication`, `read`, `names`),

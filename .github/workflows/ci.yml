@@ -309,6 +309,20 @@ jobs:
             --models-dir target/models --model local:stories260K.gguf \
             --model-sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d \
             --data-dir target/probe-data
+      # The unpacked release with `--assistant` on the production runtime path: the bundled
+      # `llama/`, the test model, the CPU device, a fresh data directory and a bootstrapped
+      # Owner. The helper polls the assistant page until the runtime leaves "Starting", requires
+      # Ready at level 1 after priming and calibration (`tools/assist_release_smoke.py` cites the
+      # measured run; stories260K cannot be primed, hence SmolLM2-135M), stops the server with SIGINT and requires a
+      # clean exit and no llama-server left behind.
+      - name: Unpacked release with the assistant on (production runtime path)
+        run: |
+          python3 tools/assist_release_smoke.py target/rel/mimik \
+            --runtime target/rel/llama --models-dir target/models \
+            --model local:SmolLM2-135M-Instruct-Q4_K_M.gguf \
+            --model-sha256 2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d \
+            --timeout 300 \
+            --data target/assist-release-smoke/data
       # The whole live suite, with the release's own binary as the runner (single-threaded, its
       # guard active), not the libtest binary; the start-time probe with it exits 0 only at
       # level 1.
