@@ -654,16 +654,6 @@ reminder entry kept after long interpretations. The `assist_model_browser.py` re
 (fake model). Found: on the GPU, Qwen3.5 reuses only 1,318 of
 1,805 prefix tokens for an interpretation right after another one (about 2.7 s inside R).
 
-##### 3c-2 Catalogue entry text and provenance (merged; live checks pending)
-
-Merged 2026-11-19 (`docs/assisted-entry.md`, reminders: entry context, badge, sources, read
-set). Remaining:
-
-1. **Live:** `run-reminder` with the two entry cases (rm-09: a number from the cited entry;
-   rm-10: a number only in another row's entry) on both paths, as a smoke check (GPU outside the
-   weekday window, fan on manual). Record in `docs/results.md`, and the reminder prime's size in
-   `docs/model-runtime.md` if it changed noticeably.
-
 ## 3. Verification
 
 - Rust gate: fmt, strict Clippy, locked tests (red then green), audit, `cargo about`, release

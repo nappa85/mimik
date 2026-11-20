@@ -17,7 +17,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   ran (`docs/results.md`). Steps 3a (catalogue member, linking on view), 3b (bundles), 3c-0's CPU part
   (prompt cache), 3c-1 (reminders with item names), 3c-1b (the cache on the GPU path), 3c-1c
   (reminders that fit) and 3c-2 (catalogue entry text, sources, apply recheck; 2026-11-19) are
-  merged; owed: 3c-2's live `run-reminder` with rm-09/rm-10 on both paths (plan). Step 4 (suggestions, "Which one?") is merged (2026-11-20); open: the p95 over HTTP and IME through CDP (CAT-L23). Step 5 (docs, release scope, the assistant-on release smoke) is merged (2026-11-20); owed: its first CI run (`llama-runtime`, SmolLM2-135M must reach Ready on the runner; it reached Ready in about 10 s on the dev host), which needs a push.
+  merged (3c-2's live reminder runs done on both paths, `docs/results.md`). Step 4 (suggestions, "Which one?") is merged (2026-11-20); open: the p95 over HTTP and IME through CDP (CAT-L23). Step 5 (docs, release scope, the assistant-on release smoke) is merged (2026-11-20); owed: its first green CI run (`llama-runtime`, SmolLM2-135M must reach Ready on the runner); CI is red at `cargo audit` until the deps-audit branch lands.
   Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
@@ -86,7 +86,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   and skips limited models, `~/.local/state/external-agents/limits.json`).
 
 - Hakoniwa audit exception: check new Hakoniwa releases; when one drops postcard's default
-  features, remove the RUSTSEC-2023-0089 ignore from `.cargo/audit.toml` (DEP-24).
+  features, remove the RUSTSEC-2023-0089 and RUSTSEC-2026-0574..0582 ignores from `.cargo/audit.toml`
+  (DEP-24); likewise RUSTSEC-2026-0543 (chrono) when procfs drops chrono.
 
 ## Next steps
 

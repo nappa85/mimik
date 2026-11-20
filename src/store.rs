@@ -110,6 +110,7 @@ impl Store {
 
     fn migrate(mut connection: Connection) -> Result<Self, AppError> {
         crate::auth::register_domain_guard(&connection)?;
+        crate::sources::search::install_budget_handler(&mut connection)?;
         register_auth_clock(
             &connection,
             Arc::new(|| {
@@ -415,7 +416,7 @@ mod migration_tests {
             resume: resume_rx,
         });
         let worker = std::thread::spawn(move || {
-            let connection = Connection::open(path).unwrap();
+            let mut connection = Connection::open(path).unwrap();
             connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();
             connection
                 .busy_handler(Some(wait_for_migration_commit))
