@@ -209,7 +209,14 @@ interpretations, and an interpretation restored after a reminder answers exactly
   8 of 10, row right 6 of 10; 6.7-10.0 s warm, 71 s cold. rm-09 (a number in the cited entry)
   cites the right row but proposes no option; rm-10 cites the wrong row (the one whose entry
   has the decoy 40) and proposes no option. So on the CPU the model gives hints from entry
-  text but never turned an entry number into an option. GPU run pending.
+  text but never turned an entry number into an option. GPU (2026-11-20, Qwen3.5-9B Q4_K_M,
+  b12110 Vulkan, RX 6650 XT, fan on manual, Mimik's flags, a CPU build running alongside):
+  relevance right 8 of 10, row right 7 of 10; 5.3-10.2 s warm (1,373 prefix tokens cached),
+  14.4 s cold. rm-09 cites the right row and proposes hp + 6, the number from the cited entry;
+  rm-10 cites the right row and proposes hp + max_hp (not the decoy 40, but not the entry's
+  number either). The GPU model offers an option on 9 of 10 cases, several of them wrong
+  (rm-01 refills lantern oil, rm-08 adds 100 to presence): the confirmation step is what keeps
+  them off the sheet.
 
 ## Prompt cache with the checkpoint cap and GPU start-up, GPU path (3c-1b, 2026-11-18)
 
