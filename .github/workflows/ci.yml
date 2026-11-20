@@ -24,6 +24,8 @@ jobs:
         run: |
           docker run --rm --mount "type=bind,src=$PWD,dst=/workspace" -w /workspace \
             mimik-ci python tools/llama_runtime.py fetch --out target/llama-fetch
+          # The container ran as root and left 0700 folders; the upload runs as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" target/llama-fetch
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: llama-fetch
@@ -81,6 +83,8 @@ jobs:
               cp target/debug/examples/fake_llama_server target/confinement/fake_llama_server
               cargo build --locked --features dev-endpoint --bin mimik --target-dir target/dev-endpoint
             '
+          # The container ran as root; the uploads below run as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" target
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-release
