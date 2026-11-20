@@ -537,12 +537,56 @@ fn maximum_render_transport_and_one_byte_more() {
     );
 }
 
+/// The longest text each float can take (ryu): a sign, 17 digits and a three-digit exponent.
+/// Validation would refuse these values; the wire budget must still hold for the worst text.
+fn worst_case_page(n: u32) -> Page {
+    let x: f64 = "-1.2345678901234567e-300".parse().unwrap();
+    Page {
+        n,
+        width: x,
+        height: x,
+        rotate: 270,
+        user_unit: x,
+        transform: [x; 6],
+        visible: [x; 4],
+        tagged: false,
+    }
+}
+
+#[test]
+fn max_pages_worst_case_records_fit_the_inspection_frame() {
+    assert_eq!(MAX_PAGES, 20_000);
+    let payload = json(&worst_case_page(MAX_PAGES)).unwrap();
+    let mut line = json(&Header::Page {
+        length: payload.len(),
+    })
+    .unwrap();
+    line.push(b'\n');
+    // Every float is the longest possible text, so this bounds any page of an honest worker.
+    assert!(line.len() + payload.len() <= 2048);
+    let mut wire = Vec::new();
+    let mut writer = RecordWriter::new(&mut wire, Operation::Inspect, 0);
+    writer
+        .inspection_document(&Document {
+            pages: MAX_PAGES,
+            encrypted: true,
+            mupdf: "x".repeat(32),
+        })
+        .unwrap();
+    for n in 1..=MAX_PAGES {
+        writer.inspection_page(&worst_case_page(n)).unwrap();
+    }
+    writer.finish().unwrap();
+    assert!(wire.len() <= INSPECT_LIMIT, "{} bytes", wire.len());
+}
+
 #[test]
 fn maximum_inspect_transport_and_one_byte_more() {
-    let header = Header::Page { length: 2000 };
+    let worst = json(&worst_case_page(MAX_PAGES)).unwrap().len();
+    let header = Header::Page { length: worst };
     let mut sequence = Sequence(std::collections::VecDeque::new());
     let document = serde_json::to_vec(&Document {
-        pages: 2000,
+        pages: MAX_PAGES,
         encrypted: false,
         mupdf: "1.27.2".into(),
     })
@@ -553,20 +597,18 @@ fn maximum_inspect_transport_and_one_byte_more() {
         },
         &document,
     ))));
-    for n in 1..=2000 {
+    for n in 1..=MAX_PAGES {
         let mut payload = serde_json::to_vec(&page(n)).unwrap();
-        payload.resize(2000, b' ');
-        let mut prefix = serde_json::to_vec(&header).unwrap();
-        prefix.resize(47, b' ');
-        prefix.push(b'\n');
-        prefix.extend(payload);
-        sequence.0.push_back(Box::new(Cursor::new(prefix)));
+        payload.resize(worst, b' ');
+        sequence
+            .0
+            .push_back(Box::new(Cursor::new(frame(header, &payload))));
     }
     let done = serde_json::to_vec(&Done {
         operation: Operation::Inspect,
         counts: Counts {
             document: 1,
-            page: 2000,
+            page: MAX_PAGES,
             ..Counts::default()
         },
     })
@@ -575,7 +617,11 @@ fn maximum_inspect_transport_and_one_byte_more() {
         Header::Done { length: done.len() },
         &done,
     ))));
-    assert_eq!(read_inspection(sequence).unwrap().pages.len(), 2000);
+    assert_eq!(
+        read_inspection(sequence).unwrap().pages.len(),
+        MAX_PAGES as usize
+    );
+    let header = Header::Page { length: 2000 };
     assert!(
         Frames {
             terminal: None,
@@ -584,6 +630,28 @@ fn maximum_inspect_transport_and_one_byte_more() {
         }
         .read()
         .is_err()
+    );
+}
+
+#[test]
+fn one_page_over_the_maximum_is_refused_on_the_wire_and_in_geometry() {
+    let document = serde_json::to_vec(&Document {
+        pages: MAX_PAGES + 1,
+        encrypted: false,
+        mupdf: "1.27.2".into(),
+    })
+    .unwrap();
+    let wire = frame(
+        Header::Document {
+            length: document.len(),
+        },
+        &document,
+    );
+    assert_eq!(read_inspection(&wire[..]).unwrap_err(), Error::TooManyPages);
+    assert!(geometry::validate_page(&page(MAX_PAGES)).is_ok());
+    assert_eq!(
+        geometry::validate_page(&page(MAX_PAGES + 1)),
+        Err(Error::Unsupported)
     );
 }
 
@@ -767,4 +835,71 @@ fn words_frames_have_their_own_bound_and_budget() {
         .len(),
         WORDS_LIMIT
     );
+}
+
+// The wall deadline is extended by progress, not by the claimed page count.
+fn inspection_wire(claimed: u32, sent: u32) -> Vec<u8> {
+    let document = serde_json::to_vec(&Document {
+        pages: claimed,
+        encrypted: false,
+        mupdf: "1.27.2".into(),
+    })
+    .unwrap();
+    let mut wire = frame(
+        Header::Document {
+            length: document.len(),
+        },
+        &document,
+    );
+    for n in 1..=sent {
+        let payload = serde_json::to_vec(&page(n)).unwrap();
+        wire.extend(frame(
+            Header::Page {
+                length: payload.len(),
+            },
+            &payload,
+        ));
+    }
+    wire
+}
+
+fn observed_pages(wire: &[u8]) -> (Result<Inspection, Error>, u32) {
+    let seen = std::cell::Cell::new(0);
+    let (result, _) = read_inspection_observed(wire, || seen.set(seen.get() + 1));
+    (result, seen.get())
+}
+
+#[test]
+fn an_invalid_document_frame_grants_no_time() {
+    for claimed in [0, MAX_PAGES + 1] {
+        let (result, seen) = observed_pages(&inspection_wire(claimed, 0));
+        assert!(result.is_err(), "{claimed}");
+        assert_eq!(seen, 0, "{claimed}");
+    }
+    // A valid claim with no pages behind it grants nothing either.
+    let (result, seen) = observed_pages(&inspection_wire(MAX_PAGES, 0));
+    assert!(result.is_err());
+    assert_eq!(seen, 0);
+}
+
+#[test]
+fn time_is_granted_only_as_validated_pages_arrive() {
+    // Claims 5 pages, delivers 2 and stops: two grants, then the stream fails.
+    let (result, seen) = observed_pages(&inspection_wire(5, 2));
+    assert!(result.is_err());
+    assert_eq!(seen, 2);
+    // A page the parent refuses is not granted.
+    let mut wire = inspection_wire(3, 1);
+    let mut bad = page(2);
+    bad.width = 0.0;
+    let payload = serde_json::to_vec(&bad).unwrap();
+    wire.extend(frame(
+        Header::Page {
+            length: payload.len(),
+        },
+        &payload,
+    ));
+    let (result, seen) = observed_pages(&wire);
+    assert!(result.is_err());
+    assert_eq!(seen, 1);
 }

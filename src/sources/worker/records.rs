@@ -16,6 +16,10 @@ pub const WORDS_LIMIT: usize = 8 * 1024 * 1024;
 pub const MAX_WORDS: usize = 20_000;
 pub const MAX_WORD_BYTES: usize = 256;
 pub const INSPECT_LIMIT: usize = 9 * 1024 * 1024;
+/// Pages one inspection frame holds: the largest worst-case page record (about 450 bytes with
+/// its header line) times this count, plus the document and done frames, fits `INSPECT_LIMIT`
+/// (asserted by a test). The page count is bounded by the frame, nothing else.
+pub const MAX_PAGES: u32 = 20_000;
 const SMALL_LIMIT: usize = 4096;
 // Even JSON's worst-case six-byte escapes fit a complete 4 KiB stats frame.
 pub(super) const FONT_LIMIT: usize = 8;
@@ -456,22 +460,35 @@ pub fn read_inspection<R: Read>(input: R) -> Result<Inspection, Error> {
 pub(super) fn read_inspection_tracked<R: Read>(
     input: R,
 ) -> (Result<Inspection, Error>, Option<Error>) {
+    read_inspection_observed(input, || {})
+}
+
+/// As [`read_inspection_tracked`], calling `on_page` after each page frame has been received
+/// and validated (never for the document frame, and never for a page the parent refuses), so
+/// a caller can grant time for progress actually made rather than for a claimed page count.
+pub(super) fn read_inspection_observed<R: Read>(
+    input: R,
+    on_page: impl FnMut(),
+) -> (Result<Inspection, Error>, Option<Error>) {
     let mut frames = Frames {
         input: BufReader::new(input),
         remaining: INSPECT_LIMIT,
         terminal: None,
     };
-    let result = inspection_frames(&mut frames);
+    let result = inspection_frames(&mut frames, on_page);
     (result, frames.terminal)
 }
 
-fn inspection_frames<R: Read>(frames: &mut Frames<R>) -> Result<Inspection, Error> {
+fn inspection_frames<R: Read>(
+    frames: &mut Frames<R>,
+    mut on_page: impl FnMut(),
+) -> Result<Inspection, Error> {
     let (header, bytes) = frames.read()?;
     if !matches!(header, Header::Document { .. }) {
         return Err(Error::Unreadable);
     }
     let document: Document = parse(&bytes)?;
-    if document.pages > 2000 {
+    if document.pages > MAX_PAGES {
         return Err(Error::TooManyPages);
     }
     if document.pages == 0 || document.mupdf.is_empty() || document.mupdf.len() > 32 {
@@ -489,6 +506,7 @@ fn inspection_frames<R: Read>(frames: &mut Frames<R>) -> Result<Inspection, Erro
         }
         geometry::validate_page(&page)?;
         pages.push(page);
+        on_page();
     }
     frames.done(
         Operation::Inspect,
@@ -736,8 +754,19 @@ impl<W: Write> RecordWriter<W> {
     }
     /// # Errors
     /// Refuses a record over a wire budget or an output failure.
+    #[cfg(test)]
     pub fn inspection(&mut self, inspection: &Inspection) -> Result<(), Error> {
-        let bytes = json(&inspection.document)?;
+        self.inspection_document(&inspection.document)?;
+        for page in &inspection.pages {
+            self.inspection_page(page)?;
+        }
+        Ok(())
+    }
+    /// The first inspection frame; the parent scales its deadline from its page count.
+    /// # Errors
+    /// Refuses a record over a wire budget or an output failure.
+    pub fn inspection_document(&mut self, document: &Document) -> Result<(), Error> {
+        let bytes = json(document)?;
         self.frame(
             Header::Document {
                 length: bytes.len(),
@@ -745,16 +774,20 @@ impl<W: Write> RecordWriter<W> {
             &bytes,
         )?;
         self.counts.document += 1;
-        for page in &inspection.pages {
-            let bytes = json(page)?;
-            self.frame(
-                Header::Page {
-                    length: bytes.len(),
-                },
-                &bytes,
-            )?;
-            self.counts.page += 1;
-        }
+        Ok(())
+    }
+    /// One page frame, after the document frame.
+    /// # Errors
+    /// Refuses a record over a wire budget or an output failure.
+    pub fn inspection_page(&mut self, page: &Page) -> Result<(), Error> {
+        let bytes = json(page)?;
+        self.frame(
+            Header::Page {
+                length: bytes.len(),
+            },
+            &bytes,
+        )?;
+        self.counts.page += 1;
         Ok(())
     }
     /// # Errors

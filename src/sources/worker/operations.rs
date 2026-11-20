@@ -1,17 +1,29 @@
+#[cfg(test)]
+use super::Inspection;
 use super::{
-    Error, Inspection, Page, RenderedPage, geometry, pixel_size,
-    records::{self, Document, PageWords, Stats, TextLine, Word},
+    Error, Page, RenderedPage, geometry, pixel_size,
+    records::{self, Document, MAX_PAGES, PageWords, Stats, TextLine, Word},
 };
 use mupdf::{
     Colorspace, Device, Matrix, Pixmap, TextCharFlags, TextPageFlags,
     pdf::{PdfDocument, PdfObject},
 };
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 /// Input is opened only in the worker; callers must not use this API in the server.
+///
+/// The file is opened by path and `MuPDF`'s stdio stream seeks and reads it on demand: the PDF is
+/// never loaded into a buffer, so its size adds no address space and no limit of its own
+/// (disk bounds it). Per-object decompression, the glyph cache and rasters stay inside the
+/// worker's `RLIMIT_AS`.
 #[derive(Clone, Copy)]
 pub(super) enum Input<'a> {
-    Bytes(&'a [u8]),
+    Path(&'a Path),
 }
 
 fn mupdf_error(error: mupdf::Error) -> Error {
@@ -29,33 +41,75 @@ impl From<mupdf::Error> for Error {
     }
 }
 
-fn open(input: Input<'_>) -> Result<PdfDocument, Error> {
-    let Input::Bytes(bytes) = input;
-    if bytes.len() > 128 * 1024 * 1024 {
-        return Err(Error::TooLarge);
+/// Every failure while opening (the file, the password check, the catalogue, the page count)
+/// goes through here. After the open, the file is still read lazily for the whole run: a
+/// system or I/O error from such a read maps to `TooLarge` via `From<mupdf::Error>`. A file
+/// changed under a running worker is the parent's `document_changed` case (SRC-15 slice 3).
+///
+/// A failed open is not a size problem: `FZ_ERROR_SYSTEM` covers a syscall failure on the
+/// file as much as memory, so only an unsupported feature keeps its own class here.
+/// `TooLarge` is for allocation and limit errors after the document is open.
+pub(super) fn open_error(error: mupdf::Error) -> Error {
+    match error {
+        mupdf::Error::MuPdf(e) if e.code == 6 => Error::Unsupported,
+        _ => Error::Unreadable,
     }
+}
+
+const MARKER_WINDOW: u64 = 1024;
+
+/// Whether `%PDF-` starts within the first 1,024 bytes and `%%EOF` lies in the last 1,024.
+/// Reads only those two windows with seek and read.
+pub(super) fn has_pdf_markers(path: &Path) -> Result<bool, Error> {
+    let mut file = File::open(path).map_err(|_| Error::Unreadable)?;
+    let length = file.metadata().map_err(|_| Error::Unreadable)?.len();
+    let mut head = Vec::new();
+    (&mut file)
+        .take(MARKER_WINDOW + 4)
+        .read_to_end(&mut head)
+        .map_err(|_| Error::Unreadable)?;
+    let mut tail = Vec::new();
+    file.seek(SeekFrom::Start(length.saturating_sub(MARKER_WINDOW)))
+        .and_then(|_| file.take(MARKER_WINDOW).read_to_end(&mut tail))
+        .map_err(|_| Error::Unreadable)?;
+    Ok(head.windows(5).take(1024).any(|w| w == b"%PDF-") && tail.windows(5).any(|w| w == b"%%EOF"))
+}
+
+/// Open the bound input.
+///
+/// Content recognition: `Document::open` scores every registered handler on the file's name
+/// and content, and the gzip handler decompresses the whole stream into memory. The PDF
+/// handler wins here for two reasons that must both hold: the path always ends in `.pdf`
+/// (`/in/document.pdf`, a name the handler scores 200 for) and `%PDF-` lies in the first
+/// 4 KiB, which the 1,024-byte check below guarantees. A gzip stream whose FNAME header holds
+/// `%PDF-` and whose tail holds `%%EOF` passes the marker check, loses to the PDF handler,
+/// and fails to parse as a PDF; it is never decompressed (tested). PDF code opens no other
+/// file, and Landlock confines reads to `/in`.
+///
+/// The marker check and `MuPDF` open the same bound file; the file is read-only.
+fn open(input: Input<'_>) -> Result<PdfDocument, Error> {
+    let Input::Path(path) = input;
     // MuPDF repairs truncated files. The worker contract rejects a missing final EOF marker.
-    if !bytes.windows(5).take(1024).any(|w| w == b"%PDF-")
-        || !bytes[bytes.len().saturating_sub(1024)..]
-            .windows(5)
-            .any(|w| w == b"%%EOF")
-    {
+    if !has_pdf_markers(path)? {
         return Err(Error::Unreadable);
     }
-    let document = PdfDocument::from_bytes(bytes)?;
-    if document.needs_password()? {
+    let document = PdfDocument::open(path).map_err(open_error)?;
+    if document.needs_password().map_err(open_error)? {
         return Err(Error::PasswordProtected);
     }
     // Check the advertised root count before MuPDF tries to reconcile a damaged tree.
-    if let Some(tree) = document.catalog()?.get_dict("Pages")?
-        && let Some(count) = tree.get_dict("Count")?
-        && count.is_number()?
-        && count.as_float()? > 2000.0
+    if let Some(tree) = document
+        .catalog()
+        .and_then(|catalog| catalog.get_dict("Pages"))
+        .map_err(open_error)?
+        && let Some(count) = tree.get_dict("Count").map_err(open_error)?
+        && count.is_number().map_err(open_error)?
+        && f64::from(count.as_float().map_err(open_error)?) > f64::from(MAX_PAGES)
     {
         return Err(Error::TooManyPages);
     }
-    let count = document.page_count()?;
-    if count > 2000 {
+    let count = document.page_count().map_err(open_error)?;
+    if u32::try_from(count).is_ok_and(|count| count > MAX_PAGES) {
         return Err(Error::TooManyPages);
     }
     if count < 1 {
@@ -155,27 +209,60 @@ fn page_info(document: &PdfDocument, n: u32) -> Result<Page, Error> {
     Ok(page)
 }
 
-fn inspection(document: &PdfDocument) -> Result<Inspection, Error> {
+/// Emit the document facts first and then each page as it is read, so the parent knows the
+/// page count (and can scale its deadline) before the page loop runs.
+fn inspection_each(
+    document: &PdfDocument,
+    mut head: impl FnMut(&Document) -> Result<(), Error>,
+    mut emit: impl FnMut(Page) -> Result<(), Error>,
+) -> Result<(), Error> {
     let count = u32::try_from(document.page_count()?).map_err(|_| Error::Unreadable)?;
-    let pages = (1..=count)
-        .map(|n| page_info(document, n))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(Inspection {
-        document: Document {
-            pages: count,
-            encrypted: document.trailer()?.get_dict("Encrypt")?.is_some(),
-            mupdf: super::MUPDF_VERSION.to_owned(),
-        },
-        pages,
-    })
+    head(&Document {
+        pages: count,
+        encrypted: document.trailer()?.get_dict("Encrypt")?.is_some(),
+        mupdf: super::MUPDF_VERSION.to_owned(),
+    })?;
+    for n in 1..=count {
+        emit(page_info(document, n)?)?;
+    }
+    Ok(())
+}
+
+/// Inspect page dictionaries without interpreting content streams, handing over the document
+/// facts before the first page.
+///
+/// # Errors
+/// Returns only bounded worker reasons for malformed or unsupported input.
+pub(super) fn inspect_each(
+    input: Input<'_>,
+    head: impl FnMut(&Document) -> Result<(), Error>,
+    emit: impl FnMut(Page) -> Result<(), Error>,
+) -> Result<(), Error> {
+    inspection_each(&open(input)?, head, emit)
 }
 
 /// Inspect page dictionaries without interpreting content streams.
 ///
 /// # Errors
 /// Returns only bounded worker reasons for malformed or unsupported input.
+#[cfg(test)]
 pub(super) fn inspect(input: Input<'_>) -> Result<Inspection, Error> {
-    inspection(&open(input)?)
+    let (mut document, mut pages) = (None, Vec::new());
+    inspect_each(
+        input,
+        |head| {
+            document = Some(head.clone());
+            Ok(())
+        },
+        |page| {
+            pages.push(page);
+            Ok(())
+        },
+    )?;
+    Ok(Inspection {
+        document: document.ok_or(Error::Unreadable)?,
+        pages,
+    })
 }
 
 // Only validated bounded geometry crosses the f64 -> MuPDF f32 boundary.

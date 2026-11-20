@@ -73,7 +73,9 @@ fn password_and_page_limit_have_typed_terminal_reasons() {
                     .unwrap()
                     .as_reference()
                     .unwrap();
-                pdf.get_dictionary_mut(pages).unwrap().set("Count", 2001);
+                pdf.get_dictionary_mut(pages)
+                    .unwrap()
+                    .set("Count", i64::from(records::MAX_PAGES) + 1);
             }
             let output = run_pdf(&mut pdf, operation);
             assert_eq!(output.status.code(), Some(reason.exit_code()));

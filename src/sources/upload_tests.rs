@@ -786,11 +786,24 @@ struct Fake {
     inspect_failure: AtomicBool,
     panic: AtomicBool,
     large: AtomicBool,
+    /// When nonzero, inspection reports this many pages (a stand-in for a very large PDF).
+    inspected_pages: std::sync::atomic::AtomicU32,
 }
 impl Worker for Fake {
     fn inspect(&self, _: &std::path::Path, _: &Cancel) -> Result<Inspection, Reason> {
         if self.inspect_failure.load(Ordering::Acquire) {
             return Err(worker::Error::Unsupported.into());
+        }
+        let count = self.inspected_pages.load(Ordering::Acquire);
+        if count > 0 {
+            return Ok(Inspection {
+                document: worker::records::Document {
+                    pages: count,
+                    encrypted: false,
+                    mupdf: "1.27.2".into(),
+                },
+                pages: (1..=count).map(page).collect(),
+            });
         }
         Ok(inspection())
     }
@@ -944,6 +957,22 @@ fn failed_inspection_can_be_inspected_again_without_losing_the_pdf() {
     wait(&m);
     assert_eq!(m.read(ID).unwrap().state, "inspected");
     assert_eq!(m.read(ID).unwrap().job.state, "succeeded");
+}
+
+// Temporary (SRC-15 slice 1): migration 026 still caps `pdf_page` at 2,000 and slice 2 raises it.
+// Until then a longer document must fail as `too_many_pages`, not as `unreadable` after the
+// update is refused by the CHECK. Slice 2 replaces this test with 20,000-page acceptance.
+#[test]
+fn a_document_over_the_stored_page_cap_fails_as_too_many_pages() {
+    let (_dir, m, o, f) = fixture();
+    f.inspected_pages.store(2001, Ordering::Release);
+    seed_queued(&m, &o, ID, "inspect");
+    m.launch(ID).unwrap();
+    wait(&m);
+    let u = m.read(ID).unwrap();
+    assert_eq!(u.state, "failed");
+    assert_eq!(u.job.reason.as_deref(), Some("too_many_pages"));
+    assert!(u.inspection.is_none());
 }
 
 #[test]

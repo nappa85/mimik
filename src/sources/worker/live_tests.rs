@@ -12,6 +12,7 @@ use std::{
 const HELPER: &str = "sources::worker::live_tests::worker_helper";
 const PARENT: &str = "sources::worker::live_tests::parent_helper";
 mod corpus;
+mod large_inputs;
 mod local_pdfs;
 
 fn production_options() -> Options {

@@ -17,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -80,8 +80,29 @@ pub fn inspect_cancellable(path: &Path, cancel: &Cancel) -> Result<Inspection, R
     super::availability::require()?;
     let spec = spec(records::Operation::Inspect, vec![]);
     execute(path, &spec, cancel, &Options::production()?, |pipe| {
-        records::read_inspection_tracked(pipe)
+        let extension = pipe.wall_extension();
+        records::read_inspection_observed(pipe, || {
+            extension.fetch_add(INSPECT_WALL_PER_PAGE_MS, Ordering::AcqRel);
+        })
     })
+}
+
+// PROVISIONAL (SRC-15 slice 1): the inspection budget scales with the input; slice 6 fixes the
+// constants from cold-disk measurements. The CPU limit must be set before the page count is
+// known (the first frame carries it) and `runner::worker_limits` refuses more than 200 s, so
+// it is sized from the file size up to that ceiling. The wall deadline grows with progress:
+// each page frame the parent has received and validated adds `INSPECT_WALL_PER_PAGE_MS`
+// (never a lump sum on the claimed count, which a compromised worker could inflate), and the
+// deadline remains the enforcing bound.
+const INSPECT_WALL_BASE: Duration = Duration::from_secs(30);
+const INSPECT_WALL_PER_PAGE_MS: u64 = 100;
+const INSPECT_CPU_BASE: u64 = 20;
+const INSPECT_CPU_CEILING: u64 = 200;
+/// One more CPU second per this many bytes of PDF.
+const INSPECT_CPU_BYTES: u64 = 32 << 20;
+
+fn inspect_cpu_seconds(size: u64) -> u64 {
+    (INSPECT_CPU_BASE + size / INSPECT_CPU_BYTES).min(INSPECT_CPU_CEILING)
 }
 
 /// Yield individually validated pages with bounded memory on a dedicated reader thread.
@@ -557,6 +578,14 @@ fn prepare(
 pub(super) struct Output {
     pipe: Interruptible<std::process::ChildStdout>,
     bytes: Arc<AtomicUsize>,
+    /// Milliseconds granted to the wall deadline for progress (inspection only).
+    extension: Arc<AtomicU64>,
+}
+impl Output {
+    /// The handle through which the reader extends the wall deadline.
+    pub(super) fn wall_extension(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.extension)
+    }
 }
 
 // Even an unkillable pin must not turn cleanup into an unbounded reader join.
@@ -628,6 +657,42 @@ fn read_output<T>(
     (result, terminal, empty)
 }
 
+/// Wall deadline and CPU seconds of one run: an explicit option wins, otherwise inspection
+/// uses its base wall and a file-size CPU budget, and other operations 30 s and 25 s a page.
+fn budgets(spec: &Spec, options: &Options, size: u64) -> Result<(Duration, u64), Reason> {
+    let pages = u64::try_from(spec.pages.len()).map_err(|_| Error::Unsupported)?;
+    let inspecting = spec.operation == records::Operation::Inspect;
+    let wall = options.wall.unwrap_or(if inspecting {
+        INSPECT_WALL_BASE
+    } else {
+        Duration::from_secs(30 * pages)
+    });
+    let cpu_seconds = options.cpu.unwrap_or(if inspecting {
+        inspect_cpu_seconds(size)
+    } else {
+        25 * pages
+    });
+    Ok((wall, cpu_seconds))
+}
+
+/// The runner's request for one worker: descriptors 4, 12 and 13 carry the status, marker and
+/// acknowledgement pipes.
+fn runner_spec(plan: sandbox::Profile, cpu_seconds: u64) -> runner::Spec {
+    runner::Spec {
+        parent: std::process::id(),
+        keep: vec![4, 12, 13],
+        env: vec![],
+        chdir: None,
+        exec: Exec::PdfWorker {
+            plan: Box::new(plan),
+            status: 4,
+            marker: 12,
+            ack: 13,
+            cpu_seconds,
+        },
+    }
+}
+
 pub(super) fn execute<T: Send>(
     path: &Path,
     spec: &Spec,
@@ -638,17 +703,9 @@ pub(super) fn execute<T: Send>(
     if cancel.cancelled() {
         return Err(Reason::Cancelled);
     }
-    let (_root, _input, _exe, plan) = prepare(path, spec, options)?;
-    let pages = u64::try_from(spec.pages.len()).map_err(|_| Error::Unsupported)?;
-    let inspecting = spec.operation == records::Operation::Inspect;
-    let wall = options.wall.unwrap_or(Duration::from_secs(if inspecting {
-        30
-    } else {
-        30 * pages
-    }));
-    let cpu_seconds = options
-        .cpu
-        .unwrap_or(if inspecting { 20 } else { 25 * pages });
+    let (_root, input, _exe, plan) = prepare(path, spec, options)?;
+    let size = input.metadata().map_or(0, |meta| meta.len());
+    let (wall, cpu_seconds) = budgets(spec, options, size)?;
     let pipe = || {
         rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(|_| unavailable("transport pipe"))
@@ -670,19 +727,7 @@ pub(super) fn execute<T: Send>(
             target: 13,
         },
     ];
-    let runner_spec = runner::Spec {
-        parent: std::process::id(),
-        keep: vec![4, 12, 13],
-        env: vec![],
-        chdir: None,
-        exec: Exec::PdfWorker {
-            plan: Box::new(plan),
-            status: 4,
-            marker: 12,
-            ack: 13,
-            cpu_seconds,
-        },
-    };
+    let runner_spec = runner_spec(plan, cpu_seconds);
     let started = Instant::now();
     let mut child = runner::launch(&options.runner, &runner_spec, &handover)
         .map_err(|_| unavailable("runner launch"))?;
@@ -702,6 +747,15 @@ pub(super) fn execute<T: Send>(
     let stdout = Output {
         pipe: Interruptible::new(stdout, &stop),
         bytes: Arc::new(AtomicUsize::new(0)),
+        extension: Arc::new(AtomicU64::new(0)),
+    };
+    let extension = stdout.wall_extension();
+    // An explicit wall (tests) is exact: progress never extends it.
+    let no_extension = AtomicU64::new(0);
+    let granted: &AtomicU64 = if options.wall.is_some() {
+        &no_extension
+    } else {
+        &extension
     };
     let abort = AtomicBool::new(false);
     let stderr = Interruptible::new(stderr, &stop);
@@ -716,7 +770,7 @@ pub(super) fn execute<T: Send>(
         });
         let abort_ref = &abort;
         let reader = scope.spawn(move || read_output(stdout, read, abort_ref));
-        let outcome = watch(tree, &rx, ack, started + wall, cancel, &abort);
+        let outcome = watch(tree, &rx, ack, started + wall, granted, cancel, &abort);
         options.observe(&outcome);
         let Outcome { exit, parent, .. } = outcome;
         if matches!(&parent, Some(Reason::Unavailable(reason)) if reason == "process cleanup timed out")
@@ -803,6 +857,7 @@ fn watch(
     report: &mpsc::Receiver<Option<Started>>,
     ack: OwnedFd,
     deadline: Instant,
+    extension: &AtomicU64,
     cancel: &Cancel,
     abort: &AtomicBool,
 ) -> Outcome {
@@ -834,7 +889,9 @@ fn watch(
         if tree.pins[0].alive() {
             if cancel.cancelled() {
                 parent = Some(Reason::Cancelled);
-            } else if Instant::now() >= deadline {
+            } else if Instant::now()
+                >= deadline + Duration::from_millis(extension.load(Ordering::Acquire))
+            {
                 parent = Some(Error::Timeout.into());
             }
             let malformed = abort.load(Ordering::Acquire)
@@ -962,6 +1019,7 @@ mod tests {
                 &rx,
                 ack,
                 Instant::now() + Duration::from_secs(2),
+                &AtomicU64::new(0),
                 &Cancel::default(),
                 &AtomicBool::new(false),
             );
@@ -970,6 +1028,52 @@ mod tests {
                 Err(Reason::Unavailable(expected.into()))
             );
         }
+    }
+    #[test]
+    fn inspection_budget_scales_with_the_input_within_the_runner_ceiling() {
+        assert_eq!(inspect_cpu_seconds(0), 20);
+        assert_eq!(inspect_cpu_seconds(64 << 20), 22);
+        assert_eq!(inspect_cpu_seconds(u64::MAX), 200);
+    }
+    #[test]
+    fn validated_pages_extend_the_wall_deadline_and_nothing_else_does() {
+        let run = |extension: u64, cancel_after: Option<Duration>| {
+            let child = std::process::Command::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .unwrap();
+            let pin = Watched::open(i32::try_from(child.id()).unwrap()).unwrap();
+            let tree = Tree::new(child, pin);
+            let (_tx, rx) = mpsc::channel();
+            let (_read, ack) = rustix::pipe::pipe().unwrap();
+            let cancel = Cancel::default();
+            let canceller = cancel.clone();
+            let stopper = cancel_after.map(|after| {
+                std::thread::spawn(move || {
+                    std::thread::sleep(after);
+                    canceller.cancel();
+                })
+            });
+            let Outcome { parent, .. } = watch(
+                tree,
+                &rx,
+                ack,
+                Instant::now() + Duration::from_millis(200),
+                &AtomicU64::new(extension),
+                &cancel,
+                &AtomicBool::new(false),
+            );
+            if let Some(stopper) = stopper {
+                stopper.join().unwrap();
+            }
+            parent
+        };
+        assert_eq!(run(0, None), Some(Error::Timeout.into()));
+        // The deadline is 200 ms; with 60 s added, a cancel at 700 ms must win.
+        assert_eq!(
+            run(60_000, Some(Duration::from_millis(700))),
+            Some(Reason::Cancelled)
+        );
     }
     #[test]
     fn invalid_render_is_rejected_before_availability_probe() {

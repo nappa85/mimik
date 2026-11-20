@@ -69,7 +69,7 @@ pub(super) fn transformed_box(visible: [f64; 4], m: [f64; 6]) -> [f64; 4] {
 pub(super) fn validate_page(page: &Page) -> Result<(), Error> {
     let v = page.visible;
     if page.n == 0
-        || page.n > 2000
+        || page.n > super::records::MAX_PAGES
         || !(1.0..=4000.0).contains(&page.width)
         || !(1.0..=4000.0).contains(&page.height)
         || !(0.1..=10.0).contains(&page.user_unit)

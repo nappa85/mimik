@@ -1033,6 +1033,12 @@ impl Uploads {
                 if cancelled.load(Ordering::Acquire) {
                     return Err(AppError::Invalid("cancelled"));
                 }
+                // TEMPORARY (SRC-15 slice 1): the worker accepts 20,000 pages, but migration 026
+                // still limits `pdf_page` and the inspection to 2,000. Slice 2 raises the CHECKs
+                // and removes this guard.
+                if inspection.document.pages > 2000 {
+                    return Err(AppError::Invalid("too_many_pages"));
+                }
                 let encoded = json(&inspection)?;
                 if encoded.len() > worker::records::INSPECT_LIMIT {
                     return Err(AppError::Invalid("too_large"));
