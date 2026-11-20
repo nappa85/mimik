@@ -255,6 +255,20 @@ impl Progress {
         }
     }
 
+    /// The current step is `phase` or comes after it in the list (false when the list lacks it).
+    pub(crate) fn reached(&self, phase: Phase) -> bool {
+        let phases = self.kind.phases();
+        let position = |wanted: Phase| phases.iter().position(|p| *p == wanted);
+        position(phase).is_some_and(|at| position(self.phase).is_some_and(|now| now >= at))
+    }
+
+    /// This run takes `phase` after all (a skip that no longer applies).
+    pub(crate) fn unskip(&mut self, phase: Phase) {
+        if self.skipped == Some(phase) {
+            self.skipped = None;
+        }
+    }
+
     /// This step, counted from 1, in its list.
     pub(crate) fn step(&self) -> usize {
         let phases = self.kind.phases();

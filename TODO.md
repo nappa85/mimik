@@ -159,9 +159,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   host.
 - **Reminders that fit (3c-1c):** live checks and the fake-model browser reminder
   scenario passed 2026-11-19 (`docs/results.md`). Qwen3.5 on the GPU reuses only 1,318 of
-  1,805 prefix tokens for an interpretation right after another (about 2.7 s). Review Minor: the progress skip of the reminder prime is never cleared
-  by a later update (a CPU-to-GPU retry or reminders turned on during a CPU start show a total
-  one too low until the prime step); add `Progress::unskip` in `skip_idle_prime`.
+  1,805 prefix tokens for an interpretation right after another (about 2.7 s). A choice changed during a CPU start reaches the step total only at the manager's next update
+  (the choice sends no signal).
 - Bundles (3b review, Minor): time the bundled worst-page fixture (`list_tests.rs`): each bundled
   Undo offer runs `changed_members` (about 32,000 `locate` calls on the worst page); compute once
   per bundle if slow. The module's multi-unit redraw (`settleApplied`: drafted, held and in-flight

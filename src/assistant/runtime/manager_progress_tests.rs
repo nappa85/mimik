@@ -761,3 +761,94 @@ async fn a_trial_cancelled_while_hashing_has_no_stop_step_and_a_ran_candidate_do
     ready_state(&handle).await;
     handle.shutdown().await;
 }
+
+/// A CPU start with reminders not on skips the reminder prime; when the start moves to the GPU
+/// path (a retry) or reminders are turned on before the prime, the step counts again (3c-1c
+/// review).
+#[test]
+fn a_skipped_reminder_prime_counts_again_when_the_start_moves_to_the_gpu_or_reminders_turn_on() {
+    let setup = ModelSetup {
+        active: Model::test("granite-4.2-3b-Q4_K_M.gguf", DEFAULT_MODEL_SHA256, 1024),
+        previous: None,
+        records: None,
+        from_owner_setting: false,
+        device_default: false,
+        older_prompt: OlderPrompt::default(),
+    };
+    let mut status = Status::new(Path::Cpu, &setup);
+    let full = progress_of(&status).unwrap().steps();
+    status.skip_idle_prime(None);
+    assert_eq!(progress_of(&status).unwrap().steps(), full - 1);
+    status.path = Path::Gpu;
+    status.skip_idle_prime(None);
+    assert_eq!(
+        progress_of(&status).unwrap().steps(),
+        full,
+        "the GPU path primes reminders"
+    );
+    status.path = Path::Cpu;
+    status.skip_idle_prime(Some(false));
+    assert_eq!(progress_of(&status).unwrap().steps(), full - 1);
+    status.skip_idle_prime(Some(true));
+    assert_eq!(
+        progress_of(&status).unwrap().steps(),
+        full,
+        "reminders turned on"
+    );
+}
+
+/// From the reminder step on, the attempt's own decision stands: a GPU start whose plan skipped
+/// the prime keeps the shorter list at the next update, and a CPU start already priming
+/// reminders does not lose the step it is on (3c-1c review).
+#[test]
+fn from_the_reminder_step_on_the_attempts_own_skip_decision_stands() {
+    let setup = ModelSetup {
+        active: Model::test("granite-4.2-3b-Q4_K_M.gguf", DEFAULT_MODEL_SHA256, 1024),
+        previous: None,
+        records: None,
+        from_owner_setting: false,
+        device_default: false,
+        older_prompt: OlderPrompt::default(),
+    };
+    let mut status = Status::new(Path::Gpu, &setup);
+    let full = progress_of(&status).unwrap().steps();
+    let State::Starting(progress) = &mut status.state else {
+        unreachable!()
+    };
+    for phase in [
+        Phase::StartingServer,
+        Phase::Verifying,
+        Phase::Loading,
+        Phase::Priming,
+        Phase::Sample(1),
+        Phase::Sample(2),
+        Phase::Reminders,
+    ] {
+        assert!(progress.enter(phase));
+    }
+    progress.skip(Phase::PrimingReminders);
+    status.skip_idle_prime(None);
+    let p = progress_of(&status).unwrap();
+    assert_eq!((p.step(), p.steps()), (full - 1, full - 1));
+
+    let mut status = Status::new(Path::Cpu, &setup);
+    status.skip_idle_prime(Some(true));
+    let State::Starting(progress) = &mut status.state else {
+        unreachable!()
+    };
+    for phase in [
+        Phase::StartingServer,
+        Phase::Verifying,
+        Phase::Loading,
+        Phase::Priming,
+        Phase::Sample(1),
+        Phase::Sample(2),
+        Phase::Reminders,
+        Phase::PrimingReminders,
+    ] {
+        assert!(progress.enter(phase));
+    }
+    status.skip_idle_prime(Some(false));
+    let p = progress_of(&status).unwrap();
+    assert_eq!((p.step(), p.steps()), (full, full), "never step 9 of 8");
+}
