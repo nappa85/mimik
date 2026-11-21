@@ -12,6 +12,8 @@ mod persistence;
 mod rulesets;
 #[cfg(target_os = "linux")]
 mod uploads;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use uploads::screen_html_for_test;
 /// Rewinds schema 31 (the home marks and their indexes, migration 031) for upgrade tests of older
 /// schemas.
 #[cfg(test)]
