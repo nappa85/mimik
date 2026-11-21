@@ -389,9 +389,11 @@ jobs:
             sandbox::runner:: sources::worker::live_tests:: assistant::runtime::launch::live_tests:: \
             --show-output \
             --skip live_gpu_ \
+            --skip live_large_ \
             2>&1 | tee target/confinement.log
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          # Includes two PDF re-exec helpers, 27 live checks and the generator bound check.
+          # Includes two PDF re-exec helpers, 27 live checks and the generator bound check. The
+          # large-input gate (`live_large_`) needs a host data folder and runs only on request.
           if [ "${ran:-0}" -lt 60 ]; then
             echo "only ${ran:-0} confinement tests ran; expected at least 60"
             exit 1
