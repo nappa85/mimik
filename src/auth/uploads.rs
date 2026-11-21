@@ -4,7 +4,7 @@ use crate::{
     AppError,
     sources::{
         uploads::{
-            Metadata, OwnerWrite, PageModel, Upload, UploadPhase, Uploads,
+            Metadata, OwnerWrite, PageModel, Upload, UploadPhase, UploadProgress, Uploads,
             exclusions::{COMPARISON_LIMIT, Exclusion, Proposal},
         },
         worker,
@@ -23,27 +23,33 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{
-    io::Write,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU16, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tower_sessions::Session;
 
-const FILE_LIMIT: u64 = 128 * 1024 * 1024;
-const BODY_LIMIT: u64 = FILE_LIMIT + 65536;
+/// A client that sends nothing for this long loses the upload: it holds the single slot and a
+/// spool. There is no total deadline and no minimum rate.
 const IDLE: Duration = Duration::from_secs(30);
-const TOTAL: Duration = Duration::from_mins(15);
+/// Before the CSRF token is admitted only this much of the body is read (unauthenticated memory).
+const PRE_ADMISSION: u64 = 4096;
+/// After admission, the bytes handed to the parser that are not file data (part headers, the
+/// four form fields, the closing boundary and anything after it) may not exceed this: multer
+/// buffers a part header until its blank line, so without a bound a header that never ends
+/// would grow memory (and the search cost) with the stream. The budget covers the form fields
+/// (under 1 KiB), headers, a 64 KiB trailer, and the parser's read-ahead of file data not yet
+/// credited (two 64 KiB batches), with slack.
+const NON_FILE: u64 = 512 * 1024;
 
 pub(super) fn routes() -> Router<AuthState> {
     Router::new()
         .route(
             "/admin/materials/uploads",
-            get(index)
-                .post(upload)
-                .layer(DefaultBodyLimit::max(usize::try_from(BODY_LIMIT).unwrap())),
+            // No static size limit: the bound is the free-space reservation of the upload.
+            get(index).post(upload).layer(DefaultBodyLimit::disable()),
         )
         .route("/admin/materials/uploads/{id}", get(page))
         .route("/admin/materials/uploads/{id}/progress", get(progress))
@@ -104,13 +110,20 @@ impl Drop for Phase {
     }
 }
 impl Phase {
-    async fn write(mut self, bytes: Bytes) -> Result<Self, StatusCode> {
+    /// Reserve the body (its declared length, or a floor) before its first byte is written.
+    async fn reserve(mut self, declared: Option<u64>) -> Result<Self, StatusCode> {
         blocking(move || {
             self.0
                 .as_mut()
                 .ok_or(AppError::Worker)?
-                .file()
-                .write_all(&bytes)?;
+                .reserve_body(declared)?;
+            Ok(self)
+        })
+        .await
+    }
+    async fn write(mut self, bytes: Bytes) -> Result<Self, StatusCode> {
+        blocking(move || {
+            self.0.as_mut().ok_or(AppError::Worker)?.write(&bytes)?;
             Ok(self)
         })
         .await
@@ -120,11 +133,13 @@ impl Phase {
 struct Counting {
     body: axum::body::BodyDataStream,
     pending: Bytes,
+    /// Bytes handed to the parser.
     count: u64,
-    received: u64,
+    /// File bytes the route has taken from the parser; `count` minus this is bounded by
+    /// [`NON_FILE`] after admission (and `count` by [`PRE_ADMISSION`] before it).
+    file_bytes: Arc<AtomicU64>,
     admitted: Arc<AtomicBool>,
     status: Arc<AtomicU16>,
-    end: tokio::time::Instant,
     idle: Duration,
     since_yield: usize,
 }
@@ -148,25 +163,16 @@ impl Counting {
             self.since_yield = 0;
             tokio::task::yield_now().await;
         }
-        if tokio::time::Instant::now() >= self.end {
-            return Err(StatusCode::REQUEST_TIMEOUT);
-        }
-        // Only time waiting for input is client idle. Server work between calls
-        // (metadata validation and blocking file writes) has its own total cap.
-        let deadline = self.end.min(tokio::time::Instant::now() + self.idle);
+        // Only time waiting for input is client idle: server work between calls (metadata
+        // validation, reservations and blocking file writes) is not counted, and nothing bounds
+        // the total.
+        let deadline = tokio::time::Instant::now() + self.idle;
         while self.pending.is_empty() {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(StatusCode::REQUEST_TIMEOUT);
-            }
             match tokio::time::timeout_at(deadline, self.body.next()).await {
                 Ok(Some(Ok(bytes))) => {
                     if bytes.is_empty() {
                         tokio::task::yield_now().await;
                         continue;
-                    }
-                    self.received = self.received.saturating_add(bytes.len() as u64);
-                    if self.received > BODY_LIMIT {
-                        return Err(StatusCode::PAYLOAD_TOO_LARGE);
                     }
                     self.pending = bytes;
                 }
@@ -176,8 +182,15 @@ impl Counting {
             }
         }
         let admitted = self.admitted.load(Ordering::Acquire);
-        let limit = if admitted { BODY_LIMIT } else { 4096 };
-        if self.count >= limit {
+        if !admitted && self.count >= PRE_ADMISSION {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        if admitted
+            && self
+                .count
+                .saturating_sub(self.file_bytes.load(Ordering::Acquire))
+                > NON_FILE
+        {
             return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         // Before admission, give the parser only the bytes it needs, so it cannot
@@ -187,7 +200,6 @@ impl Counting {
         } else {
             self.pending.len().min(1)
         };
-        let n = n.min(usize::try_from(limit - self.count).unwrap_or(usize::MAX));
         self.count += n as u64;
         self.since_yield += n;
         Ok(Some(self.pending.split_to(n)))
@@ -200,9 +212,7 @@ fn multipart_error(error: &multer::Error, status: &AtomicU16) -> StatusCode {
         return StatusCode::from_u16(stored).unwrap_or(StatusCode::BAD_REQUEST);
     }
     match error {
-        multer::Error::FieldSizeExceeded { .. } | multer::Error::StreamSizeExceeded { .. } => {
-            StatusCode::PAYLOAD_TOO_LARGE
-        }
+        multer::Error::FieldSizeExceeded { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
@@ -224,7 +234,7 @@ async fn text(
 async fn upload(State(state): State<AuthState>, session: Session, request: Request) -> AuthResult {
     let auth = owner_auth(&state, &session).await?;
     let mut lengths = request.headers().get_all(header::CONTENT_LENGTH).iter();
-    if let Some(length) = lengths.next() {
+    let declared = if let Some(length) = lengths.next() {
         let n = length
             .to_str()
             .ok()
@@ -233,10 +243,10 @@ async fn upload(State(state): State<AuthState>, session: Session, request: Reque
         if lengths.next().is_some() {
             return Err(StatusCode::BAD_REQUEST);
         }
-        if n > BODY_LIMIT {
-            return Err(StatusCode::PAYLOAD_TOO_LARGE);
-        }
-    }
+        Some(n)
+    } else {
+        None
+    };
     let boundary = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -281,12 +291,16 @@ async fn upload(State(state): State<AuthState>, session: Session, request: Reque
         }
         Err(e) => return Err(e),
     };
-    tokio::time::timeout(
-        TOTAL,
-        receive(m, phase, auth, session, request.into_body(), boundary),
+    receive(
+        m,
+        phase,
+        auth,
+        session,
+        request.into_body(),
+        boundary,
+        declared,
     )
     .await
-    .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
 }
 async fn receive(
     m: Uploads,
@@ -295,17 +309,18 @@ async fn receive(
     session: Session,
     body: Body,
     boundary: String,
+    declared: Option<u64>,
 ) -> AuthResult {
     let admitted = Arc::new(AtomicBool::new(false));
     let status = Arc::new(AtomicU16::new(0));
+    let file_bytes = Arc::new(AtomicU64::new(0));
     let counting = Arc::new(tokio::sync::Mutex::new(Counting {
         body: body.into_data_stream(),
         pending: Bytes::new(),
         count: 0,
-        received: 0,
+        file_bytes: file_bytes.clone(),
         admitted: admitted.clone(),
         status: status.clone(),
-        end: tokio::time::Instant::now() + TOTAL,
         idle: IDLE,
         since_yield: 0,
     }));
@@ -315,14 +330,13 @@ async fn receive(
     });
     let constraints = multer::Constraints::new()
         .allowed_fields(vec!["csrf", "system", "edition", "language", "file"])
+        // The file field has no limit here: the reservation bounds it.
         .size_limit(
             multer::SizeLimit::new()
-                .whole_stream(BODY_LIMIT)
                 .for_field("csrf", 256)
                 .for_field("system", 100)
                 .for_field("edition", 400)
-                .for_field("language", 30)
-                .for_field("file", FILE_LIMIT),
+                .for_field("language", 30),
         );
     let mut multipart = multer::Multipart::with_constraints(stream, boundary, constraints);
     let token = text(&mut multipart, "csrf", &status).await?;
@@ -338,6 +352,8 @@ async fn receive(
     let check_owner = owner.clone();
     let check_metadata = metadata.clone();
     blocking(move || check_manager.validate_metadata(&check_owner, &check_metadata)).await?;
+    // Admission passed and the metadata is valid: only now does the upload hold free space.
+    phase = phase.reserve(declared).await?;
     let mut file = multipart
         .next_field()
         .await
@@ -355,9 +371,7 @@ async fn receive(
         .map_err(|e| multipart_error(&e, &status))?
     {
         size += bytes.len() as u64;
-        if size > FILE_LIMIT {
-            return Err(StatusCode::PAYLOAD_TOO_LARGE);
-        }
+        file_bytes.fetch_add(bytes.len() as u64, Ordering::Release);
         magic.extend_from_slice(&bytes[..bytes.len().min(1024 - magic.len())]);
         digest.update(&bytes);
         phase = phase.write(bytes).await?;
@@ -374,6 +388,7 @@ async fn receive(
     drop(multipart);
     // Multer stops at the closing boundary. Count the epilogue too, including
     // unread transport frames, before publishing anything.
+    // The non-file budget bounds it: an endless trailer is refused.
     while let Some(chunk) = counting.lock().await.next().await {
         chunk.map_err(|_| {
             StatusCode::from_u16(status.load(Ordering::Acquire)).unwrap_or(StatusCode::BAD_REQUEST)
@@ -574,7 +589,7 @@ async fn page(
 #[derive(Template)]
 #[template(path = "upload_progress.html")]
 struct Progress {
-    upload: Upload,
+    upload: UploadProgress,
     csrf: String,
 }
 async fn progress(
@@ -582,10 +597,13 @@ async fn progress(
     session: Session,
     Path(id): Path<String>,
 ) -> AuthResult {
-    let s = model(&state, &session, id).await?;
+    // A poll reads the job only: not the inspection, the page rows or the exclusion.
+    let auth = owner_auth(&state, &session).await?;
+    let m = manager(&state)?;
+    let upload = blocking(move || m.progress_for_owner(&auth, &id)).await?;
     materials::html(&Progress {
-        upload: s.upload,
-        csrf: s.csrf,
+        upload,
+        csrf: super::token(&session).await?.ok_or(StatusCode::FORBIDDEN)?,
     })
 }
 async fn action(
@@ -746,10 +764,9 @@ mod tests {
             body: body.into_data_stream(),
             pending: Bytes::new(),
             count: 0,
-            received: 0,
+            file_bytes: Arc::new(AtomicU64::new(0)),
             admitted: Arc::new(AtomicBool::new(admitted)),
             status: Arc::new(AtomicU16::new(0)),
-            end: tokio::time::Instant::now() + Duration::from_millis(50),
             idle: Duration::from_millis(10),
             since_yield: 0,
         }
@@ -775,8 +792,9 @@ mod tests {
                 Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 16384]))
             }))),
         );
-        let mut c = counter(body, true);
-        c.end = tokio::time::Instant::now() + Duration::from_secs(60);
+        let c = counter(body, true);
+        // The route credits each file chunk it takes; so does this test.
+        let credit = c.file_bytes.clone();
         let stream =
             futures_util::stream::unfold(c, |mut c| async move { c.next().await.map(|b| (b, c)) });
         let mut parser = multer::Multipart::new(stream, "test");
@@ -787,41 +805,78 @@ mod tests {
             let chunk = field.chunk().await.unwrap().unwrap();
             assert!(chunk.len() <= 2 * 65536 + 8, "{}", chunk.len());
             consumed += chunk.len();
+            credit.fetch_add(chunk.len() as u64, Ordering::Release);
             assert!(supplied.load(Ordering::Relaxed) - consumed <= 2 * 65536 + 8);
         }
     }
     #[tokio::test(start_paused = true)]
-    async fn upload_counting_idle_and_total_deadlines() {
+    async fn upload_counting_has_an_idle_deadline_and_no_total_deadline() {
         let mut idle = counter(
             Body::from_stream(futures_util::stream::pending::<Result<Bytes, std::io::Error>>()),
             true,
         );
         assert_eq!(idle.read().await.unwrap_err(), StatusCode::REQUEST_TIMEOUT);
+        // A client that always delivers within the 30 s idle window runs on for far longer than
+        // the former 15-minute total deadline: 60 frames 20 s apart take 20 minutes.
         let start = tokio::time::Instant::now();
         let stream = futures_util::stream::unfold((), |()| async {
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
             Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), ()))
         });
-        let mut total = counter(Body::from_stream(stream), true);
-        total.end = start + Duration::from_millis(5);
-        assert!(total.read().await.unwrap().is_some());
-        assert!(total.read().await.unwrap().is_some());
-        assert_eq!(total.read().await.unwrap_err(), StatusCode::REQUEST_TIMEOUT);
+        let mut slow = counter(Body::from_stream(stream), true);
+        slow.idle = IDLE;
+        for _ in 0..60 {
+            assert!(slow.read().await.unwrap().is_some());
+        }
+        assert!(tokio::time::Instant::now() - start >= Duration::from_mins(20));
+        // The same client stalling for 31 s is cut off.
+        let stalled = futures_util::stream::unfold((), |()| async {
+            tokio::time::sleep(Duration::from_secs(31)).await;
+            Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), ()))
+        });
+        let mut stalled = counter(Body::from_stream(stalled), true);
+        stalled.idle = IDLE;
         assert_eq!(
-            tokio::time::Instant::now() - start,
-            Duration::from_millis(5)
+            stalled.read().await.unwrap_err(),
+            StatusCode::REQUEST_TIMEOUT
         );
     }
     #[tokio::test]
-    async fn upload_counting_limits_parser_read_ahead_and_unframed_request() {
+    async fn upload_counting_limits_the_pre_admission_read_only() {
         let mut c = counter(Body::from(vec![b'x'; 8192]), false);
-        c.end = tokio::time::Instant::now() + Duration::from_secs(60);
         for _ in 0..4096 {
             assert_eq!(c.read().await.unwrap().unwrap().len(), 1);
         }
         assert_eq!(c.read().await.unwrap_err(), StatusCode::PAYLOAD_TOO_LARGE);
-        let mut c = counter(Body::from("xx"), true);
-        c.received = BODY_LIMIT - 1;
-        assert_eq!(c.read().await.unwrap_err(), StatusCode::PAYLOAD_TOO_LARGE);
+        let mut c = counter(Body::from(vec![b'x'; 200_000]), true);
+        let mut total = 0;
+        while let Some(bytes) = c.read().await.unwrap() {
+            total += bytes.len();
+        }
+        assert_eq!(total, 200_000);
+    }
+    #[tokio::test]
+    async fn upload_counting_bounds_only_the_bytes_that_are_not_file_data() {
+        // Uncredited bytes stop at the non-file budget.
+        let mut c = counter(Body::from(vec![b'x'; 2 * 1024 * 1024]), true);
+        let mut total = 0;
+        let refused = loop {
+            match c.read().await {
+                Ok(Some(bytes)) => total += bytes.len(),
+                Ok(None) => panic!("not refused"),
+                Err(status) => break status,
+            }
+        };
+        assert_eq!(refused, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(u64::try_from(total).unwrap() <= NON_FILE + 16384);
+        // The same bytes credited as file data pass.
+        let mut c = counter(Body::from(vec![b'x'; 2 * 1024 * 1024]), true);
+        let credit = c.file_bytes.clone();
+        let mut total = 0;
+        while let Some(bytes) = c.read().await.unwrap() {
+            credit.fetch_add(bytes.len() as u64, Ordering::Release);
+            total += bytes.len();
+        }
+        assert_eq!(total, 2 * 1024 * 1024);
     }
 }

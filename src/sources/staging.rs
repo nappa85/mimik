@@ -15,10 +15,23 @@ use std::{
 };
 
 pub const MIB: u64 = 1024 * 1024;
-pub const TOTAL: u64 = 2048 * MIB;
+/// Free space that always stays available to SQLite, its journal and the host.
 pub const MARGIN: u64 = 512 * MIB;
-pub const UPLOAD_RESERVATION: u64 = 128 * MIB + 65536;
+/// The unit in which an upload's reservation grows when a body without a length (or a longer
+/// one than declared) is written.
+pub const TOP_UP: u64 = 64 * MIB;
+/// The reservation of an upload body that declares no length.
+pub const UPLOAD_FLOOR: u64 = MIB;
 pub const RENDER_RESERVATION: u64 = 8 * 20 * MIB;
+
+/// What a scan of the staging directory found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Bytes of the regular files that were measured.
+    pub bytes: u64,
+    /// Some entry could not be measured: `bytes` is a lower bound.
+    pub unknown: bool,
+}
 
 fn io(e: rustix::io::Errno) -> AppError {
     std::io::Error::from(e).into()
@@ -31,47 +44,107 @@ fn space() -> AppError {
 struct Accounting {
     used: u64,
     reserved: u64,
+    /// Bytes written to the active upload's spool. A scan skips that file, so they are kept
+    /// apart from `used`, which a scan replaces.
+    spool: u64,
+    /// The last scan could not measure every entry; nothing is admitted until a scan succeeds.
+    unknown: bool,
 }
 
 /// A single instance belongs to the process-wide upload manager.
+///
+/// Admission is by free space only: a reservation is admitted while the filesystem's free
+/// space covers every outstanding reservation plus [`MARGIN`]. Bytes already written leave the
+/// reservation (the filesystem's free space no longer includes them), so nothing is counted
+/// twice.
 pub struct Ledger {
     bytes: Mutex<Accounting>,
     free: Box<dyn Fn() -> Result<u64, AppError> + Send + Sync>,
     #[cfg(test)]
     pub bypass_free: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    injected_free: Mutex<Option<Arc<std::sync::atomic::AtomicU64>>>,
 }
 impl Ledger {
     pub fn new(
         used: u64,
         free: impl Fn() -> Result<u64, AppError> + Send + Sync + 'static,
     ) -> Arc<Self> {
+        Self::with_usage(
+            Usage {
+                bytes: used,
+                unknown: false,
+            },
+            free,
+        )
+    }
+    pub fn with_usage(
+        usage: Usage,
+        free: impl Fn() -> Result<u64, AppError> + Send + Sync + 'static,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            bytes: Mutex::new(Accounting { used, reserved: 0 }),
+            bytes: Mutex::new(Accounting {
+                used: usage.bytes,
+                reserved: 0,
+                spool: 0,
+                unknown: usage.unknown,
+            }),
             free: Box::new(free),
             #[cfg(test)]
             bypass_free: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            injected_free: Mutex::new(None),
         })
     }
-    /// # Errors
-    /// Refuses reservations exceeding total/free-space budgets or a poisoned ledger.
-    pub fn reserve(self: &Arc<Self>, bytes: u64) -> Result<Reservation, AppError> {
-        let mut a = self.bytes.lock().map_err(|_| AppError::Worker)?;
-        let reserved = a.reserved.checked_add(bytes).ok_or_else(space)?;
-        if a.used.checked_add(reserved).is_none_or(|n| n > TOTAL)
-            || self.free_bytes()? < reserved.checked_add(MARGIN).ok_or_else(space)?
-        {
-            return Err(space());
+    /// Test seam: report this value as the filesystem's free space.
+    #[cfg(test)]
+    pub fn inject_free(&self, free: Arc<std::sync::atomic::AtomicU64>) {
+        if let Ok(mut injected) = self.injected_free.lock() {
+            *injected = Some(free);
         }
-        a.reserved = reserved;
+    }
+    /// # Errors
+    /// Refuses reservations the free space cannot cover, an unknown usage or a poisoned ledger.
+    pub fn reserve(self: &Arc<Self>, bytes: u64) -> Result<Reservation, AppError> {
+        self.admit(bytes)?;
         Ok(Reservation {
             ledger: self.clone(),
             remaining: bytes,
         })
     }
+    /// A reservation that holds nothing yet; [`Reservation::top_up`] admits its bytes.
+    #[must_use]
+    pub fn empty_reservation(self: &Arc<Self>) -> Reservation {
+        Reservation {
+            ledger: self.clone(),
+            remaining: 0,
+        }
+    }
+    fn admit(&self, bytes: u64) -> Result<(), AppError> {
+        let mut a = self.bytes.lock().map_err(|_| AppError::Worker)?;
+        if a.unknown {
+            return Err(space());
+        }
+        let reserved = a.reserved.checked_add(bytes).ok_or_else(space)?;
+        if self.free_bytes()? < reserved.checked_add(MARGIN).ok_or_else(space)? {
+            return Err(space());
+        }
+        a.reserved = reserved;
+        Ok(())
+    }
     fn free_bytes(&self) -> Result<u64, AppError> {
         #[cfg(test)]
         if self.bypass_free.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(u64::MAX);
+        }
+        #[cfg(test)]
+        if let Some(free) = self
+            .injected_free
+            .lock()
+            .map_err(|_| AppError::Worker)?
+            .as_ref()
+        {
+            return Ok(free.load(std::sync::atomic::Ordering::SeqCst));
         }
         (self.free)()
     }
@@ -79,7 +152,29 @@ impl Ledger {
     /// Returns an error if the ledger lock was poisoned.
     pub fn usage(&self) -> Result<(u64, u64), AppError> {
         let a = self.bytes.lock().map_err(|_| AppError::Worker)?;
-        Ok((a.used, a.reserved))
+        Ok((a.used.saturating_add(a.spool), a.reserved))
+    }
+    /// The active upload's spool became a staged document of `actual` bytes: its charged
+    /// `written` bytes move from the spool figure to the used figure.
+    /// # Errors
+    /// Returns an error if the ledger lock was poisoned.
+    pub fn spool_published(&self, written: u64, actual: u64) -> Result<(), AppError> {
+        let mut a = self.bytes.lock().map_err(|_| AppError::Worker)?;
+        a.spool = a.spool.saturating_sub(written);
+        a.used = a.used.saturating_add(actual);
+        Ok(())
+    }
+    /// The active upload's spool ended: unlinked (`kept` false) or left on disk after a failed
+    /// unlink (`kept` true, so it stays charged until the next scan).
+    /// # Errors
+    /// Returns an error if the ledger lock was poisoned.
+    pub fn spool_ended(&self, written: u64, kept: bool) -> Result<(), AppError> {
+        let mut a = self.bytes.lock().map_err(|_| AppError::Worker)?;
+        a.spool = a.spool.saturating_sub(written);
+        if kept {
+            a.used = a.used.saturating_add(written);
+        }
+        Ok(())
     }
     /// # Errors
     /// Refuses accounting underflow or a poisoned ledger.
@@ -91,11 +186,14 @@ impl Ledger {
             .ok_or(AppError::Invalid("Staging accounting mismatch."))?;
         Ok(())
     }
-    /// Replace disk usage after a locked scan, preserving active reservations.
+    /// Replace disk usage after a locked scan, preserving active reservations. A complete scan
+    /// clears the unknown state; an incomplete one sets it.
     /// # Errors
     /// Returns an error if the ledger lock was poisoned.
-    pub fn reconcile(&self, used: u64) -> Result<(), AppError> {
-        self.bytes.lock().map_err(|_| AppError::Worker)?.used = used;
+    pub fn reconcile(&self, usage: Usage) -> Result<(), AppError> {
+        let mut a = self.bytes.lock().map_err(|_| AppError::Worker)?;
+        a.used = usage.bytes;
+        a.unknown = usage.unknown;
         Ok(())
     }
 }
@@ -104,6 +202,20 @@ pub struct Reservation {
     remaining: u64,
 }
 impl Reservation {
+    /// Admit `bytes` more under the same free-space rule as a new reservation.
+    /// # Errors
+    /// Refuses what the free space cannot cover, an unknown usage or a poisoned ledger.
+    pub fn top_up(&mut self, bytes: u64) -> Result<(), AppError> {
+        let remaining = self.remaining.checked_add(bytes).ok_or_else(space)?;
+        self.ledger.admit(bytes)?;
+        self.remaining = remaining;
+        Ok(())
+    }
+    /// Bytes still reserved.
+    #[must_use]
+    pub fn remaining(&self) -> u64 {
+        self.remaining
+    }
     /// Charge a successful physical write before relinquishing its reservation.
     /// # Errors
     /// Refuses writes larger than the reservation or a poisoned ledger.
@@ -113,6 +225,20 @@ impl Reservation {
         }
         let mut a = self.ledger.bytes.lock().map_err(|_| AppError::Worker)?;
         a.used += bytes;
+        a.reserved -= bytes;
+        self.remaining -= bytes;
+        Ok(())
+    }
+    /// Like [`Self::written`] for the active upload's spool: the bytes are charged to the spool
+    /// figure, which a scan of the directory (it skips the active spool) never overwrites.
+    /// # Errors
+    /// Refuses writes larger than the reservation or a poisoned ledger.
+    pub fn written_spool(&mut self, bytes: u64) -> Result<(), AppError> {
+        if bytes > self.remaining {
+            return Err(space());
+        }
+        let mut a = self.ledger.bytes.lock().map_err(|_| AppError::Worker)?;
+        a.spool += bytes;
         a.reserved -= bytes;
         self.remaining -= bytes;
         Ok(())
@@ -135,6 +261,15 @@ pub struct Files {
     pub fail_cleanup: Mutex<Option<std::ffi::OsString>>,
     #[cfg(test)]
     pub fail_spool_chmod: std::sync::atomic::AtomicBool,
+    /// Test seam: `write` calls that still succeed before one fails with ENOSPC.
+    #[cfg(test)]
+    pub enospc_after: std::sync::atomic::AtomicI64,
+    /// Test seam: the sync after a published spool's rename fails.
+    #[cfg(test)]
+    pub fail_publish_sync: std::sync::atomic::AtomicBool,
+    /// Test seam: `remove_spool` fails.
+    #[cfg(test)]
+    pub fail_remove_spool: std::sync::atomic::AtomicBool,
 }
 impl Files {
     pub(crate) fn read_text(&self, id: &str, page: u32) -> Result<Vec<u8>, AppError> {
@@ -202,6 +337,13 @@ impl Files {
     /// # Errors
     /// Returns invalid-name, unlink or directory-sync failures.
     pub fn remove_spool(&self, name: &str) -> Result<(), AppError> {
+        #[cfg(test)]
+        if self
+            .fail_remove_spool
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EACCES).into());
+        }
         valid_name(name)?;
         match rustix::fs::unlinkat(&self.root, name, rustix::fs::AtFlags::empty()) {
             Ok(()) | Err(rustix::io::Errno::NOENT) => (),
@@ -210,30 +352,35 @@ impl Files {
         rustix::fs::fsync(&self.root).map_err(io)?;
         Ok(())
     }
+    /// Move a spool into an upload directory. Its bytes were charged as they were written.
     /// # Errors
-    /// Refuses identity/size mismatches and propagates rename/sync failures.
-    pub fn publish_spool(
-        &self,
-        name: &str,
-        file: &File,
-        id: &str,
-        reservation: &mut Reservation,
-    ) -> Result<(), AppError> {
+    /// Refuses identity mismatches and propagates rename/sync failures.
+    pub fn publish_spool(&self, name: &str, file: &File, id: &str) -> Result<(), AppError> {
         valid_name(name)?;
         let dir = self.dir(id)?;
         let meta = file.metadata()?;
         let stat = rustix::fs::statat(&self.root, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
             .map_err(io)?;
-        if !meta.is_file()
-            || stat.st_dev != meta.dev()
-            || stat.st_ino != meta.ino()
-            || meta.len() > reservation.remaining
-        {
+        if !meta.is_file() || stat.st_dev != meta.dev() || stat.st_ino != meta.ino() {
             return Err(AppError::Invalid("Invalid upload spool."));
         }
         file.sync_all()?;
         rustix::fs::renameat(&self.root, name, &dir, "document.pdf").map_err(io)?;
-        reservation.written(meta.len())?;
+        Ok(())
+    }
+    /// Make a published spool durable. A separate step so that the caller records the rename
+    /// (the file now belongs to the upload directory) before any sync can fail.
+    /// # Errors
+    /// Propagates directory-sync failures.
+    pub fn sync_published(&self, id: &str) -> Result<(), AppError> {
+        #[cfg(test)]
+        if self
+            .fail_publish_sync
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO).into());
+        }
+        let dir = self.dir(id)?;
         rustix::fs::fsync(&dir).map_err(io)?;
         rustix::fs::fsync(&self.root).map_err(io)?;
         Ok(())
@@ -261,6 +408,12 @@ impl Files {
             fail_cleanup: Mutex::new(None),
             #[cfg(test)]
             fail_spool_chmod: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            enospc_after: std::sync::atomic::AtomicI64::new(i64::MAX),
+            #[cfg(test)]
+            fail_publish_sync: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_remove_spool: std::sync::atomic::AtomicBool::new(false),
         })
     }
     /// # Errors
@@ -348,6 +501,14 @@ impl Files {
         let result = (|| {
             rustix::fs::fchmod(&fd, Mode::RUSR | Mode::WUSR).map_err(io)?;
             let mut f = File::from(fd);
+            #[cfg(test)]
+            if self
+                .enospc_after
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+                == 0
+            {
+                return Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into());
+            }
             f.write_all(bytes)?;
             f.sync_all()?;
             rustix::fs::renameat(&dir, &part, &dir, name).map_err(io)?;
@@ -396,7 +557,7 @@ impl Files {
     /// is followed only by descriptor-relative, no-follow stat/open/unlink operations.
     /// # Errors
     /// Returns unexpected directories, invalid sizes or filesystem failures.
-    pub fn reconcile(&self, mut keep: impl FnMut(&str, &str) -> bool) -> Result<u64, AppError> {
+    pub fn reconcile(&self, mut keep: impl FnMut(&str, &str) -> bool) -> Result<Usage, AppError> {
         self.reconcile_active(&mut keep, None)
     }
     #[must_use]
@@ -419,7 +580,7 @@ impl Files {
         &self,
         mut keep: impl FnMut(&str, &str) -> bool,
         active_spool: Option<&str>,
-    ) -> Result<u64, AppError> {
+    ) -> Result<Usage, AppError> {
         for name in names(&self.root)? {
             if name.to_str().is_some_and(|name| Some(name) == active_spool) {
                 continue;
@@ -490,7 +651,10 @@ impl Files {
             eprintln!(
                 "Source staging usage is unknown; writes remain blocked until reconciliation."
             );
-            TOTAL
+            Usage {
+                bytes: 0,
+                unknown: true,
+            }
         }))
     }
     /// # Errors
@@ -671,8 +835,8 @@ fn maintenance(result: Result<(), AppError>) {
         eprintln!("Source staging cleanup failed; retry on the next sweep.");
     });
 }
-fn disk_bytes(dir: &OwnedFd, skip_name: Option<&str>) -> Result<u64, AppError> {
-    let mut total = 0_u64;
+fn disk_bytes(dir: &OwnedFd, skip_name: Option<&str>) -> Result<Usage, AppError> {
+    let mut total = Usage::default();
     for name in names(dir)? {
         if name.to_str().is_some_and(|name| Some(name) == skip_name) {
             continue;
@@ -680,7 +844,7 @@ fn disk_bytes(dir: &OwnedFd, skip_name: Option<&str>) -> Result<u64, AppError> {
         let measured = (|| {
             let s = rustix::fs::statat(dir, &name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
                 .map_err(io)?;
-            let bytes = match rustix::fs::FileType::from_raw_mode(s.st_mode) {
+            let usage = match rustix::fs::FileType::from_raw_mode(s.st_mode) {
                 rustix::fs::FileType::Directory => {
                     let child = rustix::fs::openat(
                         dir,
@@ -691,20 +855,25 @@ fn disk_bytes(dir: &OwnedFd, skip_name: Option<&str>) -> Result<u64, AppError> {
                     .map_err(io)?;
                     disk_bytes(&child, None)?
                 }
-                rustix::fs::FileType::RegularFile => {
-                    u64::try_from(s.st_size).map_err(|_| space())?
-                }
-                _ => 0,
+                rustix::fs::FileType::RegularFile => Usage {
+                    bytes: u64::try_from(s.st_size).map_err(|_| space())?,
+                    unknown: false,
+                },
+                _ => Usage::default(),
             };
-            Ok::<_, AppError>(bytes)
+            Ok::<_, AppError>(usage)
         })();
-        let bytes = measured.unwrap_or_else(|_| {
+        let usage = measured.unwrap_or_else(|_| {
             eprintln!(
                 "Source staging usage is unknown; writes remain blocked until reconciliation."
             );
-            TOTAL
+            Usage {
+                bytes: 0,
+                unknown: true,
+            }
         });
-        total = total.saturating_add(bytes);
+        total.bytes = total.bytes.saturating_add(usage.bytes);
+        total.unknown |= usage.unknown;
     }
     Ok(total)
 }

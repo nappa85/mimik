@@ -3,6 +3,7 @@ use super::*;
 use crate::sources::staging::{self, MIB};
 use crate::{AppError, Store, auth::RequestAuth};
 use rusqlite::params;
+use std::os::unix::fs::MetadataExt;
 use std::{
     io::Write,
     sync::{
@@ -859,7 +860,8 @@ fn fixture_worker_data(
 }
 fn create(m: &Uploads, o: &OwnerWrite) -> String {
     let mut phase = m.begin_upload().unwrap();
-    phase.file().write_all(PDF).unwrap();
+    phase.reserve_body(Some(PDF.len() as u64)).unwrap();
+    phase.write(PDF).unwrap();
     let id = m
         .create(o, phase, &hash(PDF), PDF.len() as u64, &metadata())
         .unwrap();
@@ -888,7 +890,7 @@ fn start(m: &Uploads, o: &OwnerWrite, id: &str) {
 }
 fn seed_queued(m: &Uploads, o: &OwnerWrite, id: &str, kind: &str) {
     m.0.files.create(id).unwrap();
-    let mut r = m.0.ledger.reserve(staging::UPLOAD_RESERVATION).unwrap();
+    let mut r = m.0.ledger.reserve(MIB).unwrap();
     m.0.files.write(id, "document.pdf", PDF, &mut r).unwrap();
     m.write(o,|tx| {let t=now()?;
         tx.execute("INSERT INTO source_uploads(id,pdf_sha256,pdf_bytes,actor,actor_id,actor_epoch,session_digest,created_at,updated_at,state,system_id,edition,language) VALUES(?1,?2,?3,'account:1',1,1,?4,?5,?5,'uploaded','mork-borg','Synthetic','en')",params![id,hash(PDF),PDF.len(),o.auth.digest(),t])?;queue(tx,id,1,kind,0)
@@ -1017,7 +1019,7 @@ fn startup_removes_arbitrarily_named_orphan_folders_without_following_links() {
         dir.path().join("staging/junk/link"),
     )
     .unwrap();
-    assert_eq!(files.reconcile(|_, _| false).unwrap(), 0);
+    assert_eq!(files.reconcile(|_, _| false).unwrap().bytes, 0);
     assert!(!dir.path().join("staging/junk").exists());
     assert_eq!(std::fs::read(dir.path().join("outside")).unwrap(), b"keep");
 }
@@ -1031,11 +1033,13 @@ fn startup_cleanup_continues_after_a_failure_and_counts_retained_bytes() {
         std::fs::write(dir.path().join("staging").join(name).join("data"), PDF).unwrap();
     }
     *files.fail_cleanup.lock().unwrap() = Some("failed".into());
-    assert_eq!(files.reconcile(|_, _| false).unwrap(), PDF.len() as u64);
+    let usage = files.reconcile(|_, _| false).unwrap();
+    assert_eq!(usage.bytes, PDF.len() as u64);
+    assert!(!usage.unknown, "every entry was measured");
     assert!(!dir.path().join("staging/removable").exists());
     assert!(dir.path().join("staging/failed/data").exists());
     *files.fail_cleanup.lock().unwrap() = None;
-    assert_eq!(files.reconcile(|_, _| false).unwrap(), 0);
+    assert_eq!(files.reconcile(|_, _| false).unwrap().bytes, 0);
 }
 
 #[test]
@@ -1058,16 +1062,54 @@ fn ledger_reservations_total_margin_and_failure_release() {
     drop(ledger.reserve(1).unwrap());
     ledger.deleted(20 * MIB).unwrap();
     assert_eq!(ledger.usage().unwrap(), (0, 0));
-    let ledger = staging::Ledger::new(staging::TOTAL - staging::UPLOAD_RESERVATION, || {
-        Ok(u64::MAX)
-    });
-    let r = ledger.reserve(staging::UPLOAD_RESERVATION).unwrap();
-    assert!(ledger.reserve(1).is_err());
-    drop(r);
-    assert!(ledger.reserve(staging::UPLOAD_RESERVATION + 1).is_err());
+    // Used bytes do not bound a reservation: only free space does (there is no total).
+    let ledger = staging::Ledger::new(100 * 1024 * MIB, || Ok(u64::MAX));
+    drop(ledger.reserve(8 * 1024 * MIB).unwrap());
     let ledger = staging::Ledger::new(0, || Err(AppError::Invalid("injected statvfs failure")));
     assert!(ledger.reserve(1).is_err());
     assert_eq!(ledger.usage().unwrap(), (0, 0));
+}
+
+#[test]
+fn a_reserve_right_after_a_large_write_is_not_refused_by_a_double_count() {
+    // The filesystem's free space already excludes written bytes, so they must leave the
+    // reservation: counting them in both would refuse this reserve.
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(
+        staging::MARGIN + 200 * MIB,
+    ));
+    let injected = free.clone();
+    let ledger = staging::Ledger::new(0, move || Ok(injected.load(Ordering::SeqCst)));
+    let mut first = ledger.reserve(100 * MIB).unwrap();
+    first.written(80 * MIB).unwrap();
+    free.fetch_sub(80 * MIB, Ordering::SeqCst);
+    // 20 MiB still reserved and 120 MiB above the margin is free: exactly 100 MiB more fits.
+    assert!(ledger.reserve(100 * MIB + 1).is_err());
+    let second = ledger.reserve(100 * MIB).unwrap();
+    assert_eq!(ledger.usage().unwrap(), (80 * MIB, 120 * MIB));
+    drop((first, second));
+    assert_eq!(ledger.usage().unwrap(), (80 * MIB, 0));
+}
+
+#[test]
+fn unknown_usage_refuses_reserve_until_a_reconcile_succeeds() {
+    let unknown = staging::Usage {
+        bytes: 5,
+        unknown: true,
+    };
+    let ledger = staging::Ledger::with_usage(unknown, || Ok(u64::MAX));
+    assert!(ledger.reserve(1).is_err());
+    assert!(ledger.empty_reservation().top_up(1).is_err());
+    // An incomplete scan keeps (or puts) the ledger in the unknown state.
+    ledger.reconcile(unknown).unwrap();
+    assert!(ledger.reserve(1).is_err());
+    ledger
+        .reconcile(staging::Usage {
+            bytes: 7,
+            unknown: false,
+        })
+        .unwrap();
+    drop(ledger.reserve(1).unwrap());
+    assert_eq!(ledger.usage().unwrap(), (7, 0));
 }
 
 #[test]
@@ -1382,7 +1424,8 @@ fn create_returns_committed_upload_id_when_launch_fails() {
     let (_dir, m, o, _) = fixture();
     m.0.fail_spawn.store(true, Ordering::Release);
     let mut phase = m.begin_upload().unwrap();
-    phase.file().write_all(PDF).unwrap();
+    phase.reserve_body(Some(PDF.len() as u64)).unwrap();
+    phase.write(PDF).unwrap();
     let id = m
         .create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
         .unwrap();
@@ -1454,9 +1497,8 @@ fn private_files_survive_restrictive_umask() {
     let mut reservation = ledger.reserve(4096).unwrap();
     let (name, mut spool) = files.spool().unwrap();
     spool.write_all(PDF).unwrap();
-    files
-        .publish_spool(&name, &spool, ID, &mut reservation)
-        .unwrap();
+    files.publish_spool(&name, &spool, ID).unwrap();
+    files.sync_published(ID).unwrap();
     files
         .write(ID, "page-1.png", b"image", &mut reservation)
         .unwrap();
@@ -1498,7 +1540,8 @@ fn spawn_failure_fails_job_and_releases_worker_slot() {
     m.discard(&o, ID).unwrap();
     m.0.fail_spawn.store(true, Ordering::Release);
     let mut phase = m.begin_upload().unwrap();
-    phase.file().write_all(PDF).unwrap();
+    phase.reserve_body(Some(PDF.len() as u64)).unwrap();
+    phase.write(PDF).unwrap();
     let id = m
         .create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
         .unwrap();
@@ -2054,15 +2097,8 @@ fn replacing_files_charges_only_the_replacement_and_never_follows_the_old_link()
 }
 
 #[test]
-fn pdf_limit_duplicate_document_and_settings_currency() {
+fn duplicate_document_and_settings_currency() {
     let (_dir, m, o, f) = fixture();
-    let mut phase = m.begin_upload().unwrap();
-    phase.file().set_len(128 * MIB + 1).unwrap();
-    assert!(
-        m.create(&o, phase, &"0".repeat(64), 128 * MIB + 1, &metadata())
-            .is_err()
-    );
-    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
     m.0.store
         .upload_storage(|db| {
             db.execute(
@@ -2590,4 +2626,292 @@ fn a_document_that_is_not_a_private_regular_file_is_refused_by_open_document() {
         Some(Reason::Document(worker::Error::Unreadable)),
         "a missing file is unreadable, not changed"
     );
+}
+
+fn spool_names(dir: &tempfile::TempDir) -> usize {
+    std::fs::read_dir(dir.path().join("staging"))
+        .unwrap()
+        .count()
+}
+
+#[test]
+fn a_pdf_over_128_mib_is_staged_and_the_ledger_follows_the_written_bytes() {
+    let (dir, m, o, _) = fixture();
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(1 << 40));
+    m.0.ledger.inject_free(free);
+    let size = 129 * MIB;
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(Some(size)).unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, size));
+    phase.write(PDF).unwrap();
+    assert_eq!(
+        m.0.ledger.usage().unwrap(),
+        (PDF.len() as u64, size - PDF.len() as u64)
+    );
+    // The rest of the body is sparse: nothing here allocates 129 MiB.
+    phase.file().set_len(size).unwrap();
+    let id = m
+        .create(&o, phase, &"0".repeat(64), size, &metadata())
+        .unwrap();
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().pdf_bytes, size);
+    assert_eq!(m.0.ledger.usage().unwrap().1, 0);
+    // The staged document is the 129 MiB file (sparse here).
+    let staged = std::fs::metadata(m.0.files.path(&id).unwrap()).unwrap();
+    assert_eq!(staged.len(), size);
+    assert_eq!(spool_names(&dir), 1);
+}
+
+#[test]
+fn free_space_exhausted_mid_spool_refuses_and_dropping_the_phase_frees_everything() {
+    let (dir, m, _o, _) = fixture();
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(
+        staging::MARGIN + 10 * MIB,
+    ));
+    m.0.ledger.inject_free(free);
+    let mut phase = m.begin_upload().unwrap();
+    // The floor of a body without a declared length.
+    phase.reserve_body(None).unwrap();
+    phase.write(&vec![b'x'; 1 << 20]).unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap(), (MIB, 0));
+    // The next byte needs a 64 MiB top-up that free space cannot cover.
+    assert!(matches!(
+        phase.write(b"x"),
+        Err(AppError::Invalid("Not enough space."))
+    ));
+    assert_eq!(spool_names(&dir), 1);
+    drop(phase);
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    assert_eq!(spool_names(&dir), 0);
+    assert!(m.begin_upload().is_ok(), "the slot is free again");
+}
+
+#[test]
+fn enospc_mid_spool_unlinks_the_spool_and_releases_the_reservation_and_the_slot() {
+    let (dir, m, _o, _) = fixture();
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(None).unwrap();
+    // A file that always fails with ENOSPC stands in for a full disk under the spool.
+    phase.file = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let error = phase.write(b"x").unwrap_err();
+    assert!(
+        matches!(&error, AppError::SourceIo(e) if e.raw_os_error() == Some(libc::ENOSPC)),
+        "{error:?}"
+    );
+    assert_eq!(error_code(&error), "space");
+    // The failed write was not charged; the reservation is held until the drop.
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, MIB));
+    drop(phase);
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    assert_eq!(spool_names(&dir), 0);
+    assert!(m.begin_upload().is_ok());
+}
+
+#[test]
+fn enospc_mid_render_fails_the_job_as_space_and_leaves_no_partial_file() {
+    let (dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    // The page's PNG is written, its text sidecar hits ENOSPC.
+    m.0.files.enospc_after.store(1, Ordering::SeqCst);
+    start(&m, &o, &id);
+    wait(&m);
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.job.state, "failed", "{:?}", u.job);
+    assert_eq!(u.job.reason.as_deref(), Some("space"));
+    assert!(u.pages.is_empty());
+    let folder = dir.path().join("staging").join(&id);
+    let names: Vec<_> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["document.pdf"], "no png, text or .part file");
+    assert_eq!(m.0.ledger.usage().unwrap(), (PDF.len() as u64, 0));
+}
+
+#[test]
+fn publishing_a_page_does_not_rewrite_the_upload_row_that_holds_the_inspection() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    let set = |store: &Store| {
+        store
+            .upload_storage(|db| {
+                db.execute("UPDATE source_uploads SET updated_at=created_at+12345", [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    // Marked just before the page is published; read again once the job has published it,
+    // before settlement.
+    *m.0.before_publish.lock().unwrap() = Some(Box::new(move |store| set(store)));
+    let store = m.0.store.clone();
+    let seen = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let observed = seen.clone();
+    *m.0.before_finish.lock().unwrap() = Some(Box::new(move |_| {
+        let value = store
+            .upload_storage(|db| {
+                Ok(db.query_row(
+                    "SELECT updated_at-created_at FROM source_uploads",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        observed.store(value, Ordering::SeqCst);
+    }));
+    start(&m, &o, &id);
+    wait(&m);
+    assert_eq!(m.read(&id).unwrap().pages.len(), 1);
+    assert_eq!(seen.load(Ordering::SeqCst), 12345);
+}
+
+#[test]
+fn a_progress_poll_reads_the_job_of_an_existing_upload_only() {
+    let (_dir, m, o, _) = fixture();
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let progress = m.progress_for_owner(&o.auth, &id).unwrap();
+    assert_eq!(
+        (progress.job.done, progress.job.state.as_str()),
+        (3, "succeeded")
+    );
+    assert!(matches!(
+        m.progress_for_owner(&o.auth, &"0".repeat(32)),
+        Err(AppError::SourceNotFound)
+    ));
+}
+
+#[test]
+fn a_job_that_died_unsettled_after_seven_days_is_failed_not_deleted_with_its_upload() {
+    let (dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    // Started long ago: only page publication used to refresh `updated_at`, and it no longer
+    // does, so the failure transition itself must start the seven days.
+    let age = || {
+        m.0.store
+            .upload_storage(|db| {
+                db.execute(
+                    "UPDATE source_uploads SET created_at=1000, updated_at=1000",
+                    [],
+                )?;
+                db.execute("UPDATE source_jobs SET state='running'", [])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    age();
+    m.sweep().unwrap();
+    let u = m.read(ID).unwrap();
+    assert_eq!(
+        (u.state.as_str(), u.job.state.as_str()),
+        ("failed", "failed")
+    );
+    // The same at startup, from a fresh manager over the same data.
+    age();
+    let again = Uploads::initialize(
+        m.0.store.clone(),
+        dir.path(),
+        Arc::new(Fake::default()),
+        false,
+    )
+    .unwrap();
+    let u = again.read(ID).unwrap();
+    assert_eq!(
+        (u.state.as_str(), u.job.state.as_str()),
+        ("failed", "failed")
+    );
+}
+
+#[test]
+fn a_sync_failure_after_the_spool_rename_fails_create_with_a_clean_ledger_and_staging() {
+    let (dir, m, o, _) = fixture();
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(Some(PDF.len() as u64)).unwrap();
+    phase.write(PDF).unwrap();
+    m.0.files.fail_publish_sync.store(true, Ordering::Release);
+    let error = m
+        .create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
+        .unwrap_err();
+    // The real I/O error, not an accounting mismatch from the cleanup.
+    assert!(
+        matches!(&error, AppError::SourceIo(e) if e.raw_os_error() == Some(libc::EIO)),
+        "{error:?}"
+    );
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    assert_eq!(spool_names(&dir), 0);
+    m.0.files.fail_publish_sync.store(false, Ordering::Release);
+    assert!(m.begin_upload().is_ok());
+}
+
+#[test]
+fn a_spool_that_cannot_be_unlinked_stays_charged_until_a_sweep_removes_it() {
+    let (dir, m, _o, _) = fixture();
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(None).unwrap();
+    phase.write(PDF).unwrap();
+    m.0.files.fail_remove_spool.store(true, Ordering::Release);
+    drop(phase);
+    m.0.files.fail_remove_spool.store(false, Ordering::Release);
+    assert_eq!(m.0.ledger.usage().unwrap(), (PDF.len() as u64, 0));
+    assert_eq!(spool_names(&dir), 1);
+    m.sweep().unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    assert_eq!(spool_names(&dir), 0);
+}
+
+#[test]
+fn a_launch_failure_starts_the_seven_days_of_the_failed_upload() {
+    let (_dir, m, o, _) = fixture();
+    seed_queued(&m, &o, ID, "inspect");
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_uploads SET created_at=1000, updated_at=1000",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    m.fail_job(ID).unwrap();
+    m.sweep().unwrap();
+    assert_eq!(m.read(ID).unwrap().state, "failed");
+}
+
+#[test]
+fn a_sweep_during_the_spool_write_keeps_the_pdf_charged_through_create_and_discard() {
+    let (dir, m, o, _) = fixture();
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(Some(PDF.len() as u64)).unwrap();
+    phase.write(PDF).unwrap();
+    // The hourly sweep scans the staging directory while the spool is the active upload.
+    m.sweep().unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap().0, PDF.len() as u64);
+    let id = m
+        .create(&o, phase, &hash(PDF), PDF.len() as u64, &metadata())
+        .unwrap();
+    wait(&m);
+    assert_eq!(m.0.ledger.usage().unwrap(), (PDF.len() as u64, 0));
+    m.discard(&o, &id).unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    assert_eq!(spool_names(&dir), 0);
+}
+
+#[test]
+fn a_sweep_during_the_spool_write_then_a_dropped_upload_returns_usage_to_zero() {
+    let (dir, m, _o, _) = fixture();
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(None).unwrap();
+    phase.write(PDF).unwrap();
+    m.sweep().unwrap();
+    phase.write(PDF).unwrap();
+    assert_eq!(m.0.ledger.usage().unwrap().0, 2 * PDF.len() as u64);
+    drop(phase);
+    assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
+    assert_eq!(spool_names(&dir), 0);
 }

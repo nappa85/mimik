@@ -109,8 +109,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   boxes per page and a content-addressed PDF store). Slices 1 (worker opens by path, 20,000-page
   frame bound; its four live tests run only in CI) and 2 (migration 036: upload tables recreated
   for 20,000 pages, box lists) merged 2026-11-20. Slice 3 (job pins, hash outside
-  locks, `document_changed`) merged 2026-11-21. Next: slice 4 (free-space admission and the
-  upload route), before route A's 4c builds on staging.
+  locks, `document_changed`) merged 2026-11-21. Slice 4 (free-space admission and the upload
+  route) merged 2026-11-21. Next: slice 5 (totals, selection, exclusions, proposals), before
+  route A's 4c builds on staging.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions

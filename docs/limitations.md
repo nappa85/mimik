@@ -49,6 +49,11 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
   maximum buffer). No file byte is spooled before admission; only one upload streams at a time.
   After admission explicit Pending boundaries every 64 KiB bound parser read-ahead to two
   64 KiB batches plus multipart delimiter lookbehind, apart from the pending transport frame.
+  The request has no size limit, but the bytes handed to the parser that are not file data
+  (part headers, the form fields, the closing boundary and any trailer) may not exceed 512 KiB
+  after admission (413 beyond it; the file bytes the route has already taken are not counted,
+  and the parser's uncredited read-ahead is inside the budget). multer buffers a part header
+  until its blank line, so this is what stops a header that never ends from growing memory.
 
 - **SRC-REPEAT-COST** [repeated text] The comparison budget is per normalised text: the lazy
   per-page copy of a text's eligible groups is not counted against it, and there is no overall
