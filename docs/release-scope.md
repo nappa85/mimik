@@ -37,7 +37,7 @@ key or internet access is needed; the assistant and its model downloads are opti
   imported source pages against the original page images at `/admin/materials`. Source import,
   definition publication and catalogue publication use the command line.
 - **PDF staging.** On Linux, the Owner uploads one PDF at `/admin/materials/uploads`, inspects
-  it, selects up to 64 pages, renders, cancels/retries jobs and discards staging. Upload needs
+  it, selects any pages of it (a range list or all, up to 20,000 pages), renders, cancels/retries jobs and discards staging. Upload needs
   the sandbox's unprivileged user namespaces and successful availability probe; failure shows
   remediation and never selects an unconfined parser. macOS and Windows have no upload.
   Until source-import step 4, this stages pages only: it creates no source or lookup evidence.

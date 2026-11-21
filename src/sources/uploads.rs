@@ -1,7 +1,7 @@
 //! Blocking staged-upload API. Call from a dedicated thread or `spawn_blocking`.
 //! The manager is process-wide; job publication and deletion share one lock.
 use super::{
-    staging::{Files, Ledger, MIB, RENDER_RESERVATION, Reservation, TOP_UP, UPLOAD_FLOOR},
+    staging::{Files, Ledger, RENDER_RESERVATION, Reservation, TOP_UP, UPLOAD_FLOOR},
     worker::{self, Cancel, Inspection, Page, Pins, Reason, RenderSettings, RenderedPage},
 };
 use crate::{
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::{
+    collections::HashSet,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -298,7 +299,6 @@ pub struct StagedContract {
     pub selected_pages: Vec<u32>,
     pub pages: Vec<PageModel>,
     pub metadata: Metadata,
-    pub limits: SourceLimits,
     pub exclusion_revision: i64,
     pub exclusion: Option<exclusions::Exclusion>,
 }
@@ -307,12 +307,6 @@ pub struct Renderer {
     pub crate_version: String,
     pub mupdf_version: String,
     pub settings: RenderSettings,
-}
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SourceLimits {
-    pub pages: u32,
-    pub png_bytes: u64,
-    pub units: u32,
 }
 
 fn now() -> Result<i64, AppError> {
@@ -754,10 +748,11 @@ impl Uploads {
             let mut u = load(tx, id)?;
             check_selection(&u, revision, selected)?;
             metadata.validate(tx)?;
+            let keep: HashSet<u32> = selected.iter().copied().collect();
             let removed = u
                 .pages
                 .iter()
-                .filter(|p| !selected.contains(&p.pdf_page))
+                .filter(|p| !keep.contains(&p.pdf_page))
                 .map(|p| p.pdf_page)
                 .collect::<Vec<_>>();
             for n in &removed {
@@ -973,11 +968,11 @@ impl Uploads {
             || u.job.state != "succeeded"
             || u.selected_pages.is_empty()
             || !remaining(&u).is_empty()
-            || u.pages.iter().map(|p| p.png_bytes).sum::<u64>() > 128 * MIB
         {
             return Err(AppError::Conflict);
         }
         u.inspection.as_ref().ok_or(AppError::Conflict)?;
+        let chosen: HashSet<u32> = u.selected_pages.iter().copied().collect();
         if let Some(e) = &u.exclusion {
             exclusions::validate(e, &u).map_err(|_| AppError::Conflict)?;
         }
@@ -991,18 +986,13 @@ impl Uploads {
                 settings: RenderSettings::default(),
             },
             revision: u.revision,
-            selected_pages: u.selected_pages.clone(),
             pages: u
                 .pages
                 .into_iter()
-                .filter(|p| u.selected_pages.contains(&p.pdf_page))
+                .filter(|p| chosen.contains(&p.pdf_page))
                 .collect(),
+            selected_pages: u.selected_pages,
             metadata: u.metadata,
-            limits: SourceLimits {
-                pages: 64,
-                png_bytes: 128 * MIB,
-                units: 20000,
-            },
             exclusion_revision: u.exclusion_revision,
             exclusion: u.exclusion,
         })
@@ -1433,8 +1423,8 @@ impl Uploads {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let revision = revision.load(Ordering::Acquire);
         // Only the facts this page needs: never the inspection, the other pages' rows or the
-        // whole selection. The totals (removed with the per-source limits) are one aggregate.
-        let (current, png_others, text_others, replaces) = self
+        // whole selection. No per-upload total exists (SRC-15).
+        let (current, replaces) = self
             .0
             .store
             .upload_storage(|db| publish_facts(db, id, p.n, revision))?;
@@ -1442,16 +1432,6 @@ impl Uploads {
             return Err(AppError::Conflict);
         }
         let text = worker::records::json(&p.lines).map_err(|_| AppError::Invalid("too_large"))?;
-        let png_total = png_others + p.png.len() as u64;
-        let text_total = text_others + text.len() as u64;
-        if png_total > 128 * MIB {
-            return Err(AppError::Invalid(
-                "too large for one source: select fewer pages",
-            ));
-        }
-        if text_total > 512 * MIB {
-            return Err(AppError::Invalid("Not enough space."));
-        }
         if replaces {
             self.0.store.upload_storage(|db| {
                 db.execute(
@@ -1515,14 +1495,14 @@ impl Uploads {
 }
 
 /// The facts publishing page `n` needs: whether the upload and its running job are still at
-/// `revision` with `n` selected, the PNG and text bytes of the other pages (one aggregate) and
-/// whether a row for `n` exists. The inspection, the page rows and the selection are not loaded.
+/// `revision` with `n` selected and whether a row for `n` exists. The inspection, the page rows
+/// and the selection are not loaded.
 fn publish_facts(
     db: &Connection,
     id: &str,
     n: u32,
     revision: i64,
-) -> Result<(bool, u64, u64, bool), AppError> {
+) -> Result<(bool, bool), AppError> {
     let current = db
         .query_row(
             "SELECT u.revision, j.upload_revision, j.state,
@@ -1539,12 +1519,6 @@ fn publish_facts(
         )
         .optional()?
         .ok_or(AppError::SourceNotFound)?;
-    let (png, text) = db.query_row(
-        "SELECT coalesce(sum(png_bytes),0), coalesce(sum(text_bytes),0)
-         FROM source_upload_pages WHERE upload_id=?1 AND pdf_page<>?2",
-        params![id, n],
-        |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?)),
-    )?;
     let replaces = db
         .query_row(
             "SELECT 1 FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",
@@ -1553,7 +1527,7 @@ fn publish_facts(
         )
         .optional()?
         .is_some();
-    Ok((current, png, text, replaces))
+    Ok((current, replaces))
 }
 
 /// What one running job shares between its steps.
@@ -1682,7 +1656,6 @@ fn error_code(e: &AppError) -> &'static str {
             "space"
         }
         AppError::Invalid("Not enough space.") => "space",
-        AppError::Invalid("too large for one source: select fewer pages") => "source_png_limit",
         AppError::Invalid(
             s @ ("cancelled" | "unavailable" | "unreadable" | "timeout" | "too_large"
             | "too_many_pages" | "password_protected" | "unsupported" | "document_changed"),
@@ -1708,25 +1681,96 @@ fn queue(
     )?;
     Ok(())
 }
+/// The selected pages without a current rendering, in inspection order. Linear in the pages.
 fn remaining(u: &Upload) -> Vec<Page> {
+    let selected: HashSet<u32> = u.selected_pages.iter().copied().collect();
+    let current: HashSet<u32> = u
+        .pages
+        .iter()
+        .filter(|r| {
+            r.settings == RenderSettings::default()
+                && r.renderer_crate_version == worker::CRATE_VERSION
+                && r.mupdf_version == worker::MUPDF_VERSION
+        })
+        .map(|r| r.pdf_page)
+        .collect();
     u.inspection
         .as_ref()
         .map(|i| {
             i.pages
                 .iter()
-                .filter(|p| {
-                    u.selected_pages.contains(&p.n)
-                        && !u.pages.iter().any(|r| {
-                            r.pdf_page == p.n
-                                && r.settings == RenderSettings::default()
-                                && r.renderer_crate_version == worker::CRATE_VERSION
-                                && r.mupdf_version == worker::MUPDF_VERSION
-                        })
-                })
+                .filter(|p| selected.contains(&p.n) && !current.contains(&p.n))
                 .cloned()
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The page numbers of a range list such as `1-500, 520`: ascending, distinct and merged.
+/// Separators are commas and white space; a page or an inclusive `a-b` range of pages 1 to
+/// [`worker::records::MAX_PAGES`] (the expansion is bounded by that).
+/// # Errors
+/// Refuses any token that is not a page or an ascending range within those bounds.
+pub fn parse_page_ranges(text: &str) -> Result<Vec<u32>, AppError> {
+    let invalid = || AppError::Invalid("Invalid page range; write pages like 1-500, 520.");
+    let max = worker::records::MAX_PAGES;
+    let mut ranges = Vec::new();
+    for token in text.split(|c: char| c == ',' || c.is_whitespace()) {
+        if token.is_empty() {
+            continue;
+        }
+        let page = |s: &str| {
+            s.parse::<u32>()
+                .ok()
+                .filter(|n| (1..=max).contains(n))
+                .ok_or_else(invalid)
+        };
+        let range = match token.split_once('-') {
+            None => {
+                let n = page(token)?;
+                (n, n)
+            }
+            Some((from, to)) => (page(from)?, page(to)?),
+        };
+        if range.0 > range.1 {
+            return Err(invalid());
+        }
+        ranges.push(range);
+    }
+    ranges.sort_unstable();
+    let mut pages = Vec::new();
+    let mut next = 1;
+    for (from, to) in ranges {
+        for n in from.max(next)..=to {
+            pages.push(n);
+        }
+        next = next.max(to + 1);
+    }
+    Ok(pages)
+}
+
+/// The compact range list of ascending distinct pages (`1-500,520`), without spaces so that the
+/// form-encoded text stays small.
+#[must_use]
+pub fn format_page_ranges(pages: &[u32]) -> String {
+    let mut text = String::new();
+    let mut i = 0;
+    while i < pages.len() {
+        let mut j = i;
+        while j + 1 < pages.len() && pages[j + 1] == pages[j] + 1 {
+            j += 1;
+        }
+        if !text.is_empty() {
+            text.push(',');
+        }
+        text.push_str(&pages[i].to_string());
+        if j > i {
+            text.push('-');
+            text.push_str(&pages[j].to_string());
+        }
+        i = j + 1;
+    }
+    text
 }
 fn settled_state(upload: &Upload) -> &'static str {
     if upload.inspection.is_none() {
@@ -1741,9 +1785,10 @@ fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), Ap
     if revision != u.revision || u.document_changed {
         return Err(AppError::Conflict);
     }
+    let chosen: HashSet<u32> = selected.iter().copied().collect();
     if u.exclusion
         .as_ref()
-        .is_some_and(|e| e.pages.iter().any(|n| !selected.contains(n)))
+        .is_some_and(|e| e.pages.iter().any(|n| !chosen.contains(n)))
     {
         return Err(AppError::Invalid(
             "Replace or remove the exclusion before deselecting its pages.",
@@ -1756,12 +1801,12 @@ fn check_selection(u: &Upload, revision: i64, selected: &[u32]) -> Result<(), Ap
             Err(AppError::Conflict)
         };
     };
-    if selected.len() > 64
-        || selected.windows(2).any(|p| p[0] >= p[1])
-        || selected.iter().any(|n| !i.pages.iter().any(|p| p.n == *n))
+    // Any ascending, distinct subset of the inspected pages: one pass over each list.
+    let inspected: HashSet<u32> = i.pages.iter().map(|p| p.n).collect();
+    if selected.windows(2).any(|p| p[0] >= p[1]) || selected.iter().any(|n| !inspected.contains(n))
     {
         return Err(AppError::Invalid(
-            "Select at most 64 distinct pages in ascending order.",
+            "Select distinct pages of the document in ascending order.",
         ));
     }
     Ok(())

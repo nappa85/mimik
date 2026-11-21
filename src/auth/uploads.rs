@@ -5,7 +5,10 @@ use crate::{
     sources::{
         uploads::{
             Metadata, OwnerWrite, PageModel, Upload, UploadPhase, UploadProgress, Uploads,
-            exclusions::{COMPARISON_LIMIT, Exclusion, Proposal},
+            exclusions::{
+                BoxPoints, COMPARISON_LIMIT, Confirmation, ExclusionRequest, Proposal, box_extent,
+            },
+            format_page_ranges, parse_page_ranges,
         },
         worker,
     },
@@ -14,7 +17,7 @@ use askama::Template;
 use axum::{
     Router,
     body::Body,
-    extract::{DefaultBodyLimit, Form, Path, Request, State},
+    extract::{DefaultBodyLimit, Form, Path, Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Redirect},
     routing::{get, post},
@@ -23,6 +26,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{BTreeMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
@@ -466,6 +470,10 @@ async fn index(State(state): State<AuthState>, session: Session) -> AuthResult {
         remedy,
     })
 }
+/// Pages listed on one screen: the selection list, the rendered pages and the box editors cover
+/// the same 100 pages, so the page never renders 20,000 entries.
+const SCREEN_PAGES: u32 = 100;
+
 #[derive(Template)]
 #[template(path = "upload_page.html")]
 struct Screen {
@@ -473,19 +481,125 @@ struct Screen {
     upload: Upload,
     csrf: String,
     refresh: bool,
-    editors: Vec<Editor>,
+    /// The selection as the range text of the input (`1-500,520`).
+    selection: String,
+    selected_count: usize,
+    window: Window,
+    /// The inspected pages of the window.
+    listed: Vec<Listed>,
+    /// The rendered pages of the window with their confirmed boxes.
+    rendered: Vec<Rendered>,
+    proposals: Vec<ProposalView>,
+    /// The selected rendered pages of the window, for manual boxes.
+    manual: Vec<EditorPage>,
 }
-struct Editor {
-    title: String,
+struct Window {
+    number: u32,
+    count: u32,
+    from: u32,
+    to: u32,
+}
+impl Window {
+    fn new(requested: u32, last_page: u32) -> Self {
+        let count = last_page.div_ceil(SCREEN_PAGES).max(1);
+        let number = requested.clamp(1, count);
+        Self {
+            number,
+            count,
+            from: (number - 1) * SCREEN_PAGES + 1,
+            to: number * SCREEN_PAGES,
+        }
+    }
+    fn contains(&self, n: u32) -> bool {
+        (self.from..=self.to).contains(&n)
+    }
+    fn previous(&self) -> Option<u32> {
+        (self.number > 1).then(|| self.number - 1)
+    }
+    fn next(&self) -> Option<u32> {
+        (self.number < self.count).then(|| self.number + 1)
+    }
+}
+struct Listed {
+    n: u32,
+    width: f64,
+    height: f64,
+    rotate: u16,
+    selected: bool,
+}
+struct Rendered {
+    page: PageModel,
+    masks: Vec<Mask>,
+}
+struct ProposalView {
     text: String,
     fingerprint: String,
-    pages: Vec<EditorPage>,
+    /// Pages with found text, as ranges.
+    affected: String,
+    affected_count: usize,
+    /// Pages without it (an offered median box), as ranges.
+    absent: String,
+    /// Every box on the pages of the window, for the combined preview.
+    window_boxes: BTreeMap<u32, Vec<[f64; 4]>>,
+    found: std::collections::BTreeSet<u32>,
+    missing: std::collections::BTreeSet<u32>,
+}
+impl ProposalView {
+    fn masks(&self, n: u32) -> Vec<Mask> {
+        self.window_boxes
+            .get(&n)
+            .into_iter()
+            .flatten()
+            .map(|b| Mask::of(*b))
+            .collect()
+    }
+    /// One view of a fingerprint: proposals with the same text (at different places) share it,
+    /// so the form has one confirm, skip and absent control for it and shows every box.
+    fn merge(views: &mut Vec<Self>, p: Proposal, window: &Window) {
+        let index = views.iter().position(|v| v.fingerprint == p.fingerprint);
+        let view = if let Some(index) = index {
+            &mut views[index]
+        } else {
+            views.push(Self {
+                text: p.text.clone(),
+                fingerprint: p.fingerprint.clone(),
+                affected: String::new(),
+                affected_count: 0,
+                absent: String::new(),
+                window_boxes: BTreeMap::new(),
+                found: std::collections::BTreeSet::new(),
+                missing: std::collections::BTreeSet::new(),
+            });
+            let last = views.len() - 1;
+            &mut views[last]
+        };
+        view.found.extend(p.boxes.keys());
+        view.missing.extend(p.absent.keys());
+        for (n, b) in p.boxes {
+            if window.contains(n) {
+                view.window_boxes.entry(n).or_default().push(b);
+            }
+        }
+    }
+    /// The page lists, once every proposal is merged: a page without a box from any of them.
+    fn finish(&mut self) {
+        let found: Vec<u32> = self.found.iter().copied().collect();
+        let absent: Vec<u32> = self.missing.difference(&self.found).copied().collect();
+        self.affected = format_page_ranges(&found);
+        self.affected_count = found.len();
+        self.absent = format_page_ranges(&absent);
+    }
 }
 struct EditorPage {
     page: PageModel,
+    /// What the box inputs may reach: the page size rounded up like the stored boxes.
+    max_x: f64,
+    max_y: f64,
+    /// The first box, edited with the drawing widget or its numeric inputs.
     bounds: [f64; 4],
     selected: bool,
-    absent: bool,
+    /// Further saved boxes (at most seven), one `left top right bottom` per line.
+    more: String,
 }
 struct Mask {
     x: f64,
@@ -493,71 +607,109 @@ struct Mask {
     width: f64,
     height: f64,
 }
-impl Screen {
-    fn mask(&self, n: u32) -> Option<Mask> {
-        self.upload.exclusion.as_ref()?.boxes.get(&n).map(|b| Mask {
+impl Mask {
+    fn of(b: [f64; 4]) -> Self {
+        Self {
             x: b[0],
             y: b[1],
             width: b[2] - b[0],
             height: b[3] - b[1],
-        })
+        }
     }
-    fn editors(upload: &Upload, proposals: Vec<Proposal>) -> Vec<Editor> {
-        let mut editors: Vec<_> = proposals
-            .into_iter()
-            .map(|p| Editor {
-                title: "Confirm or adjust repeated text".into(),
-                text: p.text,
-                fingerprint: p.fingerprint,
-                pages: upload
-                    .pages
-                    .iter()
-                    .filter(|page| upload.selected_pages.contains(&page.pdf_page))
-                    .map(|page| EditorPage {
-                        page: page.clone(),
-                        selected: p.boxes.contains_key(&page.pdf_page),
-                        absent: p.absent.contains_key(&page.pdf_page),
-                        bounds: p
-                            .boxes
-                            .get(&page.pdf_page)
-                            .or_else(|| p.absent.get(&page.pdf_page))
-                            .copied()
-                            .unwrap_or([0., 0., 1., 1.]),
-                    })
+}
+impl Screen {
+    fn build(
+        nav: super::nav::Nav,
+        upload: Upload,
+        csrf: String,
+        refresh: bool,
+        proposals: Vec<Proposal>,
+        requested: u32,
+    ) -> Self {
+        let selected: HashSet<u32> = upload.selected_pages.iter().copied().collect();
+        let last_page = upload
+            .inspection
+            .as_ref()
+            .and_then(|i| i.pages.iter().map(|p| p.n).max())
+            .unwrap_or(0);
+        let window = Window::new(requested, last_page);
+        let listed = upload
+            .inspection
+            .iter()
+            .flat_map(|i| &i.pages)
+            .filter(|p| window.contains(p.n))
+            .map(|p| Listed {
+                n: p.n,
+                width: p.width,
+                height: p.height,
+                rotate: p.rotate,
+                selected: selected.contains(&p.n),
+            })
+            .collect();
+        let saved = upload.exclusion.as_ref().map(|e| &e.boxes);
+        let rendered = upload
+            .pages
+            .iter()
+            .filter(|p| window.contains(p.pdf_page))
+            .map(|p| Rendered {
+                page: p.clone(),
+                masks: saved
+                    .and_then(|boxes| boxes.get(&p.pdf_page))
+                    .into_iter()
+                    .flatten()
+                    .map(|b| Mask::of(*b))
                     .collect(),
             })
             .collect();
-        editors.push(Editor {
-            title: "Draw or adjust an exclusion by hand".into(),
-            text: String::new(),
-            fingerprint: String::new(),
-            pages: upload
-                .pages
-                .iter()
-                .filter(|p| upload.selected_pages.contains(&p.pdf_page))
-                .map(|page| {
-                    let saved = upload
-                        .exclusion
-                        .as_ref()
-                        .and_then(|e| e.boxes.get(&page.pdf_page));
-                    EditorPage {
-                        page: page.clone(),
-                        bounds: saved.copied().unwrap_or([
-                            page.width_points / 4.,
-                            page.height_points / 4.,
-                            page.width_points / 2.,
-                            page.height_points / 2.,
-                        ]),
-                        selected: saved.is_some(),
-                        absent: false,
-                    }
-                })
-                .collect(),
-        });
-        editors
-    }
-    fn selected(&self, n: u32) -> bool {
-        self.upload.selected_pages.contains(&n)
+        let manual = upload
+            .pages
+            .iter()
+            .filter(|p| window.contains(p.pdf_page) && selected.contains(&p.pdf_page))
+            .map(|page| {
+                let mut boxes = saved
+                    .and_then(|boxes| boxes.get(&page.pdf_page))
+                    .map(|b| b.iter());
+                let first = boxes.as_mut().and_then(Iterator::next).copied();
+                let (max_x, max_y) = box_extent(page.width_points, page.height_points);
+                EditorPage {
+                    page: page.clone(),
+                    max_x,
+                    max_y,
+                    bounds: first.unwrap_or([
+                        page.width_points / 4.,
+                        page.height_points / 4.,
+                        page.width_points / 2.,
+                        page.height_points / 2.,
+                    ]),
+                    selected: first.is_some(),
+                    more: boxes
+                        .into_iter()
+                        .flatten()
+                        .map(|b| format!("{} {} {} {}", b[0], b[1], b[2], b[3]))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                }
+            })
+            .collect();
+        let mut views = Vec::new();
+        for p in proposals {
+            ProposalView::merge(&mut views, p, &window);
+        }
+        views.iter_mut().for_each(ProposalView::finish);
+        let proposals = views;
+        Self {
+            nav,
+            selection: format_page_ranges(&upload.selected_pages),
+            selected_count: upload.selected_pages.len(),
+            listed,
+            rendered,
+            proposals,
+            manual,
+            window,
+            upload,
+            csrf,
+            refresh,
+        }
     }
     fn busy(&self) -> bool {
         matches!(self.upload.job.state.as_str(), "queued" | "running")
@@ -566,25 +718,37 @@ impl Screen {
         self.upload.pdf_sha256.get(..12).unwrap_or("")
     }
 }
-async fn model(state: &AuthState, session: &Session, id: String) -> Result<Screen, StatusCode> {
+#[derive(serde::Deserialize)]
+struct ScreenQuery {
+    p: Option<u32>,
+}
+async fn model(
+    state: &AuthState,
+    session: &Session,
+    id: String,
+    requested: u32,
+    proposals: Vec<Proposal>,
+) -> Result<Screen, StatusCode> {
     let auth = owner_auth(state, session).await?;
     let m = manager(state)?;
     let upload = blocking(move || m.read_for_owner(&auth, &id)).await?;
-    let refresh = matches!(upload.job.state.as_str(), "queued" | "running");
-    Ok(Screen {
-        nav: upload_nav(),
-        editors: Screen::editors(&upload, vec![]),
+    let refresh = proposals.is_empty() && matches!(upload.job.state.as_str(), "queued" | "running");
+    Ok(Screen::build(
+        upload_nav(),
         upload,
-        csrf: super::token(session).await?.ok_or(StatusCode::FORBIDDEN)?,
+        super::token(session).await?.ok_or(StatusCode::FORBIDDEN)?,
         refresh,
-    })
+        proposals,
+        requested,
+    ))
 }
 async fn page(
     State(state): State<AuthState>,
     session: Session,
     Path(id): Path<String>,
+    Query(query): Query<ScreenQuery>,
 ) -> AuthResult {
-    materials::html(&model(&state, &session, id).await?)
+    materials::html(&model(&state, &session, id, query.p.unwrap_or(1), Vec::new()).await?)
 }
 #[derive(Template)]
 #[template(path = "upload_progress.html")]
@@ -610,8 +774,9 @@ async fn action(
     State(state): State<AuthState>,
     session: Session,
     Path((id, action)): Path<(String, String)>,
-    Form(mut form): Form<std::collections::BTreeMap<String, String>>,
+    Form(pairs): Form<Vec<(String, String)>>,
 ) -> AuthResult {
+    let mut form = form_map(pairs).map_err(|e| materials::error(&e))?;
     let auth = owner_auth(&state, &session).await?;
     let csrf = csrf_admission(&session, &form.remove("csrf").ok_or(StatusCode::FORBIDDEN)?).await?;
     let owner = OwnerWrite::new(auth.clone(), csrf);
@@ -641,11 +806,10 @@ async fn action(
             }
             Err(error) => return Err(materials::error(&error)),
         };
-        let mut screen = model(&state, &session, id).await?;
+        let mut screen = model(&state, &session, id, 1, proposals).await?;
         if screen.upload.revision != revision {
             return Err(StatusCode::CONFLICT);
         }
-        screen.editors = Screen::editors(&screen.upload, proposals);
         screen.refresh = false;
         return materials::html(&screen);
     }
@@ -674,15 +838,8 @@ async fn action(
                 if action == "remove-exclusion" {
                     m.remove_exclusion(&owner, &id, revision, excluded, &rationale)
                 } else {
-                    let exclusion = exclusion_form(&form, rationale)?;
-                    m.set_exclusion(
-                        &owner,
-                        &id,
-                        revision,
-                        excluded,
-                        &exclusion,
-                        form.get("extend_absent").is_some_and(|v| v == "1"),
-                    )
+                    let request = exclusion_form(&form, rationale)?;
+                    m.set_exclusion(&owner, &id, revision, excluded, &request)
                 }
             }
             "set" => {
@@ -692,17 +849,20 @@ async fn action(
                     edition: form.remove("edition").unwrap_or_default(),
                     language: form.remove("language").unwrap_or_default(),
                 };
-                let pages = form
-                    .keys()
-                    .filter(|k| k.starts_with("page_"))
-                    .map(|k| {
-                        k[5..]
-                            .parse::<u32>()
-                            .map_err(|_| AppError::Invalid("Invalid selected page."))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let mut pages = pages;
-                pages.sort_unstable();
+                // Any ascending, distinct subset of the inspected pages: a range list
+                // (`1-500, 520`) or all of them.
+                let pages = if form.get("select_all").is_some_and(|v| v == "1") {
+                    let mut all: Vec<u32> = m
+                        .read_for_owner(&auth, &id)?
+                        .inspection
+                        .iter()
+                        .flat_map(|i| i.pages.iter().map(|p| p.n))
+                        .collect();
+                    all.sort_unstable();
+                    all
+                } else {
+                    parse_page_ranges(form.get("pages").map_or("", String::as_str))?
+                };
                 m.set(&owner, &id, revision, &metadata, &pages)
             }
             _ => Err(AppError::SourceNotFound),
@@ -711,11 +871,49 @@ async fn action(
     .await?;
     Ok(Redirect::to(&target).into_response())
 }
+/// One box per line: four numbers separated by white space or commas.
+fn box_lines(text: &str) -> Result<Vec<BoxPoints>, AppError> {
+    let invalid = || AppError::Invalid("Invalid displayed exclusion box.");
+    let mut boxes = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let numbers: Vec<f64> = line
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().map_err(|_| invalid()))
+            .collect::<Result<_, _>>()?;
+        boxes.push(<BoxPoints>::try_from(numbers).map_err(|_| invalid())?);
+    }
+    Ok(boxes)
+}
+/// The posted fields as a map; a repeated key is refused instead of letting the last one win.
+fn form_map(pairs: Vec<(String, String)>) -> Result<BTreeMap<String, String>, AppError> {
+    let mut map = BTreeMap::new();
+    for (key, value) in pairs {
+        if map.insert(key, value).is_some() {
+            return Err(AppError::Invalid("A form field was sent twice."));
+        }
+    }
+    Ok(map)
+}
+/// The request of the `exclude` form: confirmed proposals (by fingerprint, with the pages to
+/// leave out and to extend to) and the manual boxes of the pages on the screen. The boxes of
+/// proposals are never posted: the server rebuilds them.
 fn exclusion_form(
-    form: &std::collections::BTreeMap<String, String>,
+    form: &BTreeMap<String, String>,
     rationale: String,
-) -> Result<Exclusion, AppError> {
-    let mut boxes = std::collections::BTreeMap::new();
+) -> Result<ExclusionRequest, AppError> {
+    let ranges = |key: String| parse_page_ranges(form.get(&key).map_or("", String::as_str));
+    let mut confirmed = Vec::new();
+    for (key, value) in form {
+        if let Some(fingerprint) = key.strip_prefix("confirm_").filter(|_| value == "1") {
+            confirmed.push(Confirmation {
+                fingerprint: fingerprint.to_owned(),
+                skip: ranges(format!("skip_{fingerprint}"))?,
+                absent: ranges(format!("absent_{fingerprint}"))?,
+            });
+        }
+    }
+    let mut manual = BTreeMap::new();
     for key in form.keys().filter(|k| k.starts_with("exclude_")) {
         let page: u32 = key[8..]
             .parse()
@@ -727,13 +925,44 @@ fn exclusion_form(
                 .and_then(|s| s.parse().ok())
                 .ok_or(AppError::Invalid("Invalid displayed exclusion box."))?;
         }
-        boxes.insert(page, bounds);
+        let mut boxes = vec![bounds];
+        boxes.extend(box_lines(
+            form.get(&format!("more_{page}")).map_or("", String::as_str),
+        )?);
+        manual.insert(page, boxes);
     }
-    Ok(Exclusion {
-        pages: boxes.keys().copied().collect(),
-        boxes,
+    // Further boxes of a page whose region is not ticked are the prefilled saved ones when the
+    // Owner only unticks it. They are never dropped silently: the server compares them with the
+    // saved boxes and refuses a difference.
+    let mut unticked_extra = BTreeMap::new();
+    for (key, value) in form {
+        if let Some(page) = key.strip_prefix("more_")
+            && !value.trim().is_empty()
+        {
+            let page: u32 = page
+                .parse()
+                .map_err(|_| AppError::Invalid("Invalid exclusion page."))?;
+            if !manual.contains_key(&page) {
+                unticked_extra.insert(page, box_lines(value)?);
+            }
+        }
+    }
+    let window = match (form.get("window_from"), form.get("window_to")) {
+        (Some(from), Some(to)) => Some((
+            from.parse()
+                .map_err(|_| AppError::Invalid("Invalid exclusion window."))?,
+            to.parse()
+                .map_err(|_| AppError::Invalid("Invalid exclusion window."))?,
+        )),
+        _ => None,
+    };
+    Ok(ExclusionRequest {
+        confirmed,
+        manual,
+        unticked_extra,
+        window,
         rationale,
-        proposal_fingerprint: form.get("fingerprint").filter(|s| !s.is_empty()).cloned(),
+        extend_absent: form.get("extend_absent").is_some_and(|v| v == "1"),
     })
 }
 async fn image(
@@ -758,6 +987,238 @@ async fn image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn upload_of(pages: u32, selected: Vec<u32>) -> Upload {
+        Upload {
+            exclusion_revision: 0,
+            exclusion: None,
+            already_document: None,
+            id: "0".repeat(32),
+            pdf_sha256: "a".repeat(64),
+            pdf_bytes: 1,
+            revision: 2,
+            state: "inspected".into(),
+            document_changed: false,
+            metadata: Metadata {
+                system_id: "mork-borg".into(),
+                edition: "Synthetic".into(),
+                language: "en".into(),
+            },
+            inspection: Some(crate::sources::uploads::InspectionData {
+                document: worker::records::Document {
+                    pages,
+                    encrypted: false,
+                    mupdf: "1.27.2".into(),
+                },
+                pages: (1..=pages)
+                    .map(|n| worker::Page {
+                        n,
+                        width: 595.2756,
+                        height: 841.89,
+                        rotate: 0,
+                        user_unit: 1.,
+                        transform: [1., 0., 0., -1., 0., 841.89],
+                        visible: [0., 0., 595.2756, 841.89],
+                        tagged: false,
+                    })
+                    .collect(),
+            }),
+            selected_pages: selected,
+            pages: Vec::new(),
+            job: crate::sources::uploads::Job {
+                revision: 2,
+                kind: "inspect".into(),
+                state: "succeeded".into(),
+                done: 0,
+                total: 0,
+                reason: None,
+            },
+        }
+    }
+
+    #[test]
+    fn the_page_screen_lists_a_hundred_pages_and_not_a_checkbox_per_page() {
+        let upload = upload_of(20_000, (1..=20_000).collect());
+        let nav = super::super::nav::Nav::logo_only;
+        let screen = Screen::build(nav(), upload.clone(), "t".repeat(64), false, Vec::new(), 3);
+        assert_eq!(
+            (screen.window.from, screen.window.to, screen.window.count),
+            (201, 300, 200)
+        );
+        assert_eq!(screen.listed.len(), 100);
+        assert_eq!(screen.selection, "1-20000");
+        let html = screen.render().unwrap();
+        assert_eq!(html.matches("<li ").count(), 100);
+        // The `select all` choice is the only selection checkbox; no per-page input exists.
+        assert_eq!(html.matches("type=\"checkbox\"").count(), 1);
+        assert!(!html.contains("name=\"page_"));
+        assert!(
+            html.contains("?p=2\">Previous 100 pages") && html.contains("?p=4\">Next 100 pages")
+        );
+        assert!(html.len() < 100_000, "{} bytes", html.len());
+        // Out-of-range screens clamp; the first screen has no previous link.
+        let first = Screen::build(nav(), upload.clone(), "t".repeat(64), false, Vec::new(), 0);
+        assert_eq!(first.window.number, 1);
+        assert!(first.window.previous().is_none());
+        let last = Screen::build(nav(), upload, "t".repeat(64), false, Vec::new(), 9999);
+        assert_eq!((last.window.number, last.listed.len()), (200, 100));
+        assert!(last.window.next().is_none());
+    }
+
+    fn page_model(n: u32, width: f64, height: f64) -> PageModel {
+        PageModel {
+            renderer_crate_version: worker::CRATE_VERSION.into(),
+            mupdf_version: worker::MUPDF_VERSION.into(),
+            pdf_page: n,
+            rendered_revision: 2,
+            png_sha256: "b".repeat(64),
+            png_bytes: 1,
+            width_px: 1,
+            height_px: 1,
+            dpi: 150,
+            width_points: width,
+            height_points: height,
+            transform: [1., 0., 0., -1., 0., height],
+            stats: worker::records::Stats {
+                n,
+                chars: 0,
+                unmapped: 0,
+                image_area: 0.,
+                fonts_substituted: Vec::new(),
+                fonts_skipped: 0,
+                incomplete: false,
+                dropped_lines: 0,
+            },
+            settings: worker::RenderSettings::default(),
+            text_sha256: "c".repeat(64),
+            text_bytes: 2,
+        }
+    }
+
+    #[test]
+    fn the_box_inputs_allow_the_rounded_edge_a_stored_box_may_reach() {
+        use crate::sources::uploads::exclusions::Exclusion;
+        // A box ending at the edge of a 595.2756 x 841.8898 pt page is stored as 595.28 x 841.89.
+        let mut upload = upload_of(1, vec![1]);
+        upload.pages = vec![page_model(1, 595.2756, 841.8898)];
+        upload.exclusion = Some(Exclusion {
+            pages: vec![1],
+            boxes: [(1, vec![[500.12, 800., 595.28, 841.89]])].into(),
+            proposal_fingerprints: Vec::new(),
+            rationale: "edge".into(),
+        });
+        let html = Screen::build(
+            super::super::nav::Nav::logo_only(),
+            upload,
+            "t".repeat(64),
+            false,
+            Vec::new(),
+            1,
+        )
+        .render()
+        .unwrap();
+        let number = |text: &str, after: &str| -> f64 {
+            text.split(after)
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        for k in 0..4 {
+            let at = html.find(&format!("name=\"box_1_{k}\"")).unwrap();
+            let max: f64 = html[..at]
+                .rsplit_once("max=\"")
+                .unwrap()
+                .1
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let value = number(&html[at..], "value=\"");
+            assert!(value <= max, "box_1_{k}: value {value} over max {max}");
+        }
+    }
+
+    #[test]
+    fn extra_boxes_are_refused_unless_their_page_is_ticked_and_repeated_keys_are_refused() {
+        let base: Vec<(String, String)> = [("exclude_5", "1"), ("box_5_0", "1"), ("box_5_1", "2")]
+            .into_iter()
+            .chain([("box_5_2", "3"), ("box_5_3", "4")])
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        // Further boxes of a page whose tick is off are handed to the server (which compares
+        // them with the saved ones): parsed, not part of the manual boxes, and a malformed
+        // line is still refused here.
+        let mut orphan: Vec<(String, String)> = base[1..].to_vec();
+        orphan.push(("more_5".into(), "5 6 7 8".into()));
+        let form = form_map(orphan).unwrap();
+        let request = exclusion_form(&form, "why".into()).unwrap();
+        assert!(request.manual.is_empty());
+        assert_eq!(request.unticked_extra[&5], [[5., 6., 7., 8.]]);
+        let mut broken: Vec<(String, String)> = base[1..].to_vec();
+        broken.push(("more_5".into(), "5 6 7".into()));
+        assert!(exclusion_form(&form_map(broken).unwrap(), "why".into()).is_err());
+        let mut fine = base.clone();
+        fine.push(("more_5".into(), "5 6 7 8".into()));
+        assert_eq!(
+            exclusion_form(&form_map(fine).unwrap(), "why".into())
+                .unwrap()
+                .manual[&5]
+                .len(),
+            2
+        );
+        // A repeated key (two `confirm_<fp>` boxes, say) is refused: the last one must not win.
+        let mut twice = base;
+        twice.push(("exclude_5".into(), "1".into()));
+        assert!(form_map(twice).is_err());
+        let one = [("a".to_owned(), "1".to_owned())];
+        assert_eq!(form_map(one.to_vec()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exclusion_form_posts_fingerprints_and_ranges_never_proposal_boxes() {
+        let fingerprint = "ab".repeat(32);
+        let form: BTreeMap<String, String> = [
+            (format!("confirm_{fingerprint}"), "1".to_owned()),
+            (format!("skip_{fingerprint}"), "3, 10-12".into()),
+            (format!("absent_{fingerprint}"), "4".into()),
+            ("extend_absent".into(), "1".into()),
+            ("window_from".into(), "1".into()),
+            ("window_to".into(), "100".into()),
+            ("exclude_5".into(), "1".into()),
+            ("box_5_0".into(), "1".into()),
+            ("box_5_1".into(), "2".into()),
+            ("box_5_2".into(), "3".into()),
+            ("box_5_3".into(), "4".into()),
+            ("more_5".into(), "5 6 7 8\n9,10,11,12\n\n".into()),
+        ]
+        .into();
+        let request = exclusion_form(&form, "why".into()).unwrap();
+        assert_eq!(request.confirmed.len(), 1);
+        assert_eq!(request.confirmed[0].fingerprint, fingerprint);
+        assert_eq!(request.confirmed[0].skip, [3, 10, 11, 12]);
+        assert_eq!(request.confirmed[0].absent, [4]);
+        assert!(request.extend_absent);
+        assert_eq!(request.window, Some((1, 100)));
+        assert_eq!(request.manual[&5].len(), 3);
+        assert_eq!(request.manual[&5][2], [9., 10., 11., 12.]);
+        // Unchecked confirmations are not confirmations; a malformed box line is refused.
+        let mut form = form;
+        form.insert(format!("confirm_{fingerprint}"), "0".into());
+        form.insert("more_5".into(), "1 2 3".into());
+        assert!(exclusion_form(&form, "why".into()).is_err());
+        form.insert("more_5".into(), String::new());
+        assert!(
+            exclusion_form(&form, "why".into())
+                .unwrap()
+                .confirmed
+                .is_empty()
+        );
+    }
 
     fn counter(body: Body, admitted: bool) -> Counting {
         Counting {

@@ -127,7 +127,13 @@ trusted there and the first job verifies the stored bytes (see Job pins below).
 Original filenames are neither application arguments nor stored/logged identifiers.
 
 `/admin/materials/uploads/{id}` shows size, hash prefix, matching permanent document,
-inspection page count/sizes/rotations/encryption, and a selection of at most 64 pages.
+inspection page count/sizes/rotations/encryption, and the page selection: any ascending,
+distinct subset of the inspected pages (at most 20,000). The screen lists 100 pages at a time
+(`?p=N`; the selection list, the rendered pages and the manual-box editors share that window,
+so a page never carries 20,000 entries). The Owner types a range list (`1-500, 520`; unordered
+and overlapping ranges are merged) or ticks "select all"; the list is prefilled in the compact
+form `1-500,520`. The longest list, alternate pages of a 20,000-page document, is about 75 KB
+form-encoded, inside the 131,072-byte action body limit.
 POST actions at `/{id}/set`, `/inspect`, `/render`, `/cancel`, `/discard`, `/propose`,
 `/exclude` and `/remove-exclusion` require Owner,
 Host/Origin and session-bound CSRF; manager calls run on blocking threads. Render retries
@@ -140,14 +146,45 @@ full-size PNG. `/{id}/pages/{page}/image` serves only stored page IDs through Ow
 admission and descriptor-relative no-follow reads, with `no-store` and `nosniff`.
 These screens/assets/images carry the material review screen's strict CSP.
 The optional **Repeated text** section proposes matching text on the selected, current renders.
-It shows the text only to the Owner, affected pages, absent pages, and highlighted per-page
-boxes. The Owner confirms, adjusts numeric displayed-point inputs, or draws a box with the
-same editor as the source review screen. Pointer corner grips and keyboard arrow-key handles
-enhance the numeric form. Every write requires explicit page choices and a rationale.
-Absent pages start unchecked and unhighlighted; their median boxes require explicit extension
-after the missing-text warning. Confirmation replaces the whole current exclusion. Removal
+It shows the text only to the Owner, affected pages and absent pages (as ranges), and the
+proposals' boxes on the pages of the screen as a combined preview. Each proposal has its own
+confirm control (unchecked until the Owner ticks it); several can be confirmed in one exclusion.
+The form posts the confirmed fingerprints (never indices), per proposal the affected pages to
+leave out and the absent pages to extend to, and the manual boxes of the screen's pages; the
+server re-runs the proposals and rebuilds the boxes, so no coordinates of proposals travel.
+Manual boxes use the same editor as the source review screen (numeric displayed-point inputs;
+pointer corner grips and keyboard arrow-key handles enhance them) for the first box of a page,
+and a textarea (`left top right bottom` per line) for up to seven more: eight boxes a page at
+most (header, footer, page number, side tabs). The inputs' `max` is the page size rounded up
+to 0.01 pt (the same function as the stored boxes' limit), so a stored edge box passes the
+browser's own validation. Unticking a page drops it together with the further boxes the form
+prefilled for it; further boxes of an unticked page that differ from the saved ones are refused,
+not dropped. A repeated form field is refused whole (the last one never wins). Proposals with
+the same text (one text at two places) share one fingerprint and so one confirm, skip and absent
+control; the view lists their pages together and the preview shows every box. The boxes of
+pages outside the screen are kept, with their proposal fingerprints, which join the newly
+confirmed ones. Boxes carry no record of which proposal produced them, so a windowed edit can
+never tell that a stored fingerprint no longer has a box behind it: fingerprints stay until the
+exclusion is removed or replaced whole (a confirmation without a window). A run offers at most
+three proposals and an exclusion holds at most eight distinct fingerprints, so a ninth
+confirmation is refused until then. A confirmation replaces the boxes of the screen's pages.
+Every write requires a rationale.
+Absent pages' median boxes require explicit extension after the missing-text warning. Removal
 requires a fresh rationale. Confirmed regions have opaque black SVG masks on staged renders;
 the stored PNG and the original-image endpoint remain unchanged (SRC-13).
+
+Stored boxes are rounded outward to 0.01 pt (minimum floored, maximum ceiled, so coverage is
+never lost) and made bit-identical when numerically equal, because the migration compares boxes
+as text (`[1,1,2,2]` and `[1.0,1,2,2]` differ); equal boxes of several confirmed proposals are
+de-duplicated, not refused. A box must lie inside its page rounded up to 0.01 pt (a box ending at
+the edge of a 595.2756 pt page stores 595.28), which keeps every coordinate at most seven
+characters, so eight boxes stay under the 384 bytes a page the migration view allows. Each
+revision stores the whole set, so the history grows by up to 6.4 MB per revision at 20,000 pages
+(`limitations.md`). The masking rule that derivation applies (`exclusions::masking`, route A):
+a unit rectangle wholly contained, edges inclusive, in the union of its page's boxes is
+rejected (a header drawn as adjacent left and right boxes covers it); positive-area overlap
+without containment stays unreviewed and flagged; edge contact alone is not crossing. Staging
+only validates and carries the boxes.
 Reading routes are disabled with their requirements: step 4 creates sources; staged pages
 are not approved evidence.
 
@@ -245,11 +282,20 @@ WAL writable. Each eight-page render batch reserves 160 MiB. Written bytes leave
 reservation and join the used figure, so a byte is never counted by both the reservation and
 the filesystem's free space; deletes reduce usage and failures release the unwritten portion.
 Usage that a scan could not measure is an explicit unknown state that refuses every
-reservation until a scan succeeds. Per upload: no PDF size limit, PNG 128 MiB, text 512 MiB,
-at most 64 selected pages, and one retained upload/one active stream.
-PNG overflow has its own `source_png_limit` reason (“too large for one source: select fewer
-pages”). Other capacity failures use `space`. `already_document` identifies a matching
+reservation until a scan succeeds. Per upload there is no PDF size limit and no total: no
+selected-page count, no PNG or text sum, no unit count (publishing a page reads only that page's
+facts). Capacity failures use `space`. `already_document` identifies a matching
 permanent document without merging readings.
+
+Limits that remain, each with its reason: form field sizes and the 4 KiB read before CSRF
+admission (unauthenticated memory); per PNG 4,096 x 8,192 px, 12 Mpx, 12 MiB and a 64 MiB decode
+(decompression bombs); per page text 8 MiB, depth 32, 40,000 nodes, 64 KiB HTML per unit and
+512-byte block ids (parser and row size); the worker's 2 GiB address space, 16 MiB scratch and
+CPU/wall limits (hostile PDFs); 160 MiB per eight-page render reservation (8 x (12 + 8 MiB));
+one upload in progress and one retained upload; 20,000 pages (the inspection record is one 9 MiB
+frame); eight boxes a page and eight proposal fingerprints (row size); 50,000 proposal groups,
+a 64 MiB proposal memory budget, 50,000,000 proposal comparisons and a 500,000,000-unit proposal
+work budget (server memory, and the time the gate is held). The CLI import keeps its whole-file bounds (below).
 
 One dedicated worker thread runs inspection/rendering. The production `Worker` adapter uses
 the confined 3a API; synthetic unit tests inject a fake. Jobs transition queued → running →
@@ -278,28 +324,32 @@ pages and loads only current job/selection/page facts, without reloading the ins
 
 `contract(id)` builds `mimik-staged-v1` from a consistent row snapshot: PDF hash/size, pinned
 renderer versions/settings, selected pages/revision, per-page geometry, PNG hash/pixels/dpi,
-substituted fonts/text statistics, metadata, and limits (64 pages, 128 MiB PNG, 20,000 units).
+substituted fonts/text statistics and metadata; it carries no limits and no PNG sum (the
+consumer reads it per page: about 12 MB at 20,000 pages).
 It refuses an incomplete/outdated rendering and includes the current exclusion and its revision.
 This is staging
 only: no permanent source, review approval or evidence is created. The later source-creation
-step must consume this contract and copy permanent page facts/images/exclusion geometry/rationale
-and the exclusion's opaque proposal fingerprint (when present),
+step must consume this contract and copy permanent page facts/images/exclusion geometry (the
+boxes of each page, as lists)/rationale and the exclusion's list of opaque proposal
+fingerprints (empty for manual boxes),
 then discard staging; it must not parse the PDF again or retain staging text/proposals.
-The fingerprint's upload-local secret is not in the contract and is deleted with staging;
-after that deletion the copied fingerprint is provenance only, not a recomputable text hash.
+The fingerprints' upload-local secret is not in the contract and is deleted with staging;
+after that deletion the copied fingerprints are provenance only, not recomputable text hashes.
 The contract refuses exclusions naming pages without a current selected rendering, including
 page rows removed by missing-file sweeps or render replacement.
 
 ### Repeated-text proposal
 
-`Uploads::propose_exclusions` reads staged text under the publication/deletion gate, checks
-its stored byte count and SHA-256, and validates the text-line schema and page bounds again.
+`Uploads::propose_exclusions` reads staged text under the publication/deletion gate, one page
+at a time: it checks the stored byte count and SHA-256, validates the text-line schema and page
+bounds again, feeds the page to the streaming proposer and drops it. Only candidate groups
+outlive a page.
 It requires a complete current selection, no queued/running job, and Owner read admission
 before and after the read. Propose responses never include an automatic refresh.
 The pure proposal function normalizes NFKC, collapses whitespace, case-folds with
 `unicase`, and replaces each Unicode decimal-digit run with `#`. No text is written to SQLite,
-logs or error messages. Confirmation accepts only a current proposal fingerprint or no
-fingerprint for a manually drawn/adjusted exclusion. Fingerprints are SHA-256 over a random
+logs or error messages. Confirmation accepts only current proposal fingerprints (up to eight
+distinct) or none for a manually drawn/adjusted exclusion. Fingerprints are SHA-256 over a random
 32-byte per-upload secret followed by normalized UTF-8 text. `getrandom` supplies the secret;
 only the staging upload row stores it (schema 27), and upload deletion removes it. Migration
 27 clears legacy unkeyed proposal fingerprints while preserving confirmed geometry/history.
@@ -313,12 +363,32 @@ Lines are visited by PDF page, then top/left/bottom/right, normalized text bytes
 line ordinal. Each joins the first eligible group in creation order with the same normalized
 text and seed-box IoU at least 0.8 in page fractions, with at most one line per page per group.
 The IoU comparison tolerates four floating-point epsilons at the boundary to account for
-fraction conversion. Ordered eligible-group indices remove already matched groups from the
-current page's search and omit newly created groups until the next page. Per-page eligible
-sets are copied lazily only for texts touched on that page. At most 2,000,000 IoU comparisons
+fraction conversion. Ordered group indices skip the groups already matched on the current page
+and the ones created on it, until the next page. At most 2,000,000 IoU comparisons
 per normalized text across the selection are allowed: an exhausted text is dropped entirely,
 while other texts retain exact grouping and remain eligible. After each page, tracking also
 stops for a text if neither any existing group nor a future seed can reach the page threshold.
+The proposer is bounded in memory and in work (live accounting: groups, their texts and every
+stored box at about 64 bytes): 64 MiB, at most 50,000 live groups, 50,000,000 comparisons per
+run on top of the per-text budget, and a deterministic work budget of `WORK_BUDGET` =
+500,000,000 units. A work unit is one comparison, one index step of a scan (consumed,
+same-page and compared indices alike) or of a prune (each tracked text and each of its
+indices), 8 units for each text line (normalising, digesting, sorting), one unit per 8 bytes of
+a page's JSON when it is read and hashed, one per 8 bytes of its line text when it is fed, and
+one per 8 bytes of each distinct line's normalized text (NFKC can expand text about elevenfold,
+so lines whose normalized text is not 4 to 200 characters are dropped right after, before
+sorting). Scans do not copy the per-text index sets: a
+page skips the groups it already matched and the ones it created. The run holds the upload
+gate, as does `set_exclusion` when it confirms proposals, so the budget is what bounds the
+hold. It is not a measured time: the constants (`WORK_BUDGET`, 8 per line, 8 bytes per unit) are
+sized so that a manual of 20,000 pages with about 20 KB of text and 50 lines each fits: the
+bytes are charged twice, about 100 million units, the normalized text about 50 million more,
+and the lines 8 million. Slice 6 sets them from timings on large inputs. Reaching any bound
+refuses with the same "comparison limit" error. A group that alone can no longer reach the
+threshold becomes a tombstone: its boxes are freed but its seed and index stay, so later
+scans and budgets behave as before and a match on it is consumed without a box; a text none of
+whose groups can reach it is freed whole and only its digest is remembered. The output equals
+that of the previous whole-corpus function (kept as the test oracle).
 If budget exhaustion leaves no qualifying proposal, an HTML error explains the remedy:
 "draw an exclusion by hand". IoU comparisons are therefore bounded per text, and a colliding
 text cannot suppress another text's valid footer proposal (SRC-REPEAT-COST).

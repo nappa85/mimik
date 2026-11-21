@@ -84,7 +84,7 @@ impl Nav {
         }
     }
 
-    fn logo_only() -> Self {
+    pub(crate) fn logo_only() -> Self {
         Self {
             signed_in: false,
             menus: Vec::new(),
