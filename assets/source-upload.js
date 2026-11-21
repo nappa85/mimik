@@ -27,6 +27,16 @@ if (progress && ["queued", "running"].includes(progress.dataset.state)) {
   };
   window.setTimeout(poll, 2000);
 }
+// The combined preview shows the boxes of the confirmed proposals only.
+for (const confirm of document.querySelectorAll("[data-proposal-confirm]")) {
+  const show = () => {
+    for (const mask of document.querySelectorAll("[data-proposal-mask]")) {
+      if (mask.dataset.proposalMask === confirm.dataset.proposalConfirm) mask.style.display = confirm.checked ? "" : "none";
+    }
+  };
+  confirm.addEventListener("change", show);
+  show();
+}
 for (const controls of document.querySelectorAll(".upload-zoom")) {
   controls.hidden = false;
   const image = controls.nextElementSibling.querySelector("img");

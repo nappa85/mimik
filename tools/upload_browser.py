@@ -135,9 +135,11 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         # Exercise automatic JS polling / no-JS meta refresh, not just manual reload.
         page.get_by_text("Inspection: 3 pages", exact=True).wait_for(timeout=10000)
         clean()
-        for n in range(1, 4):
-            page.locator(f'[name="page_{n}"]').check()
+        # The selection is a range list (a screen lists 100 pages; no checkbox per page).
+        require(page.locator('[name^="page_"]').count() == 0, "A per-page checkbox came back")
+        page.locator('[name="pages"]').fill("1-3")
         submit("set")
+        require(page.locator('[name="pages"]').input_value() == "1-3", "Selection range lost")
         submit("render")
         wait_rows(directory, "SELECT count(*) FROM source_upload_pages", lambda r: r[0][0] >= 1)
         submit("cancel")
@@ -202,15 +204,21 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         hashes = rows(directory, "SELECT pdf_page,png_sha256 FROM source_upload_pages")
         submit("propose", redirect=False)
         proposal = page.locator('form[data-form="exclude"]').first
-        require(proposal.get_attribute("data-fingerprint"), "Proposal fingerprint missing")
+        # One confirm control per proposal, unchecked until the Owner ticks it; the boxes of
+        # proposals are never posted (the server rebuilds them from the fingerprint).
+        confirm = proposal.locator('[name^="confirm_"]')
+        require(confirm.count() == 1, "Proposal confirm control missing")
+        require(not confirm.is_checked(), "Proposal confirmed before the Owner chose")
         require(
-            "Affected pages: 1 2 3" in page.locator("#repeated-text").inner_text(),
+            "Affected pages: 1-3 (3)" in page.locator("#repeated-text").inner_text(),
             "Repeated-text pages missing",
         )
         require(
-            all(proposal.locator(f'[name="exclude_{n}"]').is_checked() for n in range(1, 4)),
-            "Proposal page selection changed",
+            not any(proposal.locator(f'[name="exclude_{n}"]').is_checked() for n in range(1, 4)),
+            "Hand-box pages were pre-selected",
         )
+        require(page.locator("[data-proposal-mask]").count() == 3, "Combined preview boxes missing")
+        confirm.check()
         proposal.locator('[name="rationale"]').fill("RATIONALE-PRIVATE-MARKER")
         submit("exclude")
         require(page.locator(".exclusion-mask").count() == 3, "Confirmed overlays missing")

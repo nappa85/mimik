@@ -16,12 +16,23 @@ use std::{
 const PDF: &[u8] = b"%PDF-1.7\nsynthetic spool; the fake inspects without parsing\n";
 const ID: &str = "11111111111111111111111111111111";
 
-fn exclusion() -> exclusions::Exclusion {
-    exclusions::Exclusion {
-        pages: vec![1, 2, 3],
-        boxes: (1..=3).map(|n| (n, [1., 2., 4., 5.])).collect(),
-        proposal_fingerprint: None,
+/// Manual boxes on pages 1-3 (nothing confirmed from a proposal).
+fn exclusion() -> exclusions::ExclusionRequest {
+    exclusions::ExclusionRequest {
+        manual: (1..=3).map(|n| (n, vec![[1., 2., 4., 5.]])).collect(),
         rationale: "RATIONALE-PRIVATE-MARKER".into(),
+        ..Default::default()
+    }
+}
+/// The confirmation of one proposal, by its fingerprint.
+fn confirming(fingerprint: &str) -> exclusions::ExclusionRequest {
+    exclusions::ExclusionRequest {
+        confirmed: vec![exclusions::Confirmation {
+            fingerprint: fingerprint.into(),
+            ..Default::default()
+        }],
+        rationale: "RATIONALE-PRIVATE-MARKER".into(),
+        ..Default::default()
     }
 }
 
@@ -33,12 +44,7 @@ fn exclusion_confirmation_proposal_does_not_hold_store_mutex() {
     start(&m, &o, &id);
     wait(&m);
     let revision = m.read(&id).unwrap().revision;
-    let mut e = exclusion();
-    e.proposal_fingerprint = Some(
-        m.propose_exclusions(&o.auth, &id, revision).unwrap()[0]
-            .fingerprint
-            .clone(),
-    );
+    let e = confirming(&m.propose_exclusions(&o.auth, &id, revision).unwrap()[0].fingerprint);
     let store = m.0.store.clone();
     exclusions::PROPOSAL_HOOK.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
@@ -58,7 +64,7 @@ fn exclusion_confirmation_proposal_does_not_hold_store_mutex() {
             );
         }));
     });
-    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+    m.set_exclusion(&o, &id, revision, 0, &e).unwrap();
 }
 
 #[test]
@@ -116,8 +122,7 @@ fn exclusion_contract_refuses_a_missing_deselected_rendering() {
     start(&m, &o, &id);
     wait(&m);
     let revision = m.read(&id).unwrap().revision;
-    m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
-        .unwrap();
+    m.set_exclusion(&o, &id, revision, 0, &exclusion()).unwrap();
     m.0.store
         .upload_storage(|db| {
             db.execute(
@@ -169,7 +174,7 @@ fn exclusion_revision_replace_remove_concurrent_writes_and_cascade() {
     let original_png = m.0.files.read_image(&id, 1).unwrap();
     let revision = m.read(&id).unwrap().revision;
     assert!(matches!(
-        m.set_exclusion(&o, &id, revision - 1, 0, &exclusion(), false),
+        m.set_exclusion(&o, &id, revision - 1, 0, &exclusion()),
         Err(AppError::Conflict)
     ));
     let mut writers = Vec::new();
@@ -178,7 +183,7 @@ fn exclusion_revision_replace_remove_concurrent_writes_and_cascade() {
         let o = o.clone();
         let id = id.clone();
         writers.push(std::thread::spawn(move || {
-            m.set_exclusion(&o, &id, revision, 0, &exclusion(), false)
+            m.set_exclusion(&o, &id, revision, 0, &exclusion())
         }));
     }
     assert_eq!(
@@ -195,13 +200,12 @@ fn exclusion_revision_replace_remove_concurrent_writes_and_cascade() {
     assert_eq!(first.revision, revision);
     assert!(m.remove_exclusion(&o, &id, revision, 0, "stale").is_err());
     let mut replacement = exclusion();
-    replacement.boxes.get_mut(&1).unwrap()[2] = 6.;
+    replacement.manual.get_mut(&1).unwrap()[0][2] = 6.;
     replacement.rationale = "replacement".into();
-    m.set_exclusion(&o, &id, revision, 1, &replacement, false)
-        .unwrap();
+    m.set_exclusion(&o, &id, revision, 1, &replacement).unwrap();
     assert_eq!(
         m.contract(&id).unwrap().exclusion.unwrap().boxes[&1],
-        [1., 2., 6., 5.]
+        [[1., 2., 6., 5.]]
     );
     assert!(m.set(&o, &id, revision, &metadata(), &[1, 2]).is_err());
     assert!(matches!(
@@ -256,12 +260,17 @@ fn exclusion_proposal_is_current_hash_verified_and_extension_is_explicit() {
     let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
     assert_eq!(proposals.len(), 1);
     assert_eq!(proposals[0].boxes.len(), 3);
-    let mut e = exclusion();
-    e.proposal_fingerprint = Some(proposals[0].fingerprint.clone());
-    e.pages.push(4);
-    e.boxes.insert(4, proposals[0].absent[&4]);
-    assert!(m.set_exclusion(&o, &id, revision, 0, &e, false).is_err());
-    m.set_exclusion(&o, &id, revision, 0, &e, true).unwrap();
+    let mut e = confirming(&proposals[0].fingerprint);
+    e.confirmed[0].absent.push(4);
+    assert!(m.set_exclusion(&o, &id, revision, 0, &e).is_err());
+    e.extend_absent = true;
+    m.set_exclusion(&o, &id, revision, 0, &e).unwrap();
+    let stored = m.read(&id).unwrap().exclusion.unwrap();
+    assert_eq!(stored.pages, [1, 2, 3, 4]);
+    assert_eq!(
+        stored.proposal_fingerprints,
+        [proposals[0].fingerprint.clone()]
+    );
     assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
     std::fs::write(text, b"[PRIVATE-TEXT-MARKER]").unwrap();
     let error = m.propose_exclusions(&o.auth, &id, revision).err().unwrap();
@@ -291,7 +300,7 @@ fn exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row() {
         csrf: o.auth.stale_csrf_fixture(),
     };
     assert!(
-        m.set_exclusion(&invalid, &id, revision, 0, &exclusion(), false)
+        m.set_exclusion(&invalid, &id, revision, 0, &exclusion())
             .is_err()
     );
     assert!(
@@ -306,17 +315,13 @@ fn exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row() {
         [0., 0., 1., 11.],
     ] {
         let mut e = exclusion();
-        e.boxes.insert(1, bounds);
-        let error = m
-            .set_exclusion(&o, &id, revision, 0, &e, false)
-            .unwrap_err();
+        e.manual.insert(1, vec![bounds]);
+        let error = m.set_exclusion(&o, &id, revision, 0, &e).unwrap_err();
         assert!(!error.to_string().contains(&e.rationale));
     }
-    let mut forged = exclusion();
-    forged.proposal_fingerprint = Some("PRIVATE-TEXT-MARKER".into());
-    let error = m
-        .set_exclusion(&o, &id, revision, 0, &forged, true)
-        .unwrap_err();
+    let mut forged = confirming("PRIVATE-TEXT-MARKER");
+    forged.extend_absent = true;
+    let error = m.set_exclusion(&o, &id, revision, 0, &forged).unwrap_err();
     assert!(!format!("{error:?}").contains("PRIVATE-TEXT-MARKER"));
     let marker = "PRIVATE-TEXT-MARKER";
     let bytes = worker::records::json(&vec![worker::records::TextLine {
@@ -345,9 +350,8 @@ fn exclusion_validates_geometry_authority_and_personal_data_stays_in_its_row() {
         .unwrap();
     let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
     assert_eq!(proposals[0].text, "private-text-marker");
-    let mut e = exclusion();
-    e.proposal_fingerprint = Some(proposals[0].fingerprint.clone());
-    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+    let e = confirming(&proposals[0].fingerprint);
+    m.set_exclusion(&o, &id, revision, 0, &e).unwrap();
     assert_private_upload_rows(&m);
 }
 
@@ -445,15 +449,8 @@ fn exclusion_history_expires_with_its_upload() {
     selected(&m, &o, &id, &[1, 2, 3]);
     start(&m, &o, &id);
     wait(&m);
-    m.set_exclusion(
-        &o,
-        &id,
-        m.read(&id).unwrap().revision,
-        0,
-        &exclusion(),
-        false,
-    )
-    .unwrap();
+    m.set_exclusion(&o, &id, m.read(&id).unwrap().revision, 0, &exclusion())
+        .unwrap();
     m.0.store
         .upload_storage(|db| {
             db.execute(
@@ -541,13 +538,12 @@ fn rotated_displayed_exclusion_round_trips_without_applying_transform_twice() {
     start(&m, &o, &id);
     wait(&m);
     let mut e = exclusion();
-    e.pages = vec![1];
-    e.boxes.retain(|n, _| *n == 1);
+    e.manual.retain(|n, _| *n == 1);
     let revision = m.read(&id).unwrap().revision;
-    m.set_exclusion(&o, &id, revision, 0, &e, false).unwrap();
+    m.set_exclusion(&o, &id, revision, 0, &e).unwrap();
     let contract = m.contract(&id).unwrap();
     assert_eq!(contract.pages[0].transform, [0., 1., 1., 0., 0., 0.]);
-    assert_eq!(contract.exclusion.unwrap().boxes[&1], e.boxes[&1]);
+    assert_eq!(contract.exclusion.unwrap().boxes[&1], e.manual[&1]);
 }
 
 pub(crate) fn assert_rendered_exclusion_round_trip(inspection: Inspection, rendered: RenderedPage) {
@@ -587,19 +583,30 @@ pub(crate) fn assert_rendered_exclusion_round_trip(inspection: Inspection, rende
     selected(&m, &o, &id, &[1]);
     start(&m, &o, &id);
     wait(&m);
-    let e = exclusions::Exclusion {
-        pages: vec![1],
-        boxes: [(1, expected)].into(),
+    let e = exclusions::ExclusionRequest {
+        manual: [(1, vec![expected])].into(),
         rationale: "Synthetic rotated page".into(),
-        proposal_fingerprint: None,
+        ..Default::default()
     };
-    m.set_exclusion(&o, &id, m.read(&id).unwrap().revision, 0, &e, false)
+    m.set_exclusion(&o, &id, m.read(&id).unwrap().revision, 0, &e)
         .unwrap();
+    // Stored rounded outward to 0.01 pt: it covers the box and exceeds it by less than 0.01.
+    let covers = |stored: &[[f64; 4]]| {
+        let [b] = stored else { panic!("one box") };
+        b[0] <= expected[0]
+            && b[1] <= expected[1]
+            && b[2] >= expected[2]
+            && b[3] >= expected[3]
+            && expected[0] - b[0] < 0.01
+            && expected[1] - b[1] < 0.01
+            && b[2] - expected[2] < 0.01
+            && b[3] - expected[3] < 0.01
+    };
     let u = m.read(&id).unwrap();
-    assert_eq!(u.exclusion.unwrap().boxes[&1], expected);
+    assert!(covers(&u.exclusion.unwrap().boxes[&1]));
     let contract = m.contract(&id).unwrap();
     assert_eq!(contract.pages[0].transform, fact.transform);
-    assert_eq!(contract.exclusion.unwrap().boxes[&1], expected);
+    assert!(covers(&contract.exclusion.unwrap().boxes[&1]));
 }
 
 fn live_repeated_text(environment: &str, require_proposal: bool) {
@@ -748,6 +755,8 @@ struct Fake {
     large: AtomicBool,
     /// When nonzero, inspection reports this many pages (a stand-in for a very large PDF).
     inspected_pages: std::sync::atomic::AtomicU32,
+    /// A second repeated text ("second mark") on every rendered page, at these bounds.
+    extra_line: Mutex<Option<exclusions::BoxPoints>>,
     /// Runs inside the worker call, after it has produced its output: a stand-in for a change
     /// to the staged file while a worker has it open.
     during_run: Mutex<Option<Box<dyn Fn() + Send>>>,
@@ -800,6 +809,12 @@ impl Worker for Fake {
                 return Err(Reason::Cancelled);
             }
             let mut rendered = rendered(p.n);
+            if let Some(bounds) = *self.extra_line.lock().unwrap() {
+                rendered.lines.push(worker::records::TextLine {
+                    text: "second mark".into(),
+                    bounds,
+                });
+            }
             if self.large.load(Ordering::Acquire) {
                 let mut data = vec![0; 1800 * 1800 * 3];
                 getrandom::fill(&mut data).unwrap();
@@ -1193,9 +1208,12 @@ fn inspection_render_batches_contract_and_revision_independent_currency() {
     assert_eq!(contract.renderer.settings, RenderSettings::default());
     assert_eq!(contract.pages.len(), 17);
     assert!(contract.exclusion.is_none());
-    assert_eq!(contract.limits.pages, 64);
-    assert_eq!(contract.limits.units, 20000);
-    assert_eq!(contract.limits.png_bytes, 128 * MIB);
+    // No per-upload totals: the contract carries no limits.
+    assert!(
+        !serde_json::to_string(&contract)
+            .unwrap()
+            .contains("\"limits\"")
+    );
     let rendered_page = &contract.pages[0];
     assert_eq!(rendered_page.transform, page(1).transform);
     assert_eq!(rendered_page.stats.fonts_substituted, ["FixtureFont"]);
@@ -1238,13 +1256,7 @@ fn inspection_render_batches_contract_and_revision_independent_currency() {
 fn selection_limits_and_metadata_import_rules() {
     let (_dir, m, o, _) = fixture();
     let id = create(&m, &o);
-    for selection in [
-        vec![0],
-        vec![71],
-        vec![1, 1],
-        vec![2, 1],
-        (1..=65).collect(),
-    ] {
+    for selection in [vec![0], vec![71], vec![1, 1], vec![2, 1]] {
         assert!(m.set(&o, &id, 1, &metadata(), &selection).is_err());
     }
     assert!(matches!(
@@ -1257,8 +1269,9 @@ fn selection_limits_and_metadata_import_rules() {
     invalid = metadata();
     invalid.language = "x".repeat(31);
     assert!(m.set(&o, &id, 1, &invalid, &[1]).is_err());
-    selected(&m, &o, &id, &(1..=64).collect::<Vec<_>>());
-    assert_eq!(m.read(&id).unwrap().selected_pages.len(), 64);
+    // Every inspected page is a valid selection (the fake document has 70).
+    selected(&m, &o, &id, &(1..=70).collect::<Vec<_>>());
+    assert_eq!(m.read(&id).unwrap().selected_pages.len(), 70);
     let mut unicode = metadata();
     unicode.edition = "é".repeat(100);
     m.set(&o, &id, 2, &unicode, &[1]).unwrap();
@@ -1990,7 +2003,7 @@ fn private_files_no_follow_and_atomic_rename_failure_release() {
 }
 
 #[test]
-fn per_upload_png_and_text_budgets_release_reservations() {
+fn no_per_upload_png_or_text_total_remains_but_the_per_page_text_bound_does() {
     let (_dir, m, o, _) = fixture();
     let id = create(&m, &o);
     selected(&m, &o, &id, &[1, 2]);
@@ -2009,18 +2022,14 @@ fn per_upload_png_and_text_budgets_release_reservations() {
             Ok(())
         })
         .unwrap();
-    // Artificial metadata isolates the cumulative check without allocating 128 MiB fixtures.
+    // Artificial metadata stands for 128 MiB of PNG and more than 512 MiB of text on the other
+    // pages without allocating them: neither total is a limit any more.
     m.0.store.upload_storage(|db| {
         for n in 3..=12 {db.execute("INSERT INTO source_upload_pages SELECT upload_id,?1,rendered_revision,png_sha256,png_bytes,width_px,height_px,dpi,width_points,height_points,transform,json_set(stats,'$.n',?1),settings,text_sha256,text_bytes,renderer_crate_version,mupdf_version FROM source_upload_pages WHERE pdf_page=1",[n])?;}Ok(())
     }).unwrap();
     let mut r = m.0.ledger.reserve(staging::RENDER_RESERVATION).unwrap();
-    assert!(matches!(
-        m.publish(&id, 2, &rendered(2), &mut r, &AtomicBool::new(false)),
-        Err(AppError::Invalid(
-            "too large for one source: select fewer pages"
-        ))
-    ));
-    assert!(m.contract(&id).is_err());
+    m.publish(&id, 2, &rendered(2), &mut r, &AtomicBool::new(false))
+        .unwrap();
     drop(r);
     assert_eq!(m.0.ledger.usage().unwrap().1, 0);
     m.0.store.upload_storage(|db| {
@@ -2029,9 +2038,22 @@ fn per_upload_png_and_text_budgets_release_reservations() {
         Ok(())
     }).unwrap();
     let mut r = m.0.ledger.reserve(staging::RENDER_RESERVATION).unwrap();
+    m.publish(&id, 2, &rendered(2), &mut r, &AtomicBool::new(false))
+        .unwrap();
+    drop(r);
+    assert_eq!(m.0.ledger.usage().unwrap().1, 0);
+    // The per-page text bound (8 MiB) stays: one page's text over it is refused, nothing leaks.
+    let mut big = rendered(2);
+    big.lines = (0..200_000)
+        .map(|_| worker::records::TextLine {
+            text: "x".repeat(40),
+            bounds: [1., 1., 3., 3.],
+        })
+        .collect();
+    let mut r = m.0.ledger.reserve(staging::RENDER_RESERVATION).unwrap();
     assert!(matches!(
-        m.publish(&id, 2, &rendered(2), &mut r, &AtomicBool::new(false)),
-        Err(AppError::Invalid("Not enough space."))
+        m.publish(&id, 2, &big, &mut r, &AtomicBool::new(false)),
+        Err(AppError::Invalid("too_large"))
     ));
     drop(r);
     assert_eq!(m.0.ledger.usage().unwrap().1, 0);
@@ -2914,4 +2936,392 @@ fn a_sweep_during_the_spool_write_then_a_dropped_upload_returns_usage_to_zero() 
     drop(phase);
     assert_eq!(m.0.ledger.usage().unwrap(), (0, 0));
     assert_eq!(spool_names(&dir), 0);
+}
+
+/// An upload of `pages` fake pages with every page selected and rendered.
+fn rendered_upload(pages: u32) -> (tempfile::TempDir, Uploads, OwnerWrite, Arc<Fake>, String) {
+    let (dir, m, o, f) = fixture();
+    f.inspected_pages.store(pages, Ordering::Release);
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &(1..=pages).collect::<Vec<_>>());
+    start(&m, &o, &id);
+    wait(&m);
+    (dir, m, o, f, id)
+}
+
+#[test]
+fn five_hundred_pages_are_selected_rendered_proposed_and_excluded() {
+    let (_dir, m, o, f, id) = rendered_upload(500);
+    let u = m.read(&id).unwrap();
+    assert_eq!(
+        (u.state.as_str(), u.job.done, u.job.total),
+        ("rendered", 500, 500)
+    );
+    assert_eq!(f.calls.load(Ordering::SeqCst), 63);
+    assert_eq!(m.contract(&id).unwrap().pages.len(), 500);
+    // The streamed proposal sees all 500 text pages; confirming it excludes all of them.
+    let proposals = m.propose_exclusions(&o.auth, &id, u.revision).unwrap();
+    assert_eq!(proposals[0].boxes.len(), 500);
+    m.set_exclusion(
+        &o,
+        &id,
+        u.revision,
+        0,
+        &confirming(&proposals[0].fingerprint),
+    )
+    .unwrap();
+    let stored = m.contract(&id).unwrap().exclusion.unwrap();
+    assert_eq!(stored.pages.len(), 500);
+    assert!(stored.boxes.values().all(|b| b.len() == 1));
+}
+
+#[test]
+fn twenty_thousand_pages_are_selected_and_rendered_without_totals() {
+    // One page is rendered for real; the other rows are copies of its row (the files of 20,000
+    // pages would only measure the disk). The state is that of a finished 20,000-page render.
+    let (_dir, m, o, f) = fixture();
+    f.inspected_pages.store(20_000, Ordering::Release);
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    let all: Vec<u32> = (1..=20_000).collect();
+    let revision = m.read(&id).unwrap().revision;
+    m.set(&o, &id, revision, &metadata(), &all).unwrap();
+    m.0.store.upload_storage(|db| {
+        db.execute("INSERT INTO source_upload_pages SELECT upload_id,n.value,rendered_revision,png_sha256,png_bytes,width_px,height_px,dpi,width_points,height_points,transform,json_set(stats,'$.n',n.value),settings,text_sha256,text_bytes,renderer_crate_version,mupdf_version FROM source_upload_pages, (WITH RECURSIVE n(value) AS (SELECT 2 UNION ALL SELECT value+1 FROM n WHERE value<20000) SELECT value FROM n) n WHERE pdf_page=1", [])?;
+        db.execute("UPDATE source_jobs SET pages_done=20000,pages_total=20000", [])?;
+        Ok(())
+    }).unwrap();
+    let started = Instant::now();
+    let u = m.read(&id).unwrap();
+    assert_eq!(u.selected_pages.len(), 20_000);
+    assert!(remaining(&u).is_empty());
+    let contract = m.contract(&id).unwrap();
+    assert_eq!(contract.pages.len(), 20_000);
+    assert_eq!(contract.selected_pages.len(), 20_000);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn selection_checks_are_linear_in_the_pages() {
+    // 20,000 selected of 20,000 inspected: the quadratic checks took 4 x 10^8 comparisons here.
+    let (_dir, m, o, f) = fixture();
+    f.inspected_pages.store(20_000, Ordering::Release);
+    let id = create(&m, &o);
+    let started = Instant::now();
+    let all: Vec<u32> = (1..=20_000).collect();
+    m.set(&o, &id, 1, &metadata(), &all).unwrap();
+    let u = m.read(&id).unwrap();
+    assert_eq!(remaining(&u).len(), 20_000);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    // A page outside the document, a repeat and a descending pair are still refused.
+    for bad in [vec![20_001], vec![1, 1], vec![2, 1]] {
+        assert!(m.set(&o, &id, 2, &metadata(), &bad).is_err());
+    }
+}
+
+#[test]
+fn range_lists_round_trip_and_the_worst_case_fits_the_action_body_limit() {
+    assert_eq!(parse_page_ranges("1-500, 520").unwrap().len(), 501);
+    assert_eq!(
+        parse_page_ranges(" 3,1-2 ,2-4\n7").unwrap(),
+        [1, 2, 3, 4, 7]
+    );
+    assert_eq!(parse_page_ranges("").unwrap(), Vec::<u32>::new());
+    for bad in ["0", "5-3", "1-20001", "a", "1-", "-2", "1--2", "1.5"] {
+        assert!(parse_page_ranges(bad).is_err(), "{bad}");
+    }
+    assert_eq!(format_page_ranges(&[1, 2, 3, 7, 9, 10]), "1-3,7,9-10");
+    assert_eq!(format_page_ranges(&[]), "");
+    // Alternate pages are the longest range list of an upload: 10,000 entries.
+    let odd: Vec<u32> = (1..=20_000).step_by(2).collect();
+    let text = format_page_ranges(&odd);
+    assert_eq!(parse_page_ranges(&text).unwrap(), odd);
+    let body = format!(
+        "csrf={}&revision=1&system=mork-borg&edition=Synthetic&language=en&pages={}",
+        "a".repeat(64),
+        text.replace(',', "%2C")
+    );
+    assert!(body.len() < 131_072 - 16_384, "{} bytes", body.len());
+}
+
+#[test]
+fn an_exclusion_covers_two_hundred_and_fifty_pages_with_several_proposals() {
+    let (_dir, m, o, f) = fixture();
+    // Two repeated texts at different places; the second also recurs on every page.
+    *f.extra_line.lock().unwrap() = Some([5., 6., 8., 8.]);
+    f.inspected_pages.store(250, Ordering::Release);
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &(1..=250).collect::<Vec<_>>());
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    assert_eq!(proposals.len(), 2);
+    let mut request = exclusions::ExclusionRequest {
+        confirmed: proposals
+            .iter()
+            .map(|p| exclusions::Confirmation {
+                fingerprint: p.fingerprint.clone(),
+                skip: vec![7],
+                ..Default::default()
+            })
+            .collect(),
+        rationale: "two proposals".into(),
+        ..Default::default()
+    };
+    // Page 7 has no box left from either proposal: a manual box keeps the page in the list.
+    request.manual.insert(7, vec![[1., 1., 2., 2.]]);
+    m.set_exclusion(&o, &id, revision, 0, &request).unwrap();
+    let stored = m.read(&id).unwrap().exclusion.unwrap();
+    assert_eq!(stored.pages.len(), 250);
+    assert_eq!(stored.proposal_fingerprints.len(), 2);
+    assert!(
+        stored
+            .boxes
+            .iter()
+            .all(|(n, b)| b.len() == if *n == 7 { 1 } else { 2 })
+    );
+    assert_eq!(m.contract(&id).unwrap().exclusion.unwrap().pages.len(), 250);
+    // Both fingerprints are in the row the migration view checks; an unknown one is refused.
+    request.confirmed[0].fingerprint = "f".repeat(64);
+    assert!(m.set_exclusion(&o, &id, revision, 1, &request).is_err());
+    // Skipping a page the proposal never found is refused, not ignored.
+    request.confirmed[0].fingerprint = proposals[0].fingerprint.clone();
+    request.confirmed[0].skip = vec![251];
+    assert!(m.set_exclusion(&o, &id, revision, 1, &request).is_err());
+}
+
+#[test]
+fn confirmed_proposals_whose_rounded_boxes_coincide_are_deduplicated_not_refused() {
+    let (_dir, m, o, f) = fixture();
+    // The second text sits exactly where the first does: equal padded boxes on every page.
+    *f.extra_line.lock().unwrap() = Some([1., 1., 3., 3.]);
+    let id = create(&m, &o);
+    selected(&m, &o, &id, &[1, 2, 3]);
+    start(&m, &o, &id);
+    wait(&m);
+    let revision = m.read(&id).unwrap().revision;
+    let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    assert_eq!(proposals.len(), 2);
+    let request = exclusions::ExclusionRequest {
+        confirmed: proposals
+            .iter()
+            .map(|p| exclusions::Confirmation {
+                fingerprint: p.fingerprint.clone(),
+                ..Default::default()
+            })
+            .collect(),
+        rationale: "same place".into(),
+        ..Default::default()
+    };
+    m.set_exclusion(&o, &id, revision, 0, &request).unwrap();
+    let stored = m.read(&id).unwrap().exclusion.unwrap();
+    assert!(stored.boxes.values().all(|b| b.len() == 1));
+    assert_eq!(stored.proposal_fingerprints.len(), 2);
+}
+
+#[test]
+fn a_windowed_manual_edit_keeps_the_fingerprints_of_the_boxes_it_keeps() {
+    let (_dir, m, o, _, id) = rendered_upload(150);
+    let revision = m.read(&id).unwrap().revision;
+    let proposals = m.propose_exclusions(&o.auth, &id, revision).unwrap();
+    let fingerprint = proposals[0].fingerprint.clone();
+    m.set_exclusion(&o, &id, revision, 0, &confirming(&fingerprint))
+        .unwrap();
+    // Another screen: pages 101-200 are edited by hand; pages 1-100 keep their proposal boxes.
+    let edit = exclusions::ExclusionRequest {
+        manual: [(120, vec![[1., 1., 2., 2.]])].into(),
+        window: Some((101, 200)),
+        rationale: "edit".into(),
+        ..Default::default()
+    };
+    m.set_exclusion(&o, &id, revision, 1, &edit).unwrap();
+    let stored = m.read(&id).unwrap().exclusion.unwrap();
+    assert_eq!(stored.pages.len(), 101);
+    assert_eq!(
+        stored.proposal_fingerprints,
+        std::slice::from_ref(&fingerprint)
+    );
+    // Confirming it again from a window adds nothing twice.
+    let again = exclusions::ExclusionRequest {
+        window: Some((101, 200)),
+        ..confirming(&fingerprint)
+    };
+    m.set_exclusion(&o, &id, revision, 2, &again).unwrap();
+    let stored = m.read(&id).unwrap().exclusion.unwrap();
+    assert_eq!(stored.proposal_fingerprints, [fingerprint]);
+}
+
+#[test]
+fn unticking_a_page_with_saved_further_boxes_drops_it_but_edited_further_boxes_are_refused() {
+    let (_dir, m, o, _, id) = rendered_upload(3);
+    let revision = m.read(&id).unwrap().revision;
+    let mut first = exclusion();
+    first
+        .manual
+        .insert(1, vec![[1., 1., 2., 2.], [3., 3., 4., 4.]]);
+    m.set_exclusion(&o, &id, revision, 0, &first).unwrap();
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes[&1].len(), 2);
+    // Page 1 is unticked with its prefilled further box unchanged: the page is dropped.
+    let mut drop_page = exclusions::ExclusionRequest {
+        manual: [(2, vec![[1., 1., 2., 2.]])].into(),
+        unticked_extra: [(1, vec![[3., 3., 4., 4.]])].into(),
+        window: Some((1, 100)),
+        rationale: "untick".into(),
+        ..Default::default()
+    };
+    // The same request with the further box edited is refused, not silently dropped.
+    drop_page.unticked_extra.insert(1, vec![[3., 3., 4., 5.]]);
+    assert!(m.set_exclusion(&o, &id, revision, 1, &drop_page).is_err());
+    drop_page.unticked_extra.insert(1, vec![[3., 3., 4., 4.]]);
+    m.set_exclusion(&o, &id, revision, 1, &drop_page).unwrap();
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().pages, [2]);
+    // Further boxes for a page that never had any are refused too.
+    drop_page.unticked_extra = [(3, vec![[5., 5., 6., 6.]])].into();
+    assert!(m.set_exclusion(&o, &id, revision, 2, &drop_page).is_err());
+}
+
+/// The stored text of the boxes of `page` in the latest revision.
+fn stored_boxes(m: &Uploads, id: &str, page: u32) -> String {
+    m.0.store
+        .upload_storage(|db| {
+            Ok(db.query_row(
+                "SELECT json_extract(boxes,'$.\"'||?2||'\"') FROM source_upload_exclusions
+                 WHERE upload_id=?1 ORDER BY revision DESC LIMIT 1",
+                params![id, page],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .unwrap()
+}
+
+#[test]
+fn eight_boxes_a_page_are_stored_nine_are_refused_and_equal_boxes_collapse() {
+    let (_dir, m, o, _, id) = rendered_upload(3);
+    let revision = m.read(&id).unwrap().revision;
+    let eight: Vec<_> = (0..8)
+        .map(|i| [f64::from(i), 1., f64::from(i) + 0.5, 2.])
+        .collect();
+    let mut request = exclusion();
+    request.manual.insert(1, eight.clone());
+    m.set_exclusion(&o, &id, revision, 0, &request).unwrap();
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes[&1].len(), 8);
+    let mut nine = eight.clone();
+    nine.push([8., 1., 8.5, 2.]);
+    request.manual.insert(1, nine.clone());
+    assert!(matches!(
+        m.set_exclusion(&o, &id, revision, 1, &request),
+        Err(AppError::Invalid("At most eight exclusion boxes per page."))
+    ));
+    // Nine boxes of which two are equal once rounded outward to 0.01 pt are eight.
+    nine[8] = [0.0004, 1.0001, 0.5, 2.];
+    request.manual.insert(1, nine);
+    m.set_exclusion(&o, &id, revision, 1, &request).unwrap();
+    let stored = m.read(&id).unwrap().exclusion.unwrap().boxes[&1].clone();
+    assert_eq!(stored.len(), 8);
+    // Equal boxes are bit-identical text: no "1.0" beside "1" for the migration's distinct check.
+    assert_eq!(
+        stored_boxes(&m, &id, 1),
+        "[[0.0,1.0,0.5,2.0],[1.0,1.0,1.5,2.0],[2.0,1.0,2.5,2.0],[3.0,1.0,3.5,2.0],[4.0,1.0,4.5,2.0],[5.0,1.0,5.5,2.0],[6.0,1.0,6.5,2.0],[7.0,1.0,7.5,2.0]]"
+    );
+}
+
+/// Replace the inspected page size of page 1 (the rows of later renders follow it).
+fn resize_page_one(m: &Uploads, id: &str, width: f64, height: f64) {
+    let mut u = m.read(id).unwrap();
+    let data = u.inspection.as_mut().unwrap();
+    data.pages[0].width = width;
+    data.pages[0].height = height;
+    m.0.store
+        .upload_storage(|db| {
+            db.execute(
+                "UPDATE source_uploads SET inspection=?2 WHERE id=?1",
+                params![id, json(data)?],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn worst_case_digit_boxes_fit_the_migration_view_and_an_edge_box_on_a_595_2756_page_is_stored() {
+    let (_dir, m, o, f) = fixture();
+    let id = create(&m, &o);
+    resize_page_one(&m, &id, 4000., 4000.);
+    selected(&m, &o, &id, &[1]);
+    start(&m, &o, &id);
+    wait(&m);
+    assert!(f.calls.load(Ordering::SeqCst) > 0);
+    let revision = m.read(&id).unwrap().revision;
+    // Eight boxes of seven characters a number (1111.11-style) after rounding outward.
+    let worst: Vec<_> = (0..8)
+        .map(|i| {
+            let i = f64::from(i);
+            [
+                1111.1111 + i * 100.123,
+                1212.1212 + i * 100.123,
+                3200.5555 + i * 100.0111,
+                3100.5555 + i * 100.0111,
+            ]
+        })
+        .collect();
+    let request = exclusions::ExclusionRequest {
+        manual: [(1, worst)].into(),
+        rationale: "worst case".into(),
+        ..Default::default()
+    };
+    assert_eq!(m.read(&id).unwrap().pages[0].width_points, 4000.);
+    // The migration's trigger refuses a page over 384 bytes: the write succeeding is the check.
+    m.set_exclusion(&o, &id, revision, 0, &request).unwrap();
+    let text = stored_boxes(&m, &id, 1);
+    assert!(text.len() <= 384, "{} bytes", text.len());
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes[&1].len(), 8);
+    // A box ending at the page edge: 595.2756 rounds outward to 595.28, which stays valid.
+    m.remove_exclusion(&o, &id, revision, 1, "reset").unwrap();
+    resize_page_one(&m, &id, 595.2756, 841.89);
+    m.0.store
+        .upload_storage(|db| {
+            db.execute("UPDATE source_upload_pages SET width_points=595.2756,height_points=841.89 WHERE pdf_page=1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let edge = exclusions::ExclusionRequest {
+        manual: [(1, vec![[500.1234, 800.0001, 595.2756, 841.89]])].into(),
+        rationale: "edge".into(),
+        ..Default::default()
+    };
+    m.set_exclusion(&o, &id, revision, 2, &edge).unwrap();
+    assert_eq!(
+        m.read(&id).unwrap().exclusion.unwrap().boxes[&1],
+        [[500.12, 800., 595.28, 841.89]]
+    );
+    // Beyond the rounded page edge is refused.
+    let mut outside = edge;
+    outside.manual.get_mut(&1).unwrap()[0][2] = 595.2801;
+    assert!(m.set_exclusion(&o, &id, revision, 3, &outside).is_err());
+    // The inclusive rule over the stored union: the page-wide header is contained, a unit
+    // reaching past it crosses and one touching its edge does not.
+    let stored = &m.read(&id).unwrap().exclusion.unwrap().boxes[&1];
+    assert_eq!(
+        exclusions::masking([500.5, 810., 595.2756, 840.], stored),
+        exclusions::Masking::Contained
+    );
+    assert_eq!(
+        exclusions::masking([500.5, 790., 595.2756, 840.], stored),
+        exclusions::Masking::Crossing
+    );
+    assert_eq!(
+        exclusions::masking([500.5, 700., 595.2756, 800.], stored),
+        exclusions::Masking::Clear
+    );
 }

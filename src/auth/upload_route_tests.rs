@@ -443,7 +443,7 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
     assert_eq!(response.status(), StatusCode::OK);
     let text = body_text(response).await;
     assert!(text.contains("Repeated text: private-text-marker page #"));
-    assert!(text.contains("Affected pages: 1 2 3"));
+    assert!(text.contains("Affected pages: 1-3 (3)"));
     assert!(text.contains("class=\"region-overlay\""));
     assert_eq!(
         text.matches("data-region-rectangle hidden").count(),
@@ -452,7 +452,7 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
     );
     assert!(!text.contains("http-equiv=\"refresh\""));
     let fingerprint = text
-        .split("name=\"fingerprint\" value=\"")
+        .split("name=\"confirm_")
         .nth(1)
         .unwrap()
         .split('"')
@@ -462,8 +462,9 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
         .map(|n| format!("exclude_{n}=1&box_{n}_0=3&box_{n}_1=3&box_{n}_2=97&box_{n}_3=17"))
         .collect::<Vec<_>>()
         .join("&");
+    // Confirming a proposal posts its fingerprint only; the server rebuilds the boxes.
     let fields = format!(
-        "revision=2&exclusion_revision=0&fingerprint={fingerprint}&rationale=route-marker&{geometry}"
+        "revision=2&exclusion_revision=0&confirm_{fingerprint}=1&rationale=route-marker&window_from=1&window_to=100"
     );
     assert_eq!(
         app.clone()
@@ -491,10 +492,11 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
     assert_eq!(response.status(), StatusCode::OK);
     let text = body_text(response).await;
     assert_eq!(text.matches("class=\"exclusion-mask\"").count(), 3);
-    assert!(text.contains("x=\"3\" y=\"3\" width=\"94\" height=\"14\""));
     assert!(!text.contains("route-marker"));
-    let adjusted = format!("revision=2&exclusion_revision=1&rationale=adjusted&{geometry}")
-        .replace("box_1_0=3", "box_1_0=4");
+    let adjusted = format!(
+        "revision=2&exclusion_revision=1&rationale=adjusted&window_from=1&window_to=100&{geometry}"
+    )
+    .replace("box_1_0=3", "box_1_0=4");
     assert_eq!(
         app.clone()
             .oneshot(request("exclude", &adjusted))
@@ -503,7 +505,15 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
             .status(),
         StatusCode::SEE_OTHER
     );
-    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes[&1][0], 4.);
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes[&1][0][0], 4.);
+    let get = Request::builder()
+        .uri(&path)
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", format!("mimik_session={session}"))
+        .body(Body::empty())
+        .unwrap();
+    let text = body_text(app.clone().oneshot(get).await.unwrap()).await;
+    assert!(text.contains("x=\"4\" y=\"3\" width=\"93\" height=\"14\""));
     assert_eq!(
         app.clone()
             .oneshot(request(
@@ -519,6 +529,55 @@ async fn upload_route_propose_confirm_adjust_remove_displayed_boxes() {
     assert_eq!(m.read(&id).unwrap().exclusion_revision, 3);
     assert_eq!(
         app.oneshot(request("discard", "")).await.unwrap().status(),
+        StatusCode::SEE_OTHER
+    );
+    clean(&m, &dir).await;
+}
+
+#[cfg(feature = "dev-endpoint")]
+#[tokio::test]
+async fn upload_route_selection_takes_unordered_ranges_and_select_all() {
+    let (dir, app, session, m, path, id) = setup_rendered_upload_route().await;
+    let set = |revision: u32, pages: &str| {
+        upload_action(
+            session,
+            &path,
+            "set",
+            &format!("revision={revision}&system=mork-borg&edition=Synthetic&language=en&{pages}"),
+        )
+    };
+    // Unordered, overlapping and repeated ranges are merged into an ascending subset.
+    let status = |response: axum::response::Response| response.status();
+    assert_eq!(
+        status(app.clone().oneshot(set(2, "pages=3,%202-3")).await.unwrap()),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(m.read(&id).unwrap().selected_pages, [2, 3]);
+    assert_eq!(
+        status(app.clone().oneshot(set(3, "select_all=1")).await.unwrap()),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(m.read(&id).unwrap().selected_pages, [1, 2, 3]);
+    for bad in [
+        "pages=3-1",
+        "pages=0",
+        "pages=1-20001",
+        "pages=x",
+        "pages=9",
+    ] {
+        assert_ne!(
+            status(app.clone().oneshot(set(4, bad)).await.unwrap()),
+            StatusCode::SEE_OTHER,
+            "{bad}"
+        );
+    }
+    assert_eq!(m.read(&id).unwrap().selected_pages, [1, 2, 3]);
+    assert_eq!(
+        status(
+            app.oneshot(upload_action(session, &path, "discard", ""))
+                .await
+                .unwrap()
+        ),
         StatusCode::SEE_OTHER
     );
     clean(&m, &dir).await;
@@ -579,7 +638,7 @@ async fn setup_rendered_upload_route_worker(
             session,
             &path,
             "set",
-            "revision=1&system=mork-borg&edition=Synthetic&language=en&page_1=1&page_2=1&page_3=1",
+            "revision=1&system=mork-borg&edition=Synthetic&language=en&pages=1-3",
         ))
         .await
         .unwrap();
@@ -594,6 +653,105 @@ async fn setup_rendered_upload_route_worker(
     );
     wait_uploaded_job(&m, &id).await;
     (dir, app, session, m, path, id)
+}
+
+#[cfg(feature = "dev-endpoint")]
+#[tokio::test]
+async fn upload_route_same_text_at_two_places_is_one_confirm_control_with_every_box() {
+    use crate::sources::uploads::development::Synthetic;
+    // The same text at two places on every page: two groups, one fingerprint.
+    struct Twin(Synthetic);
+    impl Worker for Twin {
+        fn availability(&self) -> worker::Availability {
+            self.0.availability()
+        }
+        fn inspect(
+            &self,
+            path: &std::path::Path,
+            pins: &worker::Pins,
+            cancel: &worker::Cancel,
+        ) -> Result<worker::Inspection, worker::Reason> {
+            self.0.inspect(path, pins, cancel)
+        }
+        fn render(
+            &self,
+            path: &std::path::Path,
+            pins: &worker::Pins,
+            pages: &[worker::Page],
+            cancel: &worker::Cancel,
+            emit: &mut (dyn FnMut(worker::RenderedPage) -> Result<(), worker::Error> + Send),
+        ) -> Result<(), worker::Reason> {
+            self.0.render(path, pins, pages, cancel, &mut |mut page| {
+                let mut second = page.lines[0].clone();
+                second.bounds = [5., 100., 95., 110.];
+                page.lines.push(second);
+                emit(page)
+            })
+        }
+    }
+    let (dir, app, session, m, path, id) =
+        setup_rendered_upload_route_worker(Arc::new(Twin(Synthetic {
+            delay: Duration::ZERO,
+        })))
+        .await;
+    let response = app
+        .clone()
+        .oneshot(upload_action(session, &path, "propose", "revision=2"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = body_text(response).await;
+    // One view of the fingerprint: one confirm, one skip and one absent field, every box shown.
+    assert_eq!(text.matches("name=\"confirm_").count(), 1);
+    assert_eq!(text.matches("name=\"skip_").count(), 1);
+    assert_eq!(text.matches("name=\"absent_").count(), 1);
+    assert!(text.contains("Affected pages: 1-3 (3)"));
+    assert_eq!(text.matches("class=\"proposal-mask\"").count(), 6);
+    let fingerprint = text
+        .split("name=\"confirm_")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    // Skipping page 2 on the one control leaves both groups' boxes on pages 1 and 3 only.
+    let fields = format!(
+        "revision=2&exclusion_revision=0&confirm_{fingerprint}=1&skip_{fingerprint}=2&rationale=twin&window_from=1&window_to=100"
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(upload_action(session, &path, "exclude", &fields))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let stored = m.read(&id).unwrap().exclusion.unwrap();
+    assert_eq!(stored.pages, [1, 3]);
+    assert!(stored.boxes.values().all(|b| b.len() == 2));
+    // A repeated field is refused whole.
+    let twice = format!(
+        "revision=2&exclusion_revision=1&confirm_{fingerprint}=1&skip_{fingerprint}=2&skip_{fingerprint}=1&rationale=twin"
+    );
+    let status = app
+        .clone()
+        .oneshot(upload_action(session, &path, "exclude", &twice))
+        .await
+        .unwrap()
+        .status();
+    assert!(
+        status.is_client_error() && status != StatusCode::CONFLICT,
+        "{status}"
+    );
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+    assert_eq!(
+        app.oneshot(upload_action(session, &path, "discard", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    clean(&m, &dir).await;
 }
 
 #[cfg(feature = "dev-endpoint")]

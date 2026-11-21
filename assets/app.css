@@ -123,6 +123,7 @@ input[type="file"] { max-width: 100%; }
 #drawn-region { fill: #f6ba3b55; stroke: #b55b00; }
 .drawn-region { fill: #f6ba3b55; stroke: #b55b00; }
 .exclusion-mask { fill: #000; fill-opacity: 1; }
+.proposal-mask { fill: #c0392b55; stroke: #c0392b; }
 .region-overlay.drawing { touch-action: none; cursor: crosshair; }
 .region-drag-handle { fill: #075ba6; stroke: #fff; stroke-width: 1; cursor: move; touch-action: none; }
 [data-region-editor] { min-width: 0; max-width: 100%; }
