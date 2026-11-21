@@ -123,6 +123,11 @@ pub(super) fn error(e: &AppError) -> StatusCode {
         AppError::NotFound | AppError::SourceNotFound => StatusCode::FORBIDDEN,
         AppError::Conflict => StatusCode::CONFLICT,
         AppError::Invalid(crate::sources::review::READ_TIMEOUT) => StatusCode::REQUEST_TIMEOUT,
+        // Free space: a refused reservation or a write that hit a full disk.
+        AppError::Invalid("Not enough space.") => StatusCode::INSUFFICIENT_STORAGE,
+        AppError::SourceIo(e) if matches!(e.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT)) => {
+            StatusCode::INSUFFICIENT_STORAGE
+        }
         AppError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::AuthStorageBusy => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,

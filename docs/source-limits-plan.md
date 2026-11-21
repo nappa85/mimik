@@ -31,14 +31,12 @@ nothing re-verifies the file. Pages are published inside the render callback
 
 | Limit | Where |
 | --- | --- |
-| 128 MiB PDF | `auth/uploads.rs:35-36` (`FILE_LIMIT`, `BODY_LIMIT`), `:46` (`DefaultBodyLimit::max`), `:163`, `:174` (`Counting`), `:311-316` (multer `whole_stream`, `for_field("file")`), `:231` (per chunk), `:349` (Content-Length); `staging.rs:19` `UPLOAD_RESERVATION`; `uploads.rs:1356`; `entry.rs:61-71`; `operations.rs:34`; `templates/upload_form.html:4,11` |
 | 64 selected pages | `uploads.rs:1478`; `upload_page.html:13`; `upload_exclusions.rs:276` (`e.pages.len() > 64`); contract `limits.pages` `uploads.rs:901` |
 | 128 MiB PNG total | `uploads.rs:875`, `:1222-1226` (reason `source_png_limit`, `:1404`), `upload_progress.html:3`, contract `:902` |
 | 512 MiB text | `uploads.rs:1228` |
 | 20,000 units | contract `uploads.rs:903` (not enforced in staging) |
-| 2 GiB staging total | `staging.rs:17` `TOTAL`, `Ledger::reserve` `:59`; also the "unknown usage" sentinel `staging.rs:467,679` (blocks reserve only through `used + reserved > TOTAL`) |
 | Whole-source PDF BLOB | `003_sources.sql:10` `sources.pdf BLOB NOT NULL`; written only by `import.rs:584`, read only by the `import.rs:375` equality check; no other reader |
-| Tests | `upload_tests.rs:655,1835,1974`, `upload_route_tests.rs:715`, `worker/tests.rs` (about 10 `Input::Bytes`/`from_bytes` sites), `preflight_tests.rs`, `live_tests` 128 MiB cases |
+| Tests | `upload_tests.rs` PNG/text total cases, `live_tests` 128 MiB cases |
 | Docs | `sources-and-retrieval.md` (worker/RSS sections near `:28-70`, upload `:89-93`, `:110`, staging `:154-186`, contract `:217`, import `:286-287`); `release-scope.md:33` and its backup note (`:119`); `limitations.md` C5, L-SRC-3, L-SRC-8; `source-upload-plan.md` historical totals; `source-route-a-plan.md` ("PDF BLOB once"); the TODO entry |
 
 ## Design decisions
@@ -83,24 +81,8 @@ nothing re-verifies the file. Pages are published inside the render callback
      (`uploads.rs:477-491`): the route's streaming hash is trusted for the stream; `create` checks
      size by fstat and magic, fsyncs, renames; the first job's hash (outside every lock) verifies
      the stored bytes. Cancel, discard, sweep and publish no longer block on a multi-GB read.
-3. **Admission by free space; slot first, reserve after admission.** `begin_upload` claims the
-   single slot and the spool only. After CSRF admission and metadata validation the phase reserves
-   the declared `Content-Length` (no extra 64 KiB: overhead is inside the 512 MiB margin) or, with
-   none, a 1 MiB floor, and tops up in 64 MiB steps before writing past the reservation. A refusal
-   answers 507 `space`, unlinks the spool, frees the slot.
-   - **Accounting (no double count):** the spool write charges `Reservation::written(n)` after
-     each successful `write_all` (`auth/uploads.rs:102-111` does not today), so written bytes
-     leave `reserved` while `statvfs` already excludes them. `Ledger::reserve` keeps
-     `free >= outstanding reservations + 512 MiB`; `TOTAL` and its `used + reserved` clause go.
-   - **Unknown usage:** the `TOTAL` sentinel (`staging.rs:467,679`) becomes an explicit
-     `Accounting.unknown` flag that makes `reserve` fail until a successful reconcile.
-   - Route limits: no static body limit (`DefaultBodyLimit::disable()` on the upload route at
-     `:46`; `FILE_LIMIT`/`BODY_LIMIT`, multer `whole_stream` and `for_field("file")` removed,
-     `Counting`'s admitted limit unbounded at `:163,:174`); the bound is the reservation. The 4 KiB
-     pre-CSRF read, field sizes, 64 KiB read-ahead boundaries and 30 s idle deadline stay.
-4. **Upload deadline is idle-only** (30 s without input); the 15-minute total goes. Reason for
-   the idle deadline: a stalled client holds the single slot and a spool. No minimum rate (it
-   would cut off slow uplinks that work today; only the Owner holds the slot).
+3-4. (Free-space admission and the idle-only upload deadline are built; the reference is
+   `sources-and-retrieval.md`.)
 5. **Page cap = what one inspection frame holds.** The 2,000-page limit goes. The inspection
    record is one 9 MiB frame (`records.rs:13`, migration `:14`); a page record is about 0.4 KiB,
    so `MAX_PAGES` = 20,000, derived from the frame and asserted by a test that fails if 20,000
@@ -221,10 +203,9 @@ nothing re-verifies the file. Pages are published inside the render callback
 
 - 500 pages = 63 launches of 8, each reserving 160 MiB; space exhaustion fails the job with
   `space`, published pages stay, a retry renders the rest. Cancel kills via pinned pidfds and is
-  checked between batches; progress is `done/total` from an HTML poll that reloads the upload.
-- `publish_current` loads every page row only to sum totals (`uploads.rs:1195-1226`, `load_parts`
-  `:1491`): O(n^2). With the totals gone it reads the job/revision/selection facts and the one
-  existing row for the page (slice 4, not deferred).
+  checked between batches; progress is `done/total` from an HTML poll that reads the job row.
+- `publish_current` still sums the PNG and text bytes of the other pages with one aggregate query
+  (O(n) per page); slice 5 removes the totals and with them the query.
 - A damaged large file triggers MuPDF repair (scans the whole file); the scaled inspection
   deadline bounds it, a miss is `took too long`.
 
@@ -251,14 +232,6 @@ nothing re-verifies the file. Pages are published inside the render callback
    code writes one box per page and at most one fingerprint and refuses more when reading.
    Migration test: seeded v35 rows in all four tables, tables empty after, foreign-key check
    empty, 20,000 accepted and 20,001 refused.
-4. **Free-space admission and upload route** (decisions 3-4): slot first, reserve after
-   admission, per-chunk `written`, top-up, explicit unknown state, no static limits, idle-only
-   deadline, 507; `publish_current` narrowed. Tests: body over 128 MiB declared and chunked
-   (sparse generator); free space exhausted mid-stream (spool unlinked, reservation and slot
-   released); accounting near the free-space limit (a reserve right after a large write must not
-   be refused by a double count); unknown usage refuses `reserve` and recovers after reconcile;
-   the ENOSPC case (`upload_tests.rs:1974`) extended to mid-spool and mid-render; a slow upload
-   past 15 minutes of fake time succeeds while 30 s idle fails.
 5. **Totals, selection, exclusions, proposals** (decisions 5-8 except the budget): remove
    selection/PNG/text/total checks and `source_png_limit` code; ranges UI; contract without
    `limits`; several boxes per page, the confirm-several-proposals screen, the 384 B per-page bound; streaming proposal with the memory and comparison budgets. Tests also: 8 boxes per page accepted, 9 and a worst-case-digits box (rounding outward) checked against the view. Tests: 500 and 20,000
@@ -290,14 +263,14 @@ Review: this plan and each slice get a fresh Opus reviewer (AGENTS.md); slices 1
 of agent work run in containers; weekday builds at 2 cores.
 
 ## Risks
-- Forward work found in slice 2 review: every `load()`/progress poll parses the up-to-9 MiB inspection (slice 4: read only the facts a poll needs); each published page updates the row that holds the inspection (`uploads.rs` ~1280, slice 4); the Rust selection/exclusion checks are O(selected x pages) (`uploads.rs` ~1484, `upload_exclusions.rs` ~166 and ~304-315) and must be made linear when slice 5 lifts the 64 cap; the page screen renders up to 20,000 checkboxes until slice 5's ranges UI (slice 5); `upload_progress.html` prints `document_changed` raw until slice 3 gives it a label (slice 3).
+- Forward work found in slice 2 review: the Rust selection/exclusion checks are O(selected x pages) (`uploads.rs` ~1484, `upload_exclusions.rs` ~166 and ~304-315) and must be made linear when slice 5 lifts the 64 cap; the page screen renders up to 20,000 checkboxes until slice 5's ranges UI (slice 5). The page screen and every action still load the inspection; only progress polls and page publication avoid it.
 - Tools that read the database outside Mimik need SQLite >= 3.44 (migration 036 views use `group_concat(... ORDER BY ...)`; an earlier catalogue migration already uses `->>`, 3.38).
 
 - A MuPDF bug on a very large or hostile file is contained by the same sandbox; memory by
   `RLIMIT_AS`, time by the deadlines; a big PDF fails as `too_large`/`took too long`, never
   exhausts the host.
 - Disk can fill; the margin keeps SQLite/WAL writable but other processes race free space. Every
-  write failure releases slot, spool and reservation (slice 4 tests).
+  write failure releases slot, spool and reservation.
 - Hashing a multi-GB file once per job is heavy on the magnetic disk; it runs outside locks.
 - Migrations 036/037 touch live tables and the PDF column; both are tested on seeded data and sit
   under the backup-before-upgrade guidance (the backup now includes `sources/`).

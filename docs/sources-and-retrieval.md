@@ -96,18 +96,27 @@ show that upload is unavailable. There is no unconfined fallback in production.
 
 `POST /admin/materials/uploads` accepts multipart fields in exactly this order: `csrf`
 (256 bytes), `system` (100 bytes), `edition` (400 bytes, at most 100 Unicode scalars),
-`language` (30 bytes), `file` (128 MiB). Unknown, duplicate, out-of-order and post-file
-fields are refused. Owner, Host/Origin, declared length, worker availability and the staging reservation/slot are
-checked before the body is read. CSRF admission precedes all PDF writes; metadata uses the
-import identity rules. The counting stream limits the complete request, including epilogue,
-to 128 MiB + 64 KiB. The server is HTTP/1 only. Before CSRF admission the parser receives at
+`language` (30 bytes), `file` (no size limit of its own). Unknown, duplicate, out-of-order and
+post-file fields are refused. Owner, Host/Origin, declared length syntax, worker availability and
+the upload slot are checked before the body is read. CSRF admission precedes all PDF writes;
+metadata uses the import identity rules. The route has no static body limit (the PDF is bounded by
+disk only): once admission and metadata validation pass, the upload reserves its declared
+`Content-Length` (the 512 MiB margin covers the multipart overhead), or 1 MiB when none is
+declared, and grows the reservation in 64 MiB steps before a write would pass it. A reservation
+or top-up that free space cannot cover, or a write that fails with ENOSPC, answers 507, unlinks
+the spool and releases the reservation and the slot. The server is HTTP/1 only. Before CSRF admission the parser receives at
 most 4 KiB; the process holds at most the pending frame plus hyper's channel slot and read
 buffer, a small constant multiple of hyper's approximately 408 KiB maximum buffer
 (SRC-UPLOAD-POLL in `limitations.md`). No file byte is spooled before admission; only one
 upload streams at a time. After admission explicit Pending boundaries every 64 KiB bound
 parser read-ahead to two 64 KiB batches plus delimiter lookbehind, apart from the pending
-transport frame. Uploads have 30-second input-wait idle and 15-minute total deadlines;
-metadata validation and file writes do not consume the client-idle budget.
+transport frame. The only upload deadline is 30 seconds without input (idle): a stalled client
+holds the single slot and a spool. There is no total deadline and no minimum rate, so a slow
+uplink that keeps sending works; metadata validation, reservations and file writes do not
+consume the idle budget. The 4 KiB pre-CSRF read, the form-field sizes and the 64 KiB read-ahead
+boundaries stay for unauthenticated-memory and parser-memory reasons, and after admission the
+bytes that are not file data (headers, form fields, closing boundary, trailer) are bounded at
+512 KiB (413), because the parser buffers a part header until its blank line.
 An unavailable worker returns 503 with the probe's fixed reason and remedy before body
 polling. A second upload returns 409: an active stream is in progress, or a retained upload
 is already staged with a link to open or discard it.
@@ -161,13 +170,17 @@ accepting uploads; callers clone its handle and call it outside the async runtim
 Opening reconciles interrupted jobs, expires seven-day-idle uploads, removes orphan files and
 folders, and measures retained files. A weak-reference maintenance thread sweeps hourly.
 Cleanup failures use fixed diagnostics and leave surviving bytes charged for a later retry;
-unknown disk usage blocks new reservations until a successful reconciliation. Restart drops
+unknown disk usage blocks new reservations until a successful reconciliation. A progress poll
+reads only the job row, never the inspection (up to 9 MiB) or the page rows, and publishing a
+page does not rewrite the upload row that holds the inspection. Restart drops
 page rows unless both PNG and text sidecars are no-follow regular files with mode 0600,
 settling the upload state and retained job progress in the same transaction.
 
-`begin_upload` reserves 128 MiB + 64 KiB and returns an RAII stream slot with a private spool
-file. The route must enforce its stream/body limits, hash the stream, and finish authentication
-and CSRF admission before writing PDF bytes. Dropping the phase unlinks its spool and releases
+`begin_upload` claims the single slot and a private spool file and returns them as an RAII
+phase; it reserves nothing. The route finishes authentication, CSRF admission and metadata
+validation, then `reserve_body` reserves the body (see above) before the first PDF byte is
+written. Each write goes through the phase, which tops the reservation up when needed and
+charges the bytes after the write succeeds. Dropping the phase unlinks its spool and releases
 the slot/reservation. `create` checks the declared size by `fstat`, the hash's form and `%PDF-`
 magic without parsing the PDF and without re-reading the spool (the route's streaming hash is
 trusted for the stream; no multi-GB read happens under the control and gate mutexes), fsyncs and
@@ -225,11 +238,15 @@ and exclusion revision. Selection changes that would deselect an excluded page a
 until the Owner replaces or removes the exclusion; unrelated selection/metadata changes retain it.
 The schema uses `group_concat(... ORDER BY ...)` (migration 036) and `->>`, so external tools that read the database need SQLite 3.44 or later.
 
-The manager owns a process-wide ledger of used bytes and reservations. Total staging is
-2 GiB; free space must cover outstanding reservations plus 512 MiB for SQLite/WAL. Each
-eight-page render batch reserves 160 MiB. Written bytes replace reservation bytes; deletes
-reduce usage and failures release the unwritten portion. Per upload: PDF 128 MiB, PNG
-128 MiB, text 512 MiB, at most 64 selected pages, and one retained upload/one active stream.
+The manager owns a process-wide ledger of used bytes and reservations. Admission is by free
+space only (there is no staging total): a reservation is admitted while the filesystem's free
+space is at least the outstanding reservations plus a 512 MiB margin that keeps SQLite and its
+WAL writable. Each eight-page render batch reserves 160 MiB. Written bytes leave the
+reservation and join the used figure, so a byte is never counted by both the reservation and
+the filesystem's free space; deletes reduce usage and failures release the unwritten portion.
+Usage that a scan could not measure is an explicit unknown state that refuses every
+reservation until a scan succeeds. Per upload: no PDF size limit, PNG 128 MiB, text 512 MiB,
+at most 64 selected pages, and one retained upload/one active stream.
 PNG overflow has its own `source_png_limit` reason (“too large for one source: select fewer
 pages”). Other capacity failures use `space`. `already_document` identifies a matching
 permanent document without merging readings.

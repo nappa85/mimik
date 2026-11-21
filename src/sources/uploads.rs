@@ -1,7 +1,7 @@
 //! Blocking staged-upload API. Call from a dedicated thread or `spawn_blocking`.
 //! The manager is process-wide; job publication and deletion share one lock.
 use super::{
-    staging::{Files, Ledger, MIB, RENDER_RESERVATION, Reservation, UPLOAD_RESERVATION},
+    staging::{Files, Ledger, MIB, RENDER_RESERVATION, Reservation, TOP_UP, UPLOAD_FLOOR},
     worker::{self, Cancel, Inspection, Page, Pins, Reason, RenderSettings, RenderedPage},
 };
 use crate::{
@@ -11,7 +11,8 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::{
     path::Path,
     sync::{
@@ -159,11 +160,40 @@ pub struct UploadPhase {
     files: Arc<Files>,
     name: Option<String>,
     file: std::fs::File,
+    /// Bytes charged to the ledger's spool figure through [`UploadPhase::write`].
+    written: u64,
 }
 impl UploadPhase {
-    /// The route writes its bounded counting stream here while calculating the hash.
+    /// The spool file, for tests: writes made directly are not charged to the ledger.
+    #[cfg(test)]
     pub fn file(&mut self) -> &mut std::fs::File {
         &mut self.file
+    }
+    /// Reserve the body: its declared length, or a floor when none is declared. Called after
+    /// the request is admitted and its metadata validated, never before.
+    /// # Errors
+    /// Refuses (`Not enough space.`) what the free space cannot cover or an unknown usage.
+    pub fn reserve_body(&mut self, declared: Option<u64>) -> Result<(), AppError> {
+        self.reservation.top_up(declared.unwrap_or(UPLOAD_FLOOR))
+    }
+    /// Append body bytes, growing the reservation in [`TOP_UP`] steps first when they would pass
+    /// it, and charge them after the write succeeds: written bytes leave the reservation
+    /// because the filesystem's free space already excludes them.
+    /// # Errors
+    /// Refuses (`Not enough space.`) a top-up the free space cannot cover; returns write errors
+    /// (ENOSPC among them) without charging the bytes.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), AppError> {
+        let n = u64::try_from(bytes.len()).map_err(|_| AppError::Invalid("Not enough space."))?;
+        if let Some(missing) = n
+            .checked_sub(self.reservation.remaining())
+            .filter(|m| *m > 0)
+        {
+            self.reservation.top_up(missing.div_ceil(TOP_UP) * TOP_UP)?;
+        }
+        self.file.write_all(bytes)?;
+        self.reservation.written_spool(n)?;
+        self.written += n;
+        Ok(())
     }
 }
 impl Drop for UploadPhase {
@@ -173,16 +203,15 @@ impl Drop for UploadPhase {
             .gate
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(name) = self.name.take()
-            && self.files.remove_spool(&name).is_err()
-        {
-            if let Ok(metadata) = self.file.metadata()
-                && metadata.nlink() != 0
-                && self.reservation.written(metadata.len()).is_err()
-            {
+        if let Some(name) = self.name.take() {
+            let kept = self.files.remove_spool(&name).is_err();
+            if kept {
+                // The file stays charged until the next sweep or start reconciles it from disk.
+                eprintln!("Source upload partial-file cleanup failed.");
+            }
+            if self.manager.ledger.spool_ended(self.written, kept).is_err() {
                 eprintln!("Source staging accounting requires reconciliation.");
             }
-            eprintln!("Source upload partial-file cleanup failed.");
         }
         self.slot.store(false, Ordering::Release);
         if let Ok(mut active) = self.manager.active_spool.lock() {
@@ -218,6 +247,12 @@ pub struct Job {
     pub done: u32,
     pub total: u32,
     pub reason: Option<String>,
+}
+/// The facts of a progress poll.
+#[derive(Clone, Debug)]
+pub struct UploadProgress {
+    pub id: String,
+    pub job: Job,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Upload {
@@ -311,6 +346,16 @@ impl Uploads {
     pub(crate) fn for_route_test(store: Store, data: &Path, worker: Arc<dyn Worker>) -> Self {
         Self::initialize(store, data, worker, false).unwrap()
     }
+    /// Test seam: report this value as the staging filesystem's free space.
+    #[cfg(test)]
+    pub(crate) fn inject_free(&self, free: Arc<std::sync::atomic::AtomicU64>) {
+        self.0.ledger.inject_free(free);
+    }
+    /// Test seam: the ledger's used and reserved bytes.
+    #[cfg(test)]
+    pub(crate) fn ledger_usage(&self) -> (u64, u64) {
+        self.0.ledger.usage().unwrap()
+    }
     pub(crate) fn availability(&self) -> worker::Availability {
         self.0.worker.availability()
     }
@@ -359,10 +404,11 @@ impl Uploads {
         let files = Arc::new(Files::open(data)?);
         let used = store.upload_storage(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // The seven days of an upload that failed unsettled count from the failure.
             tx.execute(
-                "UPDATE source_uploads SET state='failed' WHERE id IN
+                "UPDATE source_uploads SET state='failed', updated_at=?1 WHERE id IN
                  (SELECT upload_id FROM source_jobs WHERE state IN ('queued','running'))",
-                [],
+                [now()?],
             )?;
             // An interrupted render may have published pages while the staged file changed
             // (its pins died with it): drop its upload's pages, whose files the reconciliation
@@ -390,7 +436,7 @@ impl Uploads {
             files.reconcile(|id, n| keep.contains(&(id.into(), n.into())))
         })?;
         let disk = files.clone();
-        let ledger = Ledger::new(used, move || disk.free());
+        let ledger = Ledger::with_usage(used, move || disk.free());
         let m = Self(Arc::new(Inner {
             store,
             files,
@@ -426,9 +472,11 @@ impl Uploads {
             })?;
         Ok(m)
     }
-    /// Reserve before polling an upload body. Dropping this guard releases its slot and bytes.
+    /// Claim the single upload slot and a spool before polling an upload body. Space is reserved
+    /// later, by [`UploadPhase::reserve_body`], once the request is admitted. Dropping this guard
+    /// releases its slot, spool and reservation.
     /// # Errors
-    /// Refuses a second stream/upload, insufficient free space, or a full staging budget.
+    /// Refuses a second stream/upload or a retained upload.
     pub fn begin_upload(&self) -> Result<UploadPhase, AppError> {
         let _gate = self
             .0
@@ -448,7 +496,7 @@ impl Uploads {
                 }
                 Ok(())
             })?;
-            let reservation = self.0.ledger.reserve(UPLOAD_RESERVATION)?;
+            let reservation = self.0.ledger.empty_reservation();
             let (name, file) = self.0.files.spool()?;
             *self.0.active_spool.lock().map_err(|_| AppError::Worker)? = Some(name.clone());
             Ok(UploadPhase {
@@ -458,6 +506,7 @@ impl Uploads {
                 files: self.0.files.clone(),
                 name: Some(name),
                 file,
+                written: 0,
             })
         })();
         if result.is_err() {
@@ -514,13 +563,19 @@ impl Uploads {
         getrandom::fill(&mut fingerprint_key).map_err(|_| AppError::Worker)?;
         self.0.files.create(&id)?;
         let result = (|| {
+            let actual = phase.file.metadata()?.len();
             self.0.files.publish_spool(
                 phase.name.as_deref().ok_or(AppError::Worker)?,
                 &phase.file,
                 &id,
-                &mut phase.reservation,
             )?;
+            // The rename is done: the file is the upload's now, so record that before the sync
+            // that can fail (cleanup then discards a charged file and no error is masked).
             phase.name = None;
+            self.0
+                .ledger
+                .spool_published(std::mem::take(&mut phase.written), actual)?;
+            self.0.files.sync_published(&id)?;
             self.write(owner, |tx| {
                 metadata.validate(tx)?;
                 let t = now()?;
@@ -577,6 +632,28 @@ impl Uploads {
             auth.recheck_owner(&tx)?;
             tx.commit()?;
             Ok(upload)
+        })
+    }
+    /// What a progress poll shows: the upload id and its job. Reads neither the inspection
+    /// (up to 9 MiB) nor the page rows.
+    pub(crate) fn progress_for_owner(
+        &self,
+        auth: &RequestAuth,
+        id: &str,
+    ) -> Result<UploadProgress, AppError> {
+        self.0.store.upload_storage(|db| {
+            let tx = db.transaction()?;
+            auth.recheck_owner(&tx)?;
+            tx.query_row("SELECT 1 FROM source_uploads WHERE id=?1", [id], |_| Ok(()))
+                .optional()?
+                .ok_or(AppError::SourceNotFound)?;
+            let progress = UploadProgress {
+                id: id.into(),
+                job: load_job(&tx, id)?,
+            };
+            auth.recheck_owner(&tx)?;
+            tx.commit()?;
+            Ok(progress)
         })
     }
     pub(crate) fn current_for_owner(&self, auth: &RequestAuth) -> Result<Option<String>, AppError> {
@@ -847,9 +924,9 @@ impl Uploads {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             if control.as_ref().is_none_or(|r| r.handle.is_finished()) {
                 tx.execute(
-                    "UPDATE source_uploads SET state='failed' WHERE id IN
+                    "UPDATE source_uploads SET state='failed', updated_at=?1 WHERE id IN
                      (SELECT upload_id FROM source_jobs WHERE state IN ('queued','running'))",
-                    [],
+                    [now()?],
                 )?;
                 tx.execute(
                     "UPDATE source_jobs SET state='failed',reason='unavailable',finished_at=?1
@@ -1015,7 +1092,10 @@ impl Uploads {
                  WHERE upload_id=?1 AND state IN ('queued','running')",
                 params![id, now()?],
             )?;
-            tx.execute("UPDATE source_uploads SET state='failed' WHERE id=?1", [id])?;
+            tx.execute(
+                "UPDATE source_uploads SET state='failed', updated_at=?2 WHERE id=?1",
+                params![id, now()?],
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -1352,33 +1432,18 @@ impl Uploads {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let revision = revision.load(Ordering::Acquire);
-        let u = self
+        // Only the facts this page needs: never the inspection, the other pages' rows or the
+        // whole selection. The totals (removed with the per-source limits) are one aggregate.
+        let (current, png_others, text_others, replaces) = self
             .0
             .store
-            .upload_storage(|db| load_parts(db, id, false))?;
-        if cancelled.load(Ordering::Acquire)
-            || u.revision != revision
-            || u.job.state != "running"
-            || u.job.revision != revision
-            || !u.selected_pages.contains(&p.n)
-        {
+            .upload_storage(|db| publish_facts(db, id, p.n, revision))?;
+        if cancelled.load(Ordering::Acquire) || !current {
             return Err(AppError::Conflict);
         }
         let text = worker::records::json(&p.lines).map_err(|_| AppError::Invalid("too_large"))?;
-        let png_total = u
-            .pages
-            .iter()
-            .filter(|r| r.pdf_page != p.n)
-            .map(|r| r.png_bytes)
-            .sum::<u64>()
-            + p.png.len() as u64;
-        let text_total = u
-            .pages
-            .iter()
-            .filter(|r| r.pdf_page != p.n)
-            .map(|r| r.text_bytes)
-            .sum::<u64>()
-            + text.len() as u64;
+        let png_total = png_others + p.png.len() as u64;
+        let text_total = text_others + text.len() as u64;
         if png_total > 128 * MIB {
             return Err(AppError::Invalid(
                 "too large for one source: select fewer pages",
@@ -1387,7 +1452,7 @@ impl Uploads {
         if text_total > 512 * MIB {
             return Err(AppError::Invalid("Not enough space."));
         }
-        if u.pages.iter().any(|r| r.pdf_page == p.n) {
+        if replaces {
             self.0.store.upload_storage(|db| {
                 db.execute(
                     "DELETE FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",
@@ -1432,8 +1497,12 @@ impl Uploads {
                         hash(&text), text.len() as u64, worker::CRATE_VERSION, worker::MUPDF_VERSION],
                 )?;
                 if changed != 1 { return Err(AppError::Conflict); }
-                tx.execute("UPDATE source_jobs SET pages_done=pages_done+1 WHERE upload_id=?1", [id])?;
-                tx.execute("UPDATE source_uploads SET updated_at=?2 WHERE id=?1", params![id, now()?])?;
+                // The upload row (it holds the inspection) is not rewritten per page: a running
+                // job exempts the upload from the sweep, and settlement sets `updated_at`.
+                tx.execute(
+                    "UPDATE source_jobs SET pages_done=pages_done+1 WHERE upload_id=?1",
+                    [id],
+                )?;
                 tx.commit()?;
                 Ok(())
             })
@@ -1443,6 +1512,48 @@ impl Uploads {
         }
         result
     }
+}
+
+/// The facts publishing page `n` needs: whether the upload and its running job are still at
+/// `revision` with `n` selected, the PNG and text bytes of the other pages (one aggregate) and
+/// whether a row for `n` exists. The inspection, the page rows and the selection are not loaded.
+fn publish_facts(
+    db: &Connection,
+    id: &str,
+    n: u32,
+    revision: i64,
+) -> Result<(bool, u64, u64, bool), AppError> {
+    let current = db
+        .query_row(
+            "SELECT u.revision, j.upload_revision, j.state,
+                    EXISTS(SELECT 1 FROM json_each(u.selected_pages) WHERE value=?2)
+             FROM source_uploads u JOIN source_jobs j ON j.upload_id=u.id
+             WHERE u.id=?1",
+            params![id, n],
+            |r| {
+                Ok(r.get::<_, i64>(0)? == revision
+                    && r.get::<_, i64>(1)? == revision
+                    && r.get::<_, String>(2)? == "running"
+                    && r.get::<_, bool>(3)?)
+            },
+        )
+        .optional()?
+        .ok_or(AppError::SourceNotFound)?;
+    let (png, text) = db.query_row(
+        "SELECT coalesce(sum(png_bytes),0), coalesce(sum(text_bytes),0)
+         FROM source_upload_pages WHERE upload_id=?1 AND pdf_page<>?2",
+        params![id, n],
+        |r| Ok((r.get::<_, u64>(0)?, r.get::<_, u64>(1)?)),
+    )?;
+    let replaces = db
+        .query_row(
+            "SELECT 1 FROM source_upload_pages WHERE upload_id=?1 AND pdf_page=?2",
+            params![id, n],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    Ok((current, png, text, replaces))
 }
 
 /// What one running job shares between its steps.
@@ -1526,7 +1637,7 @@ fn retained_files(
 /// `%PDF-` in the first 1,024 bytes. The content hash is not recomputed here.
 fn check_spool(file: &std::fs::File, sha256: &str, size: u64) -> Result<(), AppError> {
     let invalid = || AppError::Invalid("Invalid spooled PDF.");
-    if !(1..=128 * MIB).contains(&size)
+    if size == 0
         || file.metadata()?.len() != size
         || sha256.len() != 64
         || !sha256
@@ -1705,7 +1816,13 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
     )?;
     u.inspection = inspection.as_deref().map(parse).transpose()?;
     u.selected_pages = parse(&selected)?;
-    u.job = db.query_row(
+    u.job = load_job(db, id)?;
+    u.pages = load_pages(db, id)?;
+    (u.exclusion_revision, u.exclusion) = exclusions::load(db, id)?;
+    Ok(u)
+}
+fn load_job(db: &Connection, id: &str) -> Result<Job, AppError> {
+    Ok(db.query_row(
         "SELECT upload_revision, kind, state, pages_done, pages_total, reason
          FROM source_jobs WHERE upload_id=?1",
         [id],
@@ -1719,10 +1836,7 @@ fn load_parts(db: &Connection, id: &str, inspection_needed: bool) -> Result<Uplo
                 reason: r.get(5)?,
             })
         },
-    )?;
-    u.pages = load_pages(db, id)?;
-    (u.exclusion_revision, u.exclusion) = exclusions::load(db, id)?;
-    Ok(u)
+    )?)
 }
 fn load_pages(db: &Connection, id: &str) -> Result<Vec<PageModel>, AppError> {
     let mut pages = Vec::new();

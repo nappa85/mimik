@@ -174,9 +174,10 @@ async fn upload_route_admission_polls_no_body() {
                 StatusCode::FORBIDDEN
             }
             _ => {
+                // Only a malformed length is refused up front; a large one is a reservation.
                 req.headers_mut()
-                    .insert("content-length", "134283265".parse().unwrap());
-                StatusCode::PAYLOAD_TOO_LARGE
+                    .insert("content-length", "not-a-number".parse().unwrap());
+                StatusCode::BAD_REQUEST
             }
         };
         assert_eq!(
@@ -706,44 +707,272 @@ fn assert_staging_names_omit_filename(dir: &TestDirectory) {
     }
 }
 
-#[tokio::test]
-async fn upload_route_oversize_file_and_no_length_epilogue_are_413_and_cleaned() {
-    let (dir, _, app, id, m) = setup().await;
-    let token = "a".repeat(64);
-    for epilogue in [false, true] {
-        let mut prefix = multipart(
-            &[
-                ("csrf", &token),
-                ("system", "mork-borg"),
-                ("edition", "Synthetic"),
-                ("language", "en"),
-            ],
-            false,
-        ) + "--test\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n%PDF-1.7\n";
-        if epilogue {
-            prefix.push_str("\r\n--test--\r\n");
+const MIB: usize = 1024 * 1024;
+
+/// The fields up to the start of the file's bytes (which begin with `%PDF-1.7`).
+fn upload_head() -> String {
+    multipart(
+        &[
+            ("csrf", &"a".repeat(64)),
+            ("system", "mork-borg"),
+            ("edition", "Synthetic"),
+            ("language", "en"),
+        ],
+        false,
+    ) + "--test\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n%PDF-1.7\n"
+}
+const UPLOAD_TAIL: &str = "\r\n--test--\r\n";
+/// `total` bytes in 1 MiB frames cut from one shared block: a generated body that never
+/// holds more than one frame; `each` sees the bytes emitted so far.
+fn generated(
+    total: usize,
+    mut each: impl FnMut(usize) + Send + 'static,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
+    let block = Bytes::from(vec![b'x'; MIB]);
+    stream::unfold(0_usize, move |sent| {
+        let frame = (sent < total).then(|| block.slice(..(total - sent).min(MIB)));
+        if let Some(f) = &frame {
+            each(sent + f.len());
         }
-        let chunks = stream::unfold(128 * 1024 * 1024 + 65537_usize, |remaining| async move {
-            if remaining == 0 {
-                return None;
-            }
-            let n = remaining.min(16384);
-            Some((
-                Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; n])),
-                remaining - n,
-            ))
-        });
-        let body = Body::from_stream(
-            stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(prefix)) }).chain(chunks),
-        );
-        let response = app.clone().oneshot(post_body(id, body)).await.unwrap();
+        std::future::ready(frame.map(|f| {
+            let len = f.len();
+            (Ok::<_, std::io::Error>(f), sent + len)
+        }))
+    })
+}
+fn whole(
+    head: String,
+    file: impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    tail: &'static str,
+) -> Body {
+    Body::from_stream(
+        stream::once(async move { Ok::<_, std::io::Error>(Bytes::from(head)) })
+            .chain(file)
+            .chain(stream::once(async move {
+                Ok::<_, std::io::Error>(Bytes::from_static(tail.as_bytes()))
+            })),
+    )
+}
+async fn settled(m: &Uploads, dir: &TestDirectory) {
+    clean(m, dir).await;
+    for _ in 0..100 {
+        if m.ledger_usage() == (0, 0) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("reservation leaked: {:?}", m.ledger_usage());
+}
+async fn wait_inspected(m: &Uploads, id: &str) {
+    for _ in 0..500 {
+        let (manager, id) = (m.clone(), id.to_owned());
+        let u = tokio::task::spawn_blocking(move || manager.read(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        if !["queued", "running"].contains(&u.job.state.as_str()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("inspection deadline");
+}
+
+#[tokio::test]
+async fn upload_route_body_over_128_mib_is_staged_declared_and_chunked() {
+    for declared in [true, false] {
+        let (_dir, _, app, id, m) = setup().await;
+        m.inject_free(Arc::new(std::sync::atomic::AtomicU64::new(1 << 40)));
+        let file = 129 * MIB;
+        let head = upload_head();
+        let length = head.len() + file + UPLOAD_TAIL.len();
+        let mut request = post_body(id, whole(head, generated(file, |_| {}), UPLOAD_TAIL));
+        if declared {
+            request
+                .headers_mut()
+                .insert("content-length", length.to_string().parse().unwrap());
+        }
+        let response = app.oneshot(request).await.unwrap();
         assert_eq!(
             response.status(),
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "epilogue={epilogue}"
+            StatusCode::SEE_OTHER,
+            "declared={declared}"
         );
-        clean(&m, &dir).await;
+        let staged = response.headers()[header::LOCATION].to_str().unwrap();
+        let staged = staged.rsplit('/').next().unwrap().to_owned();
+        wait_inspected(&m, &staged).await;
+        let (manager, read) = (m.clone(), staged.clone());
+        let upload = tokio::task::spawn_blocking(move || manager.read(&read))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(upload.pdf_bytes, (file + 9) as u64, "declared={declared}");
+        // Every written byte left the reservation and is charged as used.
+        assert_eq!(
+            m.ledger_usage(),
+            (upload.pdf_bytes, 0),
+            "declared={declared}"
+        );
     }
+}
+
+#[tokio::test]
+async fn upload_route_free_space_exhausted_mid_stream_is_507_and_everything_is_released() {
+    let (dir, _, app, id, m) = setup().await;
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::sources::staging::MARGIN + 80 * MIB as u64,
+    ));
+    m.inject_free(free.clone());
+    // The disk fills after 30 MiB: the top-up at 65 MiB must be refused.
+    let body = whole(
+        upload_head(),
+        generated(100 * MIB, move |sent| {
+            if sent >= 30 * MIB {
+                free.store(
+                    crate::sources::staging::MARGIN + 5 * MIB as u64,
+                    Ordering::SeqCst,
+                );
+            }
+        }),
+        UPLOAD_TAIL,
+    );
+    let response = app.oneshot(post_body(id, body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    // Spool unlinked, reservation and slot released.
+    settled(&m, &dir).await;
+}
+
+#[tokio::test]
+async fn upload_route_declared_length_beyond_free_space_is_507_before_any_file_byte() {
+    let (dir, _, app, id, m) = setup().await;
+    m.inject_free(Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::sources::staging::MARGIN + 100 * MIB as u64,
+    )));
+    let mut request = post_body(
+        id,
+        whole(upload_head(), generated(MIB, |_| {}), UPLOAD_TAIL),
+    );
+    request
+        .headers_mut()
+        .insert("content-length", (1_u64 << 40).to_string().parse().unwrap());
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    // The reservation failed before the file field was read: nothing was spooled or charged.
+    assert_eq!(m.ledger_usage(), (0, 0));
+    settled(&m, &dir).await;
+}
+
+#[test]
+fn upload_space_failures_map_to_507() {
+    assert_eq!(
+        materials::error(&AppError::Invalid("Not enough space.")),
+        StatusCode::INSUFFICIENT_STORAGE
+    );
+    for errno in [libc::ENOSPC, libc::EDQUOT] {
+        assert_eq!(
+            materials::error(&AppError::SourceIo(std::io::Error::from_raw_os_error(
+                errno
+            ))),
+            StatusCode::INSUFFICIENT_STORAGE
+        );
+    }
+}
+
+/// After admission, a part header that never ends must be refused within a bounded number of
+/// bytes: multer buffers a header until its blank line, so without a bound the memory grows
+/// with the stream.
+async fn assert_endless_header_is_413(head: String) {
+    let (dir, _, app, id, m) = setup().await;
+    m.inject_free(Arc::new(std::sync::atomic::AtomicU64::new(1 << 40)));
+    let emitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = emitted.clone();
+    let body = whole(
+        head,
+        // Short enough that the unbounded (quadratic) buffering still ends the test quickly.
+        generated(6 * MIB, move |sent| seen.store(sent, Ordering::SeqCst)),
+        "",
+    );
+    let response = app.oneshot(post_body(id, body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(
+        emitted.load(Ordering::SeqCst) <= 2 * MIB,
+        "{} bytes were read",
+        emitted.load(Ordering::SeqCst)
+    );
+    settled(&m, &dir).await;
+}
+#[tokio::test]
+async fn upload_route_endless_header_in_a_form_part_is_413_within_a_bounded_read() {
+    let head = multipart(&[("csrf", &"a".repeat(64)), ("system", "mork-borg")], false);
+    // The `system` part's header never reaches its blank line.
+    let cut = head
+        .find("--test\r\nContent-Disposition: form-data; name=\"system\"")
+        .unwrap();
+    assert_endless_header_is_413(format!("{}--test\r\nContent-Disposition: x", &head[..cut])).await;
+}
+#[tokio::test]
+async fn upload_route_endless_header_after_the_file_is_413_within_a_bounded_read() {
+    assert_endless_header_is_413(format!(
+        "{}\r\n--test\r\nContent-Disposition: form-data; name=\"other\"; x",
+        upload_head()
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn upload_route_invalid_csrf_with_a_huge_declared_length_is_403_not_507() {
+    let (dir, _, app, id, m) = setup().await;
+    m.inject_free(Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::sources::staging::MARGIN + 100 * MIB as u64,
+    )));
+    let body = Body::from(multipart(&[("csrf", "wrong"), ("file", "%PDF-1.7")], true));
+    let mut request = post_body(id, body);
+    request
+        .headers_mut()
+        .insert("content-length", (1_u64 << 40).to_string().parse().unwrap());
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    settled(&m, &dir).await;
+}
+
+#[tokio::test]
+async fn upload_route_trailer_after_the_closing_boundary_is_bounded() {
+    let (dir, _, app, id, m) = setup().await;
+    m.inject_free(Arc::new(std::sync::atomic::AtomicU64::new(1 << 40)));
+    let body = whole(
+        upload_head() + "\r\n--test--\r\n",
+        generated(MIB, |_| {}),
+        "",
+    );
+    let response = app.oneshot(post_body(id, body)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    settled(&m, &dir).await;
+}
+
+// The 15-minute case (a slow client that never idles 30 s) is a paused-time test of the
+// counting stream in `uploads.rs`: here blocking writes would let the paused clock jump.
+#[tokio::test]
+async fn upload_route_thirty_seconds_without_input_is_408_and_released() {
+    let (dir, _, app, id, m) = setup().await;
+    m.inject_free(Arc::new(std::sync::atomic::AtomicU64::new(1 << 40)));
+    tokio::time::pause();
+    let stalled = stream::unfold(0_u32, |n| async move {
+        if n == 1 {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        Some((
+            Ok::<_, std::io::Error>(Bytes::from(vec![b'x'; 1024])),
+            n + 1,
+        ))
+    });
+    let response = app
+        .oneshot(post_body(id, whole(upload_head(), stalled, UPLOAD_TAIL)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    tokio::time::resume();
+    settled(&m, &dir).await;
 }
 
 #[tokio::test]
