@@ -85,7 +85,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `df` before gates. Free-model reviews: never in parallel (the `external-agents` skill locks
   and skips limited models, `~/.local/state/external-agents/limits.json`).
 
-- Hakoniwa audit exception: souk4711/hakoniwa#208 (opened 2026-11-20) turns off postcard's and
+- Hakoniwa audit exception: souk4711/hakoniwa#208 (merged 2026-11-21, not yet released; latest 1.8.1) turns off postcard's and
   procfs's default features. When a release with it ships, bump the `hakoniwa` pin and remove the
   RUSTSEC-2023-0089, RUSTSEC-2026-0574..0582 and RUSTSEC-2026-0543 (chrono) ignores from
   `.cargo/audit.toml` (DEP-24): with Mimik's hakoniwa features (no defaults) neither heapless nor
