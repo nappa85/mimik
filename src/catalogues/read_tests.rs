@@ -342,7 +342,7 @@ async fn measure_the_worst_browse_page() {
     store
         .run(move |db| {
             let prepared = json!({"contract_version":1,"extraction_sha256":zeros}).to_string();
-            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(1,?1,'fixture','Synthetic manual','synthetic-game','First','en',?1,x'',x'',?2,50)", rusqlite::params![zeros, prepared.as_bytes()])?;
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(1,?1,'fixture','Synthetic manual','synthetic-game','First','en',?1,x'',?2,50)", rusqlite::params![zeros, prepared.as_bytes()])?;
             db.execute("INSERT INTO source_rulesets VALUES(1,'synthetic-game','first')", [])?;
             for page in 1..=50_i64 {
                 db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(?1,1,?1,x'')", [page])?;

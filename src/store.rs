@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 36;
+pub const SCHEMA_VERSION: i64 = 37;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 36] = [
+const MIGRATIONS: [&str; 37] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -47,6 +47,7 @@ const MIGRATIONS: [&str; 36] = [
     include_str!("../migrations/034_note_bundles.sql"),
     include_str!("../migrations/035_assistant_reminders.sql"),
     include_str!("../migrations/036_upload_limits.sql"),
+    include_str!("../migrations/037_pdf_store.sql"),
 ];
 
 #[derive(Clone)]
@@ -54,6 +55,7 @@ pub struct Store(
     Arc<Mutex<Connection>>,
     Arc<std::sync::OnceLock<NoteHook>>,
     pub(crate) Arc<crate::sources::proposals::ProposalCache>,
+    pub(crate) Arc<crate::sources::pdf_store::PdfStore>,
 );
 
 /// Called after every committed sheet save that wrote change notes: the sheet, the new
@@ -109,6 +111,14 @@ impl Store {
     }
 
     fn migrate(mut connection: Connection) -> Result<Self, AppError> {
+        // The PDF store is the `sources/` directory beside the database file.
+        let data = connection
+            .path()
+            .map(Path::new)
+            .and_then(Path::parent)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let files = crate::sources::pdf_store::PdfStore::in_directory(data)?;
         crate::auth::register_domain_guard(&connection)?;
         crate::sources::search::install_budget_handler(&mut connection)?;
         register_auth_clock(
@@ -130,11 +140,27 @@ impl Store {
         }
         for (number, migration) in (1_i64..).zip(MIGRATIONS) {
             if version < number {
+                // 037 drops `sources.pdf`. A database whose version was set back below 037 after
+                // that (a restore, or a test fixture rewinding the schema) has no column left to
+                // drop: only its version is set again.
+                if number == 37
+                    && tx.query_row(
+                        "SELECT count(*)=0 FROM pragma_table_info('sources') WHERE name='pdf'",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )?
+                {
+                    tx.execute_batch("PRAGMA user_version=37;")?;
+                    continue;
+                }
                 tx.execute_batch(migration)?;
             }
         }
         crate::sources::search::ensure(&tx)?;
         tx.commit()?;
+        let store_id: String =
+            connection.query_row("SELECT store_id FROM pdf_store_identity", [], |r| r.get(0))?;
+        files.bind_identity(&store_id)?;
         // A failure must not stop the application: the marker stays unset, the next open
         // starts again, and `rebuild-catalogue-index` repairs it by hand. Nothing names data.
         if crate::catalogues::names::ensure(&mut connection).is_err() {
@@ -146,6 +172,7 @@ impl Store {
             Arc::new(Mutex::new(connection)),
             Arc::new(std::sync::OnceLock::new()),
             Arc::default(),
+            Arc::new(files),
         ))
     }
 
@@ -489,3 +516,7 @@ mod migration_tests {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "store_upload_tests.rs"]
 mod upload_limits_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "store_pdf_tests.rs"]
+mod pdf_store_migration_tests;

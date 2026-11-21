@@ -27,7 +27,7 @@ async fn database() -> (tempfile::TempDir, std::path::PathBuf, Store) {
         .run(|db| {
             let zeros = "0".repeat(64);
             let prepared = serde_json::json!({"contract_version": 1, "extraction_sha256": zeros}).to_string();
-            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(7,?1,'fixture','Fixture','synthetic-game','First','en',?1,x'',x'',?2,1)", params![zeros, prepared.as_bytes()])?;
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(7,?1,'fixture','Fixture','synthetic-game','First','en',?1,x'',?2,1)", params![zeros, prepared.as_bytes()])?;
             db.execute("INSERT INTO source_rulesets VALUES(7,?1,'first')", [GAME])?;
             db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png,printed_label) VALUES(70,7,1,x'','1')", [])?;
             for unit in [700, 701] {

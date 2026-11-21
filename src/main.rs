@@ -393,6 +393,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(command) = args.command {
         return local_command(&store, command, &data_dir(&path)?).await;
     }
+    // Orphan files of a failed import; recent files and a busy lock are skipped. It runs first
+    // and whatever else fails; it is also run with the uploads sweep.
+    if store.sweep_pdf_store().await.is_err() {
+        eprintln!("warning: the stored-PDF orphan sweep failed; it runs again at the next start.");
+    }
+    if store.pdf_store_shared().unwrap_or(false) {
+        eprintln!(
+            "warning: another database shares this sources/ folder; the stored-PDF sweep deletes nothing. Give each database its own folder (see docs/sources-and-retrieval.md)."
+        );
+    }
+    let missing = store.missing_pdf_count().await?;
+    if missing > 0 {
+        eprintln!(
+            "warning: {missing} source(s) have no stored PDF file (imported before the PDF store, or the sources/ folder was not restored with the database); a use that needs the PDF fails with a pdf_corrupt error until the source is imported again (see docs/sources-and-retrieval.md)."
+        );
+    }
     if args.assistant.on {
         options.assistant = Some(assistant(&args, &data_dir(&path)?, &store).await?);
     }

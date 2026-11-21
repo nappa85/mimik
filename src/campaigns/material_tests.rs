@@ -2126,7 +2126,7 @@ async fn material_large_page_omits_unit_overlay_but_keeps_missing_regions_and_dr
 
 async fn seed(store: &Store) {
     store.run(|db|{
-        db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','Material <title>','mork-borg','Fixture edition','en',?1,x'',x'',x'',2)",["a".repeat(64)])?;
+        db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','Material <title>','mork-borg','Fixture edition','en',?1,x'',x'',2)",["a".repeat(64)])?;
         db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(1,1,1,x'89504e47')",[])?;
         for id in 1..=51 {db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,1,?2,'Text','[]','<p>Fixture</p><script>bad()</script>','Fixture')",params![id,format!("unit-{id}")])?;}
         // Raw fixture rows get derived search text exactly as a legacy upgrade would.
@@ -2690,7 +2690,7 @@ async fn material_directory_cursors_are_independent_and_exhaustive() {
     seed(&store).await;
     store.run(|db|{
         for id in 2..=51{
-            db.execute("INSERT INTO sources SELECT ?1,?2,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages FROM sources WHERE id=1",params![id,format!("synthetic-{id}")])?;
+            db.execute("INSERT INTO sources SELECT ?1,?2,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages FROM sources WHERE id=1",params![id,format!("synthetic-{id}")])?;
             db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(?1,1,?1,x'')",[id])?;
         }Ok(())
     }).await.unwrap();
@@ -6204,7 +6204,7 @@ async fn review_list_fixture() -> (tempfile::TempDir, Store, Vec<RequestAuth>) {
                 "WITH RECURSIVE n(i) AS (SELECT 2 UNION ALL SELECT i+1 FROM n WHERE i<60) INSERT INTO source_pages(id,source_id,pdf_page,png) SELECT i,1,i,x'89504e47' FROM n;
                  WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<120) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT 2000+i,2,'t'||i,'Text','[]','<p>x</p>','Dense '||i FROM n;
                  WITH RECURSIVE n(i) AS (SELECT 3 UNION ALL SELECT i+1 FROM n WHERE i<60) INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) SELECT 3000+i,i,'s'||i,'Table','[]','<p>x</p>','Row <b>'||i FROM n;
-                 INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(2,'other','other','Other','mork-borg','Other edition','en',hex(zeroblob(32)),x'',x'',x'',1);
+                 INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(2,'other','other','Other','mork-borg','Other edition','en',hex(zeroblob(32)),x'',x'',1);
                  INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(100,2,1,x'89504e47');
                  INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(5000,100,'o','Text','[]','<p>x</p>','Foreign unit');",
             )?;
@@ -6381,7 +6381,7 @@ async fn material_next_incomplete_page_reaches_pages_without_units_to_review() {
             db.execute_batch(
                 "INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47'),(3,1,3,x'89504e47'),(4,1,4,x'89504e47');
                  INSERT INTO source_pages(id,source_id,pdf_page,png,complete) VALUES(5,1,5,x'89504e47',1);
-                 INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(2,'other','other','Other','mork-borg','Other edition','en',hex(zeroblob(32)),x'',x'',x'',1);
+                 INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(2,'other','other','Other','mork-borg','Other edition','en',hex(zeroblob(32)),x'',x'',1);
                  INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(100,2,6,x'89504e47');
                  INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(900,3,'a','Text','[]','<p>x</p>','x'),(901,4,'b','Text','[]','<p>x</p>','x');",
             )?;

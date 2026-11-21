@@ -901,10 +901,21 @@ impl Uploads {
         })?;
         self.0.files.discard(id, &self.0.ledger)
     }
-    /// Expire inactive uploads. A running worker is never swept.
+    /// Expire inactive uploads (a running worker is never swept) and sweep the stored PDFs no
+    /// row names. The PDF-store sweep runs whether or not the upload steps succeeded.
     /// # Errors
     /// Returns storage or filesystem failures.
     pub fn sweep(&self) -> Result<(), AppError> {
+        let uploads = self.sweep_uploads();
+        let files = self.0.store.pdf_store().clone();
+        let stored = self
+            .0
+            .store
+            .upload_storage(|db| super::pdf_store::sweep(&files, db))
+            .map(|_| ());
+        uploads.and(stored)
+    }
+    fn sweep_uploads(&self) -> Result<(), AppError> {
         let control = self
             .0
             .control

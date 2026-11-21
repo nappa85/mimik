@@ -615,7 +615,7 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
-    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
+    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
     let app = crate::auth::app(store.clone()).await.unwrap();
     let create = vec![
         ("csrf".into(), "a".repeat(64)),
@@ -718,7 +718,7 @@ async fn native_sheets_refuse_unit_routes() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
-    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
+    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
     let app = crate::auth::app(store.clone()).await.unwrap();
     let campaign = vec![
         ("csrf".into(), "a".repeat(64)),
@@ -810,7 +810,7 @@ async fn published_fixture(store: &Store) -> i64 {
     store.run(|db|{
         db.execute("INSERT INTO registry_games VALUES('synthetic-game','Synthetic')",[])?;db.execute("INSERT INTO registry_editions VALUES('synthetic-game','first','First',0)",[])?;
         let zeros="0".repeat(64);let prepared=json!({"contract_version":1,"extraction_sha256":zeros}).to_string();
-        db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(?1,'fixture','Fixture','synthetic-game','First','en',?1,x'',x'',?2,1)",params![zeros,prepared.as_bytes()])?;
+        db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(?1,'fixture','Fixture','synthetic-game','First','en',?1,x'',?2,1)",params![zeros,prepared.as_bytes()])?;
         db.execute("INSERT INTO source_rulesets VALUES(1,'synthetic-game','first')",[])?;
         db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(1,1,1,x'')",[])?;
         db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1,1,'block','text','[[0,0],[1,0],[1,1],[0,1]]','','')",[])?;

@@ -145,13 +145,14 @@ Assistant requirements on the host:
   the profile covers that one binary path only: a copy or hard link elsewhere is refused, a
   symbolic link to it works.
 
-Ctrl+C stops the server. Stop it before copying the database file as a backup. Back up before
+Ctrl+C stops the server. Stop it before copying the database file as a backup; the backup is the
+database file plus the `sources/` folder beside it (the stored PDFs), and a restore needs both. Back up before
 upgrading: a newer binary migrates the database in place, and older binaries then refuse it. External tools that read the database (Python's `sqlite3` on an older system, for example) need SQLite 3.44 or later.
 Text that earlier builds stored with CR LF line breaks is written with LF on its next save.
 
 Manuals are not included. The Owner supplies lawfully obtained source material locally;
-imported evidence is stored in the database, and existing sheets work without the original
-PDFs.
+imported evidence is stored in the database, the imported PDFs in the `sources/` folder, and
+existing sheets work without the original PDFs.
 
 ## What the release gate checks
 

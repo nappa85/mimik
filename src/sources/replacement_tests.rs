@@ -17,7 +17,7 @@ fn fixture(units: i64) -> (tempfile::TempDir, Store) {
     let store = Store::open(&dir.path().join("db")).unwrap();
     store
         .upload_storage(|db| {
-            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','T','mork-borg','E','en',?1,x'',x'',x'',2)", ["a".repeat(64)])?;
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','T','mork-borg','E','en',?1,x'',x'',2)", ["a".repeat(64)])?;
             db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(1,1,1,x'89504e47')", [])?;
             db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(2,1,2,x'89504e47')", [])?;
             for id in 1..=units {

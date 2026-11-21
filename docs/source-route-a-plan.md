@@ -284,7 +284,7 @@ Remaining before any route-A measurement:
     `finalizing` source per upload ID); insert the source as `finalizing`. A retry first
     removes a leftover hidden source of the same upload through the cleanup path below, before
     this transaction and only once no job owns it.
-  - **Batch** transactions: each inserts one bounded batch of pages (PDF BLOB once, original
+  - **Batch** transactions: each inserts one bounded batch of pages (the PDF is `put` before the first transaction that inserts the `sources` row, the guard kept until it commits; original
     PNGs, page facts/probe provenance, raw and units rows, units initially `unreviewed`, search
     projections, and the batch's exclusion rejections below), after checking that its own
     source still exists and is `finalizing`.
@@ -323,8 +323,7 @@ Remaining before any route-A measurement:
 - Reuse `documents::register_import` (in the last transaction only): hash-keyed
   document/member, first uncovered page primary, overlaps subject to the existing owner-choice
   rules. Do not replace a primary reading or
-  merge runs. Schema 24 still stores PDF bytes per source; PDF deduplication (C5) is not an
-  incidental migration in this slice.
+  merge runs. PDFs live in the content-addressed store (migration 037), so identical PDFs share one file.
 - The flip transaction holds the upload-row deletion (with exclusions and fingerprint key) and
   the receipt; retain an upload-ID → source-ID completion receipt without private staging data
   for retry/lost-response idempotency. Only after commit remove the staging folder and charge

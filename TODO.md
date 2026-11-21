@@ -112,7 +112,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   locks, `document_changed`) merged 2026-11-21. Slice 4 (free-space admission and the upload
   route) merged 2026-11-21. Slice 5 (totals removed, any page subset with a ranges UI, up to eight
   boxes per page, several proposals per exclusion, streaming bounded proposals) merged 2026-11-21.
-  Next: slice 6 (large-input gate), before route A's 4c builds on staging.
+  Slice 7 built, merge pending review. Next: slice 6 (large-input gate), before route A's 4c builds on staging.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions

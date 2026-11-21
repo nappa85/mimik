@@ -132,6 +132,9 @@ pub enum AppError {
     SuggestionReportParse { line: usize, column: usize },
     #[error("Source not found.")]
     SourceNotFound,
+    /// The stored PDF of a source is missing, replaced or does not match its hash.
+    #[error("The stored PDF of this source is missing or damaged; import the source again.")]
+    PdfCorrupt,
     #[error("Character not found.")]
     NotFound,
     #[error("This character was changed in another tab. Copy your edits, reload, and try again.")]
