@@ -40,7 +40,7 @@ key or internet access is needed; the assistant and its model downloads are opti
   it (a PDF bounded by disk space, not by size), selects any pages of it (a range list or all, up to 20,000 pages), renders, cancels/retries jobs and discards staging. Upload needs
   the sandbox's unprivileged user namespaces and successful availability probe; failure shows
   remediation and never selects an unconfined parser. macOS and Windows have no upload.
-  Large manuals are inspected in one streamed pass and rendered in eight-page batches; the inspection time limits are provisional until the host large-input gate has run (`TODO.md`). The command-line import keeps whole-file memory bounds (`docs/limitations.md`).
+  Large manuals are inspected in one streamed pass and rendered in eight-page batches; a host gate on well-formed synthetic manuals of 500 to 20,000 pages stays far inside the time limits (`docs/results.md`). The command-line import keeps whole-file memory bounds (`docs/limitations.md`).
   Until source-import step 4, this stages pages only: it creates no source or lookup evidence.
   The synthetic upload worker is confined to explicit `dev-endpoint` browser-check builds.
 - **Unauthenticated prototype.** `--no-auth` serves the old single-user editor on

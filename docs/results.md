@@ -5,6 +5,46 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Large-input gate on the host (SRC-15, 2026-11-21)
+
+Release build on the development host (12 cores, magnetic disk at `/media/data`), the opt-in
+`live_large` tests with the release application as runner, one thread. Inputs are generated
+deterministic PDFs (Helvetica text, about 40 lines a page, a running header, footer and page
+number, a 100 x 100 grey image every fifth page; the 20,000-page one has empty pages). The page
+cache of each PDF is dropped before each inspection and each render batch; the files are small
+(2.9 MB, 28.9 MB, 2.1 MB), so the cold reads cost little. The RSS column is the runner's `wait4`
+high-water mark, an upper bound that can carry the test process's own peak (it never falls
+across the run); the worker's own peak was not isolated.
+
+| Run | Pages | Wall | CPU | wait4 RSS bound | Share of limit (wall / CPU) |
+| --- | --- | --- | --- | --- | --- |
+| Inspect, manual | 500 | 0.07-0.10 s | 0.06-0.07 s | 53-65 MiB | 0.1% / 0.3% |
+| Inspect, manual | 5,000 | 0.46-0.54 s | 0.18-0.20 s | 57-60 MiB | 0.1% / 1.0% |
+| Inspect, minimal | 20,000 | 0.34 s | 0.31 s | 57 MiB | 0.0% / 1.6% |
+| Render all, 63 batches of 8 | 500 | 37.6 s (0.075 s a page) | 37.4 s | 65 MiB | 0.3% / 0.4% (worst batch) |
+| Render all, 625 batches of 8 | 5,000 | 441.9 s (0.088 s a page) | 409.9 s | 65 MiB | 0.4% / 0.4% (worst batch) |
+
+No run was killed. Through the upload manager with the production worker (500 pages, warm
+cache): stage and inspect 0.26 s, render 93 s with 373 progress polls of at most 1.2 ms,
+`read_for_owner` 4 ms, the 100-page screen 1.5 ms (259 KB of HTML), the contract 4 ms, both
+proposal passes 0.21 s (3 proposals); a cancel at page 60 took 13 ms and kept 59 whole pages
+with every sandbox process gone; reconciliation by a second manager failed the held job as
+interrupted, kept no pages and a retry rendered all 500 in 91 s. The manager's render is about
+2.5 times the direct one (0.19 s a page, about an hour for 20,000 pages); the cause (writing,
+syncing and publishing each page) is not investigated.
+
+Conclusion: the inspection and render limits (inspection 30 s plus 0.1 s a page record, 20 s
+CPU plus 1 s per 32 MiB up to 200 s; render 30 s and 25 s CPU a page) are far above ordinary
+well-formed work (about 1000 times the measured cost a page) and stay as ceilings. The cost is
+occupancy: a hostile file can hold the single worker up to about 34 minutes in inspection
+(20,000 cheap page records) and far longer in rendering; the Owner's cancel (13 ms here) is the
+remedy, and the 0.1 s a page should be tightened only after a real large manual is measured.
+Before the first page record the inspection wall is a fixed 30 s whatever the file size, so a
+damaged file of several hundred MB whose repair scan (cold, on a magnetic disk) takes longer is
+refused as too slow (`L-SRC-INSPECT-DAMAGED`). Limits: synthetic, well-formed inputs only;
+a real image-heavy manual of several hundred MB, a damaged file (MuPDF repair) and the proposer's
+disk reads at 20,000 pages are unmeasured.
+
 ## Name suggestions at the entry cap (step 4, 2026-11-19)
 
 Prototype tier. The ignored test `campaigns::tests::suggest_tests::measure_the_worst_suggest_request`

@@ -33,7 +33,7 @@ zero, nice to 10, and equal soft/hard CPU limits (inspection: 20 seconds plus on
 32 MiB of PDF, at most 200 seconds, because the page count is not yet known; 25 seconds per
 rendered page). The parent enforces 30 seconds for inspection plus 0.1 second for each page
 record received and validated (not for a claimed count), or 30 seconds per render page. The inspection
-constants are provisional until the host large-input gate has run (`TODO.md`, SRC-15). The worker opens the bound `/in/document.pdf` by path with MuPDF's stdio stream, which seeks and reads on
+constants were checked by the host large-input gate (small synthetic files: at most 1.6% of the CPU limit and 0.1% of the wall deadline up to 20,000 pages; `docs/results.md`) and stay as ceilings for hostile input; before the first page record the wall is a fixed 30 s whatever the file size. The worker opens the bound `/in/document.pdf` by path with MuPDF's stdio stream, which seeks and reads on
 demand: the PDF is never copied into memory, so its size adds no address space and no limit
 of its own (a PDF can be larger than 128 MiB, or have its xref beyond 4 GiB). The pre-open
 check (`%PDF-` in the first 1,024 bytes, `%%EOF` in the last 1,024) reads those two windows

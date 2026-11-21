@@ -114,8 +114,11 @@ pub(super) fn inspect_run(
     })
 }
 
-// PROVISIONAL (SRC-15 slice 1): the inspection budget scales with the input; slice 6 fixes the
-// constants from cold-disk measurements. The CPU limit must be set before the page count is
+// The inspection budget scales with the input (SRC-15). The host large-input gate (small
+// synthetic files, `docs/results.md`) used at most 1.6% of the CPU limit and 0.1% of the wall
+// deadline for 500, 5,000 and 20,000 pages, so the constants stay as ceilings for hostile
+// input. Before the first page record the wall is a fixed `INSPECT_WALL_BASE` whatever the
+// file size (a long repair scan of a large damaged file can miss it). The CPU limit must be set before the page count is
 // known (the first frame carries it) and `runner::worker_limits` refuses more than 200 s, so
 // it is sized from the file size up to that ceiling. The wall deadline grows with progress:
 // each page frame the parent has received and validated adds `INSPECT_WALL_PER_PAGE_MS`

@@ -101,15 +101,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   a release ships: pin it from crates.io, drop `vendor/mupdf`, the `[patch.crates-io]` entry and
   the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
 
-- **Source size limits (SRC-15, `docs/decisions.md`):** slices 1-2 merged 2026-11-20 and 3-8
-  2026-11-21 (docs in `sources-and-retrieval.md`; the plan file is deleted). Still to do: run the
-  host large-input gate (weekend or after 18:00, one thread, large directory on the magnetic disk,
-  release test build with the release application as runner) and fix the inspection constants
-  (`INSPECT_WALL_*`, `INSPECT_CPU_*` in `src/sources/worker/launch.rs`) from its report:
-  `MIMIK_LIVE_RUNNER=<built release mimik binary> MIMIK_LIVE_LARGE_DIR=/media/data/mimik/large-gate MIMIK_LIVE_REPORT=/media/data/mimik/large-gate/report.jsonl cargo test --release --locked --lib live_large -- --ignored --nocapture --test-threads=1`.
-  The report's figures (inspect/render at 500, 5,000 and 20,000 pages, with their ratio to each
-  limit; the 500-page manager test; the disk-read time of the two proposer passes) go into
-  `docs/results.md`. Then route A's 4c can build on staging.
+- **SRC-15 follow-ups:** done 2026-11-21, so route A's 4c can build on the new staging.
+  Open: scale the inspection base wall (fixed 30 s before the first page record) with the file
+  size, so a large damaged PDF's repair scan is not refused (L-SRC-INSPECT-DAMAGED); measure a
+  real image-heavy manual of several hundred MB; the manager's render costs 2.5 times the direct
+  one (`docs/results.md`); a manual box applied to a page range (L-SRC-PROPOSAL-BUDGET); CI's
+  actions still target Node.js 20.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
