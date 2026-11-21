@@ -44,16 +44,21 @@ impl Default for Limits {
     }
 }
 /// Work units of one proposal run (comparisons, index steps of scans and prunes, lines, and
-/// parsed text bytes). Unmeasured: slice 6 sets it from timings on large inputs.
+/// parsed text bytes), over both passes. Calibrated by `proposer_calibration` (see
+/// `sources-and-retrieval.md`): a unit costs 74 to 144 ns, so the budget bounds one run at about
+/// 72 s of CPU, plus the disk reads of both passes.
 const WORK_BUDGET: u64 = 500_000_000;
 /// Work units charged for each text line of a page (normalising, digesting, sorting).
 const LINE_WORK: u64 = 8;
-/// Parsed text bytes that cost one work unit (a page's JSON is read, hashed and parsed once).
+/// Parsed text bytes that cost one work unit (a page's JSON is read, hashed and parsed twice,
+/// once for each pass, and charged each time).
 const BYTES_PER_WORK: u64 = 8;
 /// Accounted bytes of one group (the structure and its seed) besides its text.
 const GROUP_COST: usize = 160;
 /// Accounted bytes of one stored box of a group (a `BTreeMap` entry).
 const BOX_COST: usize = 64;
+/// Accounted bytes of one counted text in the counting pass (a digest, a count, table slack).
+const COUNT_COST: usize = 48;
 /// Accounted bytes of a dropped text's digest in the skip set.
 const DROPPED_COST: usize = 48;
 /// A tracked text is held as the grouping key and as the budget key.
@@ -231,28 +236,42 @@ impl Uploads {
             .filter(|p| selected.contains(&p.pdf_page))
             .collect();
         let mut proposer = Proposer::new(chosen.len(), Limits::default());
-        for page in chosen {
-            let bytes = self.0.files.read_text(&u.id, page.pdf_page)?;
-            // Read, hash and parse are work too: charged before the page is parsed.
-            proposer.spend(bytes.len() as u64 / BYTES_PER_WORK)?;
-            if bytes.len() as u64 != page.text_bytes || hash(&bytes) != page.text_sha256 {
-                return Err(AppError::Invalid("Invalid staged text."));
-            }
-            // Parsing errors are deliberately mapped: serde diagnostics may contain text.
-            let lines: Vec<worker::records::TextLine> = serde_json::from_slice(&bytes)
-                .map_err(|_| AppError::Invalid("Invalid staged text."))?;
-            drop(bytes);
-            let fact = facts.get(&page.pdf_page).ok_or(AppError::Conflict)?;
-            worker::records::validate_lines(&lines, fact)
-                .map_err(|_| AppError::Invalid("Invalid staged text."))?;
-            proposer.feed(&TextPage {
+        // Two passes over the same pages (each read, hash-verified, parsed and validated
+        // again): the first counts the pages of every text, the second groups only the texts
+        // that can reach the threshold.
+        for page in &chosen {
+            let text = self.text_page(u, &facts, page, &mut proposer)?;
+            proposer.count(&text)?;
+        }
+        proposer.end_count();
+        for page in &chosen {
+            let text = self.text_page(u, &facts, page, &mut proposer)?;
+            proposer.feed(&text)?;
+        }
+        Ok((proposer.finish(&key)?, key))
+    }
+
+    /// One staged page of text: read, hash-verified, parsed and validated.
+    fn text_page(
+        &self,
+        u: &Upload,
+        facts: &HashMap<u32, &worker::Page>,
+        page: &super::PageModel,
+        proposer: &mut Proposer,
+    ) -> Result<TextPage, AppError> {
+        let bytes = self.0.files.read_text(&u.id, page.pdf_page)?;
+        checked_text(
+            proposer,
+            &bytes,
+            &StagedText {
+                bytes: page.text_bytes,
+                sha256: &page.text_sha256,
                 page: page.pdf_page,
                 width: page.width_points,
                 height: page.height_points,
-                lines,
-            })?;
-        }
-        Ok((proposer.finish(&key)?, key))
+            },
+            facts.get(&page.pdf_page).copied(),
+        )
     }
 
     /// Append an Owner-confirmed exclusion in displayed points. Both revisions must match. The
@@ -772,6 +791,13 @@ struct Proposer {
     comparisons: u64,
     memory: usize,
     work: u64,
+    /// Pass 1: on how many pages each normalized text of 4 to 200 characters appears.
+    counts: HashMap<[u8; 16], u32>,
+    /// Pass 1 has ended: only the texts left in `counts` may seed a group.
+    counted: bool,
+    /// Tests that feed pages without counting them first (see [`Proposer::single_pass`]).
+    #[cfg(test)]
+    single_pass: bool,
 }
 impl Proposer {
     /// `total` is the number of pages that will be fed.
@@ -791,7 +817,61 @@ impl Proposer {
             comparisons: 0,
             memory: 0,
             work: 0,
+            counts: HashMap::new(),
+            counted: false,
+            #[cfg(test)]
+            single_pass: false,
         }
+    }
+    /// A proposer for the tests of the grouping bounds, which feed pages without a counting
+    /// pass (every text may then seed a group). Production always counts first.
+    #[cfg(test)]
+    fn single_pass(total: usize, limits: Limits) -> Self {
+        Self {
+            single_pass: true,
+            ..Self::new(total, limits)
+        }
+    }
+    /// Pass 1: count the pages each normalized text of 4 to 200 characters appears on (a text
+    /// once a page). Charged to the work budget like [`Proposer::feed`] and to the memory budget
+    /// at [`COUNT_COST`] a distinct text. Pages come in any order.
+    fn count(&mut self, page: &TextPage) -> Result<(), AppError> {
+        self.spend_lines(page)?;
+        let mut raw: HashSet<&str> = HashSet::new();
+        let mut here: HashSet<[u8; 16]> = HashSet::new();
+        for line in &page.lines {
+            if !raw.insert(line.text.as_str()) {
+                continue;
+            }
+            let text = normalize(&line.text);
+            self.spend((text.len() as u64).div_ceil(BYTES_PER_WORK))?;
+            if (4..=200).contains(&text.chars().count()) {
+                here.insert(text_digest(&text));
+            }
+        }
+        for digest in here {
+            let seen = self.counts.entry(digest).or_insert(0);
+            *seen += 1;
+            if *seen == 1 {
+                self.charge(COUNT_COST)?;
+            }
+        }
+        Ok(())
+    }
+    /// End pass 1: a text on fewer pages than the threshold can never reach it (a group holds
+    /// one box a page, and texts are independent), so it is forgotten and never seeds a group.
+    fn end_count(&mut self) {
+        let required = self.required;
+        let before = self.counts.len();
+        self.counts
+            .retain(|_, pages| usize::try_from(*pages).is_ok_and(|n| n >= required));
+        self.memory = self
+            .memory
+            .saturating_sub((before - self.counts.len()) * COUNT_COST);
+        // `retain` keeps the table's capacity: give it back, so pass 2 does not run on top of
+        // the table pass 1 grew.
+        self.counts.shrink_to_fit();
+        self.counted = true;
     }
     fn charge(&mut self, bytes: usize) -> Result<(), AppError> {
         self.memory += bytes;
@@ -822,6 +902,14 @@ impl Proposer {
         }
     }
     fn feed(&mut self, page: &TextPage) -> Result<(), AppError> {
+        #[cfg(test)]
+        let single_pass = self.single_pass;
+        #[cfg(not(test))]
+        let single_pass = false;
+        debug_assert!(
+            self.counted || single_pass,
+            "pass 2 needs the counts of pass 1"
+        );
         let index = self.fed;
         self.fed += 1;
         self.sizes.push(PageSize {
@@ -836,7 +924,12 @@ impl Proposer {
         let mut consumed: HashSet<usize> = HashSet::new();
         for (bounds, text, _) in self.eligible_lines(page)? {
             let length = text.chars().count();
-            if !(4..=200).contains(&length) || self.dropped.contains(&text_digest(&text)) {
+            let digest = text_digest(&text);
+            if !(4..=200).contains(&length) || self.dropped.contains(&digest) {
+                continue;
+            }
+            // Counted away in pass 1: on too few pages to reach the threshold.
+            if self.counted && !self.counts.contains_key(&digest) {
                 continue;
             }
             let candidate = fractions(bounds, page.width, page.height);
@@ -1160,16 +1253,66 @@ fn propose_oracle(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, A
         .collect())
 }
 
-/// The streaming proposer over a whole corpus, as the tests feed it.
+/// What the database records of one staged text file.
+struct StagedText<'a> {
+    bytes: u64,
+    sha256: &'a str,
+    page: u32,
+    width: f64,
+    height: f64,
+}
+
+/// One staged page of text after it was read: checked against its recorded size and hash, parsed
+/// and validated. The read, hash and parse are work too, charged before the page is parsed (once
+/// for each pass that reads it).
+fn checked_text(
+    proposer: &mut Proposer,
+    bytes: &[u8],
+    staged: &StagedText<'_>,
+    fact: Option<&worker::Page>,
+) -> Result<TextPage, AppError> {
+    proposer.spend(bytes.len() as u64 / BYTES_PER_WORK)?;
+    if bytes.len() as u64 != staged.bytes || hash(bytes) != staged.sha256 {
+        return Err(AppError::Invalid("Invalid staged text."));
+    }
+    // Parsing errors are deliberately mapped: serde diagnostics may contain text.
+    let lines: Vec<worker::records::TextLine> =
+        serde_json::from_slice(bytes).map_err(|_| AppError::Invalid("Invalid staged text."))?;
+    let fact = fact.ok_or(AppError::Conflict)?;
+    worker::records::validate_lines(&lines, fact)
+        .map_err(|_| AppError::Invalid("Invalid staged text."))?;
+    Ok(TextPage {
+        page: staged.page,
+        width: staged.width,
+        height: staged.height,
+        lines,
+    })
+}
+
+/// Pass 1 counts the pages of every text, pass 2 is the streaming grouping (see [`Proposer`]).
 #[cfg(test)]
-fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, AppError> {
+fn propose_two_pass(
+    pages: &[TextPage],
+    key: &[u8; 32],
+    limits: Limits,
+) -> Result<Vec<Proposal>, AppError> {
     let mut ordered: Vec<_> = pages.iter().collect();
     ordered.sort_by_key(|p| p.page);
-    let mut proposer = Proposer::new(pages.len(), Limits::default());
+    let mut proposer = Proposer::new(pages.len(), limits);
+    for page in &ordered {
+        proposer.count(page)?;
+    }
+    proposer.end_count();
     for page in ordered {
         proposer.feed(page)?;
     }
     proposer.finish(key)
+}
+
+/// The two-pass proposer over a whole corpus, as production runs it and the tests feed it.
+#[cfg(test)]
+fn propose_keyed(pages: &[TextPage], key: &[u8; 32]) -> Result<Vec<Proposal>, AppError> {
+    propose_two_pass(pages, key, Limits::default())
 }
 
 fn proposal(g: Group, ordered: &[PageSize], key: &[u8; 32]) -> Proposal {
@@ -1343,7 +1486,7 @@ mod tests {
         // 64 MiB box budget). Either budget refuses; a small work budget makes it quick here.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut hostile = Proposer::new(
+            let mut hostile = Proposer::single_pass(
                 input.len(),
                 Limits {
                     work: 20_000_000,
@@ -1681,7 +1824,7 @@ mod tests {
         let new = view(propose_keyed(&input, &[1; 32]));
         assert_identical(&input).unwrap();
         assert_eq!(new.unwrap()[0].2.len(), 6);
-        let mut proposer = Proposer::new(10, Limits::default());
+        let mut proposer = Proposer::single_pass(10, Limits::default());
         for page in &input {
             proposer.feed(page).unwrap();
         }
@@ -1692,7 +1835,7 @@ mod tests {
     }
     #[test]
     fn hostile_many_distinct_lines_refuse_at_the_group_cap() {
-        let mut proposer = Proposer::new(5, Limits::default());
+        let mut proposer = Proposer::single_pass(5, Limits::default());
         let mut refused = None;
         for page in 1..=5 {
             let lines = (0..20_000)
@@ -1722,7 +1865,7 @@ mod tests {
             ..Limits::default()
         };
         // 400 lines that recur on every page: a group per line, one box entry per page.
-        let mut proposer = Proposer::new(3000, limits);
+        let mut proposer = Proposer::single_pass(3000, limits);
         let mut refused_at = None;
         for page in 1..=3000 {
             let lines = (0..400_u32)
@@ -1759,7 +1902,7 @@ mod tests {
             comparisons: 1000,
             ..Limits::default()
         };
-        let mut proposer = Proposer::new(3, limits);
+        let mut proposer = Proposer::single_pass(3, limits);
         let hostile = |page| TextPage {
             page,
             width: 100.,
@@ -1786,7 +1929,7 @@ mod tests {
         assert_eq!(Limits::default().groups, 50_000);
         assert_eq!(Limits::default().memory, 64 * 1024 * 1024);
         assert_eq!(Limits::default().per_text, 2_000_000);
-        let mut easy = Proposer::new(3, limits);
+        let mut easy = Proposer::single_pass(3, limits);
         for page in pages(3, "test") {
             easy.feed(&page).unwrap();
         }
@@ -1794,7 +1937,7 @@ mod tests {
     }
     #[test]
     fn live_entries_stay_flat_across_five_hundred_text_pages() {
-        let mut proposer = Proposer::new(500, Limits::default());
+        let mut proposer = Proposer::single_pass(500, Limits::default());
         let mut peak = 0;
         for page in 1..=500_u32 {
             let mut lines = vec![line("page footer", [30., 180., 70., 190.])];
@@ -1945,16 +2088,16 @@ mod tests {
             ..Limits::default()
         };
         // The raw charge of 1,000 such lines is under the budget on its own.
-        let mut raw_only = Proposer::new(3, limits);
+        let mut raw_only = Proposer::single_pass(3, limits);
         raw_only.spend_lines(&page(many(1000))).unwrap();
         assert!(raw_only.work < limits.work);
-        let mut proposer = Proposer::new(3, limits);
+        let mut proposer = Proposer::single_pass(3, limits);
         assert!(matches!(
             proposer.feed(&page(many(1000))),
             Err(AppError::Invalid(COMPARISON_LIMIT))
         ));
         // Lines that normalize past 200 characters never reach the sort or a group.
-        let mut long = Proposer::new(3, Limits::default());
+        let mut long = Proposer::single_pass(3, Limits::default());
         long.feed(&page(vec![line(&fdfa.repeat(12), [1., 2., 41., 12.]); 50]))
             .unwrap();
         assert!(long.groups.is_empty());
@@ -1969,7 +2112,7 @@ mod tests {
             ..Limits::default()
         };
         let total = 40_u32;
-        let mut proposer = Proposer::new(total as usize, limits);
+        let mut proposer = Proposer::single_pass(total as usize, limits);
         let mut refused_at = None;
         for page in 1..=total {
             let mut lines = vec![line("recurring header", [0., 0., 40., 10.])];
@@ -1996,7 +2139,7 @@ mod tests {
         // the step that crossed it.
         assert!(proposer.work <= limits.work + 5_000, "{}", proposer.work);
         // The same input under the default budget is fine (a small corpus, N1 unchanged).
-        let mut easy = Proposer::new(total as usize, Limits::default());
+        let mut easy = Proposer::single_pass(total as usize, Limits::default());
         for page in 1..=total {
             easy.feed(&TextPage {
                 page,
@@ -2007,5 +2150,343 @@ mod tests {
             .unwrap();
         }
         assert_eq!(easy.finish(&[0; 32]).unwrap().len(), 1);
+    }
+
+    /// Feed `total` generated pages; the time is that of `feed` and `finish` alone.
+    fn calibrate(
+        name: &str,
+        total: u32,
+        limits: Limits,
+        mut make: impl FnMut(u32) -> Vec<worker::records::TextLine>,
+    ) -> Result<Vec<Proposal>, AppError> {
+        let mut proposer = Proposer::new(total as usize, limits);
+        let mut elapsed = std::time::Duration::ZERO;
+        let mut read_time = std::time::Duration::ZERO;
+        let mut outcome = Ok(());
+        let mut reached = 0;
+        // The page as production reads it: serialized (the staged file), then checked, hashed,
+        // parsed and validated by the production function, which charges the read.
+        let mut read = |proposer: &mut Proposer, page: u32, lines: Vec<_>| {
+            let json = serde_json::to_vec(&lines).unwrap();
+            let sha256 = hash(&json);
+            let fact = worker::Page {
+                n: page,
+                width: 595.,
+                height: 842.,
+                rotate: 0,
+                user_unit: 1.,
+                transform: [1., 0., 0., -1., 0., 842.],
+                visible: [0., 0., 595., 842.],
+                tagged: false,
+            };
+            let started = std::time::Instant::now();
+            let text = checked_text(
+                proposer,
+                &json,
+                &StagedText {
+                    bytes: json.len() as u64,
+                    sha256: &sha256,
+                    page,
+                    width: 595.,
+                    height: 842.,
+                },
+                Some(&fact),
+            );
+            read_time += started.elapsed();
+            text
+        };
+        // Pass 1, then pass 2: the generator runs twice, as production reads each page twice.
+        for page in 1..=total {
+            let counted = read(&mut proposer, page, make(page)).and_then(|text| {
+                let started = std::time::Instant::now();
+                let counted = proposer.count(&text);
+                elapsed += started.elapsed();
+                counted
+            });
+            if let Err(error) = counted {
+                outcome = Err(error);
+                break;
+            }
+        }
+        let (counted_texts, count_memory, count_work) =
+            (proposer.counts.len(), proposer.memory, proposer.work);
+        proposer.end_count();
+        let (mut peak_groups, mut peak_memory) = (0, 0);
+        if outcome.is_ok() {
+            for page in 1..=total {
+                let text = match read(&mut proposer, page, make(page)) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        outcome = Err(error);
+                        break;
+                    }
+                };
+                let started = std::time::Instant::now();
+                let fed = proposer.feed(&text);
+                elapsed += started.elapsed();
+                peak_groups = peak_groups.max(proposer.groups.len());
+                peak_memory = peak_memory.max(proposer.memory);
+                reached = page;
+                if let Err(error) = fed {
+                    outcome = Err(error);
+                    break;
+                }
+            }
+        }
+        let (work, comparisons, memory, groups) = (
+            proposer.work,
+            proposer.comparisons,
+            proposer.memory,
+            proposer.groups.len(),
+        );
+        let started = std::time::Instant::now();
+        let result = outcome.and_then(|()| proposer.finish(&[0; 32]));
+        elapsed += started.elapsed();
+        #[allow(clippy::cast_precision_loss)]
+        let (percent, ns_per_unit) = (
+            work as f64 * 100. / WORK_BUDGET as f64,
+            (elapsed + read_time).as_secs_f64() * 1e9 / work.max(1) as f64,
+        );
+        println!(
+            "PROPOSER {name}: pass-2 pages {reached}/{total}, {:.2} s total ({:.2} s proposer, {:.2} s read/hash/parse/validate, no disk), work {work} of {WORK_BUDGET} ({percent:.1}%; pass 1 {count_work}), {ns_per_unit:.0} ns per unit, comparisons {comparisons}, count map {counted_texts} texts / {count_memory} B at the end of pass 1, peak groups {peak_groups}, peak memory {peak_memory} B, final memory {memory} B, live groups {groups}, result {}",
+            (elapsed + read_time).as_secs_f64(),
+            elapsed.as_secs_f64(),
+            read_time.as_secs_f64(),
+            match &result {
+                Ok(found) => format!("{} proposals", found.len()),
+                Err(error) => format!("refused: {error}"),
+            }
+        );
+        result
+    }
+    fn body_lines(page: u32, count: usize, width: usize) -> Vec<worker::records::TextLine> {
+        (0..count)
+            .map(|i| {
+                let mut text = format!("body {} {} ", letters(i), letters(page as usize));
+                while text.len() < width {
+                    text.push_str("lorem ipsum dolor sit amet ");
+                }
+                text.truncate(width);
+                // Spread over the body of the 842-point page, whatever the count.
+                let top = 60.
+                    + f64::from(u32::try_from(i).unwrap()) * 700.
+                        / f64::from(u32::try_from(count).unwrap());
+                line(&text, [40., top, 555., top + 7.])
+            })
+            .collect()
+    }
+
+    /// A manual page: header, footer, page number and `body` distinct body lines.
+    fn manual_page(page: u32, body: usize) -> TextPage {
+        let mut lines = vec![
+            line("Running header of the book", [40., 20., 555., 40.]),
+            line("Chapter footer text", [40., 800., 400., 815.]),
+            line(&format!("Page {page}"), [500., 800., 555., 815.]),
+        ];
+        lines.extend(body_lines(page, body, 80));
+        TextPage {
+            page,
+            width: 595.,
+            height: 842.,
+            lines,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_manual_is_proposed_where_the_group_cap_used_to_refuse_it() {
+        // Distinct body lines used to pile up as groups until the tail of the run (the last 40%
+        // of the pages) pruned them: with the default cap, 47 of them a page refused a manual of
+        // about 2,700 pages (the release benchmark runs 20,000). The same shape is run here on
+        // a smaller scale (the debug build is slow): 400 pages of 47 lines against a cap of
+        // 5,000 groups, which the first 160 pages alone fill. A text on fewer pages than the
+        // threshold never seeds.
+        let limits = Limits {
+            groups: 5_000,
+            ..Limits::default()
+        };
+        let input: Vec<TextPage> = (1..=400).map(|page| manual_page(page, 47)).collect();
+        let mut single = Proposer::single_pass(400, limits);
+        let refused = input.iter().try_for_each(|page| single.feed(page));
+        assert!(matches!(refused, Err(AppError::Invalid(COMPARISON_LIMIT))));
+        let found = propose_two_pass(&input, &[0; 32], limits).unwrap();
+        assert_eq!(found.len(), 3);
+        assert!(found.iter().all(|p| p.boxes.len() == 400));
+    }
+
+    #[test]
+    fn a_text_on_too_few_pages_never_spends_its_budget_so_nothing_is_refused_for_it() {
+        // Ten pages need six. "rare text" is on two pages at many places: under a small
+        // per-text budget the streaming run alone exhausts it and, with nothing else found,
+        // refuses; with the counting pass it never seeds, so the run returns no proposal.
+        // (The old whole-corpus function refused here: the one intended divergence.)
+        let input: Vec<TextPage> = (1..=10)
+            .map(|page| TextPage {
+                page,
+                width: 100.,
+                height: 200.,
+                lines: if page <= 2 {
+                    (0..20)
+                        .map(|i| {
+                            let left = f64::from(i) * 4.;
+                            line("rare text", [left, 2., left + 2., 12.])
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect();
+        let limits = Limits {
+            per_text: 3,
+            ..Limits::default()
+        };
+        let mut streaming = Proposer::single_pass(10, limits);
+        for page in &input {
+            streaming.feed(page).unwrap();
+        }
+        assert!(matches!(
+            streaming.finish(&[0; 32]),
+            Err(AppError::Invalid(COMPARISON_LIMIT))
+        ));
+        assert!(
+            propose_two_pass(&input, &[0; 32], limits)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ending_the_count_gives_the_table_capacity_back() {
+        // 5,000 distinct texts on one page of ten: none reaches the six pages needed.
+        let page = TextPage {
+            page: 1,
+            width: 100.,
+            height: 200.,
+            lines: (0..5_000)
+                .map(|i| line(&format!("line {}", letters(i)), [1., 2., 41., 12.]))
+                .collect(),
+        };
+        let mut proposer = Proposer::new(10, Limits::default());
+        proposer.count(&page).unwrap();
+        assert_eq!(proposer.counts.len(), 5_000);
+        proposer.end_count();
+        assert!(proposer.counts.is_empty());
+        assert!(
+            proposer.counts.capacity() < 100,
+            "capacity {}",
+            proposer.counts.capacity()
+        );
+    }
+
+    #[test]
+    fn the_counting_pass_is_charged_to_the_work_and_memory_budgets() {
+        let input: Vec<TextPage> = (1..=3).map(|page| manual_page(page, 20)).collect();
+        let mut proposer = Proposer::new(3, Limits::default());
+        proposer.count(&input[0]).unwrap();
+        // Three recurring texts and 20 body lines on the page: 23 counted texts.
+        assert_eq!(proposer.counts.len(), 23);
+        assert_eq!(proposer.memory, 23 * COUNT_COST);
+        assert!(proposer.work > 0);
+        let tight = Limits {
+            work: 100,
+            ..Limits::default()
+        };
+        assert!(Proposer::new(3, tight).count(&input[0]).is_err());
+        let small = Limits {
+            memory: 10 * COUNT_COST,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            Proposer::new(3, small).count(&input[0]),
+            Err(AppError::Invalid(COMPARISON_LIMIT))
+        ));
+        // Ending the pass keeps only the texts that reach the threshold (3 pages, 3 needed).
+        for page in &input[1..] {
+            proposer.count(page).unwrap();
+        }
+        proposer.end_count();
+        assert_eq!(proposer.counts.len(), 3);
+        assert_eq!(proposer.memory, 3 * COUNT_COST);
+    }
+
+    #[test]
+    #[ignore = "calibration benchmark: cargo test --release --lib proposer_calibration -- --ignored --nocapture"]
+    fn proposer_calibration() {
+        // (a) Ordinary manuals, 20,000 pages: a running header, a footer, a page number and
+        // distinct body lines; one with 80-character lines (4 KB a page), one with about 20 KB.
+        // Run with the default limits at several sizes (where the group cap bites), and with
+        // the group and memory caps lifted (what an ordinary 20,000-page manual needs).
+        let manual = |lines: usize, width: usize| {
+            move |page: u32| {
+                let mut found = vec![
+                    line("Running header of the book", [40., 20., 555., 40.]),
+                    line("Chapter footer text", [40., 800., 400., 815.]),
+                    line(&format!("Page {page}"), [500., 800., 555., 815.]),
+                ];
+                found.extend(body_lines(page, lines, width));
+                found
+            }
+        };
+        // 4 KB: 47 lines of 80 characters. 20 KB: 47 lines of 400 characters (over the 200
+        // that are ever grouped, as the brief's ordinary manual). Dense: lines of 200
+        // characters, the longest that are grouped, 47 (10 KB) and 97 (20 KB) a page.
+        for total in [500, 1_000, 5_000, 20_000] {
+            for (name, lines, width) in [
+                ("4KB", 47, 80),
+                ("20KB", 47, 400),
+                ("dense-10KB", 47, 200),
+                ("dense-20KB", 97, 200),
+            ] {
+                let result = calibrate(
+                    &format!("ordinary-{name}-{total}"),
+                    total,
+                    Limits::default(),
+                    manual(lines, width),
+                );
+                // The 20,000-page dense runs show what binds; the rest must fit.
+                if total < 20_000 || !name.starts_with("dense") {
+                    assert_eq!(result.unwrap().len(), 3, "{name} {total}");
+                }
+            }
+        }
+        // (b) A worst case run into the default work budget: 16,000 distinct places of each of
+        // three texts on pages 1-3, each text also recurring at one place on every page. The
+        // seeds cannot reach the threshold and stay as tombstones that every prune of the
+        // 12,000-page tail walks.
+        let seeds = |page: u32| -> Vec<worker::records::TextLine> {
+            let mut lines: Vec<_> = (1..=3_u32)
+                .map(|t| {
+                    line(
+                        &format!("recurring header {}", letters(t as usize)),
+                        [0., 0., 40., 10.],
+                    )
+                })
+                .collect();
+            if page <= 3 {
+                let text = format!("recurring header {}", letters(page as usize));
+                lines.extend((0..16_000_u32).map(|i| {
+                    let top = 20. + f64::from(i) * 0.04;
+                    line(&text, [60., top, 61., top + 0.01])
+                }));
+            }
+            lines
+        };
+        let result = calibrate("worst-case-tombstones", 20_000, Limits::default(), seeds);
+        println!("PROPOSER worst case refused: {}", result.is_err());
+        // (c) The U+FDFA expansion: 200 recurring lines of ten U+FDFA (about 190 characters
+        // after NFKC) on every page.
+        let fdfa = "\u{FDFA}";
+        let result = calibrate("fdfa-expansion", 20_000, Limits::default(), |_| {
+            (0..200_u32)
+                .map(|i| {
+                    let top = f64::from(i) * 4.;
+                    line(
+                        &format!("{}{}", fdfa.repeat(10), letters(i as usize)),
+                        [10., top, 500., top + 3.],
+                    )
+                })
+                .collect()
+        });
+        println!("PROPOSER fdfa result ok: {}", result.is_ok());
     }
 }

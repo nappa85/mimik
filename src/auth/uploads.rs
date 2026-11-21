@@ -984,6 +984,21 @@ async fn image(
         .into_response())
 }
 
+/// The page screen of `upload`, rendered (the large-input gate times it).
+#[cfg(test)]
+pub(crate) fn screen_html_for_test(upload: Upload, requested: u32) -> String {
+    Screen::build(
+        super::nav::Nav::logo_only(),
+        upload,
+        "t".repeat(64),
+        false,
+        Vec::new(),
+        requested,
+    )
+    .render()
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

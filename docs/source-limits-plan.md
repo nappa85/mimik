@@ -131,11 +131,22 @@ nothing re-verifies the file. Pages are published inside the render callback
    code writes one box per page and at most one fingerprint and refuses more when reading.
    Migration test: seeded v35 rows in all four tables, tables empty after, foreign-key check
    empty, 20,000 accepted and 20,001 refused.
-6. **Large-input gate.** Synthetic 500-page and 5,000-page PDFs (and a 20,000-page minimal one for
-   the frame) through inspect with a cold page cache (`posix_fadvise` DONTNEED on the magnetic
-   disk, weekend window), all render batches, cancel, restart reconciliation; fix the
-   per-page inspection budget constants from the measurements; time `progress` polls and the page
-   screen at 20,000 pages.
+6. **Large-input gate. Built except the host measurement run.** The live module
+   `sources::worker::live_tests::large_documents` (inspect and render of 500, 5,000 and 20,000
+   pages under the production budgets, cold cache; the figures come with their ratio to each
+   limit, the CPU from the runner's `wait4` rusage) and
+   `live_large_manager_stages_renders_cancels_and_reconciles_on_500_pages` (production worker
+   through `Uploads`; warm-cache times; the restart part is reconcile-only: a second manager
+   reconciles while the first render is held, no process is killed) are ignored and opt-in and
+   fail when `MIMIK_LIVE_RUNNER` or `MIMIK_LIVE_LARGE_DIR` is missing; the 20,000-page
+   fake-worker timings and the `proposer_calibration` benchmark run in the container. Host run
+   (weekend or after 18:00, one thread, the large directory on the magnetic disk; a release
+   test build, which every report line records, with the release application as runner):
+   `MIMIK_LIVE_RUNNER=<built release mimik binary> MIMIK_LIVE_LARGE_DIR=/media/data/mimik/large-gate MIMIK_LIVE_REPORT=/media/data/mimik/large-gate/report.jsonl cargo test --release --locked --lib live_large -- --ignored --nocapture --test-threads=1`.
+   The proposer now counts first (pass 1) so ordinary manuals no longer hit the group cap
+   (`sources-and-retrieval.md`; its caps and work budget are calibrated in the container and
+   stay). Remaining: run the host gate and fix the inspection constants (`INSPECT_WALL_*`,
+   `INSPECT_CPU_*`) from its report.
 8. **Docs.** Rewrite the reference sections in the table (each kept limit with its reason),
    `release-scope.md`, `limitations.md` (add: damaged-file inspection bound, exclusion history
    growth, CLI memory bounds; reword L-SRC-3, L-SRC-8 as CLI-only), `decisions.md` DEP-29,
