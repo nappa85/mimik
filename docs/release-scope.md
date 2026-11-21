@@ -37,9 +37,10 @@ key or internet access is needed; the assistant and its model downloads are opti
   imported source pages against the original page images at `/admin/materials`. Source import,
   definition publication and catalogue publication use the command line.
 - **PDF staging.** On Linux, the Owner uploads one PDF at `/admin/materials/uploads`, inspects
-  it, selects any pages of it (a range list or all, up to 20,000 pages), renders, cancels/retries jobs and discards staging. Upload needs
+  it (a PDF bounded by disk space, not by size), selects any pages of it (a range list or all, up to 20,000 pages), renders, cancels/retries jobs and discards staging. Upload needs
   the sandbox's unprivileged user namespaces and successful availability probe; failure shows
   remediation and never selects an unconfined parser. macOS and Windows have no upload.
+  Large manuals are inspected in one streamed pass and rendered in eight-page batches; the inspection time limits are provisional until the host large-input gate has run (`TODO.md`). The command-line import keeps whole-file memory bounds (`docs/limitations.md`).
   Until source-import step 4, this stages pages only: it creates no source or lookup evidence.
   The synthetic upload worker is confined to explicit `dev-endpoint` browser-check builds.
 - **Unauthenticated prototype.** `--no-auth` serves the old single-user editor on
