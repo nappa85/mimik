@@ -12,6 +12,7 @@ use std::{
 const HELPER: &str = "sources::worker::live_tests::worker_helper";
 const PARENT: &str = "sources::worker::live_tests::parent_helper";
 mod corpus;
+pub(crate) mod large_documents;
 mod large_inputs;
 mod local_pdfs;
 
@@ -81,6 +82,7 @@ fn options(mode: &str) -> Options {
         peak_rss_kib: std::sync::Arc::default(),
         worker_peak_rss_kib: std::sync::Arc::default(),
         parent_killed: std::sync::Arc::default(),
+        cpu_ms: std::sync::Arc::default(),
         runner: RunnerCommand {
             program: std::env::var_os("MIMIK_LIVE_RUNNER").unwrap().into(),
             args: vec![

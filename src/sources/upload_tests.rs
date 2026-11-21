@@ -2975,11 +2975,10 @@ fn five_hundred_pages_are_selected_rendered_proposed_and_excluded() {
     assert!(stored.boxes.values().all(|b| b.len() == 1));
 }
 
-#[test]
-fn twenty_thousand_pages_are_selected_and_rendered_without_totals() {
-    // One page is rendered for real; the other rows are copies of its row (the files of 20,000
-    // pages would only measure the disk). The state is that of a finished 20,000-page render.
-    let (_dir, m, o, f) = fixture();
+/// One page is rendered for real; the other rows are copies of its row (the files of 20,000
+/// pages would only measure the disk). The state is that of a finished 20,000-page render.
+fn rendered_twenty_thousand() -> (tempfile::TempDir, Uploads, OwnerWrite, String) {
+    let (dir, m, o, f) = fixture();
     f.inspected_pages.store(20_000, Ordering::Release);
     let id = create(&m, &o);
     selected(&m, &o, &id, &[1]);
@@ -2993,6 +2992,46 @@ fn twenty_thousand_pages_are_selected_and_rendered_without_totals() {
         db.execute("UPDATE source_jobs SET pages_done=20000,pages_total=20000", [])?;
         Ok(())
     }).unwrap();
+    (dir, m, o, id)
+}
+
+/// Run `f` and return its value with the seconds it took.
+fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
+    let started = Instant::now();
+    let value = f();
+    (value, started.elapsed().as_secs_f64())
+}
+
+#[test]
+fn at_twenty_thousand_pages_the_poll_the_screen_and_the_contract_stay_fast() {
+    // SRC-15 slice 6. The bounds are generous: a quadratic step at this size (4 x 10^8
+    // comparisons) misses them by an order of magnitude, a loaded machine does not.
+    let (_dir, m, o, id) = rendered_twenty_thousand();
+    let (progress, poll) = timed(|| m.progress_for_owner(&o.auth, &id).unwrap());
+    assert_eq!((progress.job.done, progress.job.total), (20_000, 20_000));
+    let (upload, read) = timed(|| m.read_for_owner(&o.auth, &id).unwrap());
+    assert_eq!(upload.pages.len(), 20_000);
+    let (html, screen) = timed(|| crate::auth::screen_html_for_test(upload, 100));
+    // One screen lists 100 pages (about 2.6 KB each with the rendered rows), never 20,000.
+    assert!(html.len() < 1_000_000, "{} bytes", html.len());
+    let (contract, contract_seconds) = timed(|| m.contract(&id).unwrap());
+    assert_eq!(contract.pages.len(), 20_000);
+    println!(
+        "SCALE 20,000 pages: progress {poll:.4} s, read_for_owner {read:.3} s, screen (build and render) {screen:.3} s, contract {contract_seconds:.3} s"
+    );
+    for (name, seconds, bound) in [
+        ("progress poll", poll, 2.),
+        ("read_for_owner", read, 10.),
+        ("page screen", screen, 10.),
+        ("contract", contract_seconds, 10.),
+    ] {
+        assert!(seconds < bound, "{name} took {seconds} s (bound {bound} s)");
+    }
+}
+
+#[test]
+fn twenty_thousand_pages_are_selected_and_rendered_without_totals() {
+    let (_dir, m, _o, id) = rendered_twenty_thousand();
     let started = Instant::now();
     let u = m.read(&id).unwrap();
     assert_eq!(u.selected_pages.len(), 20_000);
@@ -3324,4 +3363,241 @@ fn worst_case_digit_boxes_fit_the_migration_view_and_an_edge_box_on_a_595_2756_p
         exclusions::masking([500.5, 700., 595.2756, 800.], stored),
         exclusions::Masking::Clear
     );
+}
+
+/// The production worker, observed: counts the pages a render publishes and can hold the render
+/// just before one of them (a stand-in for the moment a process dies mid-render).
+#[derive(Default)]
+struct Observed {
+    published: AtomicUsize,
+    stall_at: AtomicUsize,
+    stalled: AtomicBool,
+    release: AtomicBool,
+    abort: AtomicBool,
+}
+impl Observed {
+    fn hold_before_page(&self, n: usize) {
+        self.published.store(0, Ordering::SeqCst);
+        self.stall_at.store(n, Ordering::SeqCst);
+        self.stalled.store(false, Ordering::SeqCst);
+        self.release.store(false, Ordering::SeqCst);
+        self.abort.store(false, Ordering::SeqCst);
+    }
+    fn wait_until_held(&self) {
+        let until = Instant::now() + Duration::from_secs(600);
+        while !self.stalled.load(Ordering::Acquire) {
+            assert!(Instant::now() < until, "the render never reached the hold");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+impl Worker for Observed {
+    fn inspect(&self, path: &Path, pins: &Pins, cancel: &Cancel) -> Result<Inspection, Reason> {
+        PdfWorker.inspect(path, pins, cancel)
+    }
+    fn render(
+        &self,
+        path: &Path,
+        pins: &Pins,
+        pages: &[Page],
+        cancel: &Cancel,
+        publish: &mut (dyn FnMut(RenderedPage) -> Result<(), worker::Error> + Send),
+    ) -> Result<(), Reason> {
+        PdfWorker.render(path, pins, pages, cancel, &mut |page| {
+            let n = self.published.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.stall_at.load(Ordering::Acquire) {
+                self.stalled.store(true, Ordering::Release);
+                while !self.release.load(Ordering::Acquire) {
+                    if cancel.cancelled() {
+                        return Err(worker::Error::Unreadable);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if self.abort.load(Ordering::Acquire) {
+                    return Err(worker::Error::Unreadable);
+                }
+            }
+            publish(page)
+        })
+    }
+}
+
+fn stage_pdf(m: &Uploads, o: &OwnerWrite, bytes: &[u8]) -> String {
+    let mut phase = m.begin_upload().unwrap();
+    phase.reserve_body(Some(bytes.len() as u64)).unwrap();
+    phase.write(bytes).unwrap();
+    let id = m
+        .create(o, phase, &hash(bytes), bytes.len() as u64, &metadata())
+        .unwrap();
+    wait(m);
+    id
+}
+
+/// File names of an upload's staging folder.
+fn staged_names(m: &Uploads, id: &str) -> Vec<String> {
+    let path = m.0.files.path(id).unwrap();
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The folder holds the document and, for each published page row, exactly its two files.
+fn assert_no_partial_pages(m: &Uploads, id: &str) {
+    let names = staged_names(m, id);
+    let rows = m.read(id).unwrap().pages.len();
+    assert!(
+        names.iter().all(|n| {
+            Path::new(n)
+                .extension()
+                .is_none_or(|e| !e.eq_ignore_ascii_case("part"))
+        }),
+        "a partial file remains: {names:?}"
+    );
+    let count = |prefix: &str, suffix: &str| {
+        names
+            .iter()
+            .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
+            .count()
+    };
+    assert_eq!(
+        (count("page-", ".png"), count("text-", ".json"), names.len()),
+        (rows, rows, 1 + 2 * rows),
+        "{names:?}"
+    );
+}
+
+#[test]
+#[ignore = "host confinement: MIMIK_LIVE_RUNNER and MIMIK_LIVE_LARGE_DIR opt-in"]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear live scenario sharing one manager"
+)]
+fn live_large_manager_stages_renders_cancels_and_reconciles_on_500_pages() {
+    use crate::sources::worker::live_tests::large_documents::{
+        Kind, assert_gone, descendants, ensure_pdf, large_dir, report, serial,
+    };
+    let large = large_dir();
+    let _serial = serial();
+    let (pdf, sha256) = ensure_pdf(&large, "manual-500.pdf", Kind::Manual(500));
+    let bytes = std::fs::read(&pdf).unwrap();
+    let data = tempfile::tempdir_in(&large).unwrap();
+    let observed = Arc::new(Observed::default());
+    let (_db, m, o) = fixture_worker_data(observed.clone(), Some(data.path()));
+    let all: Vec<u32> = (1..=500).collect();
+
+    // Stage, inspect (the production worker), select all, render with polls, view, propose.
+    let (id, stage_and_inspect) = timed(|| stage_pdf(&m, &o, &bytes));
+    let upload = m.read(&id).unwrap();
+    assert_eq!(upload.state, "inspected", "{:?}", upload.job);
+    assert_eq!(upload.inspection.as_ref().unwrap().pages.len(), 500);
+    selected(&m, &o, &id, &all);
+    let started = Instant::now();
+    start(&m, &o, &id);
+    let mut polls = Vec::new();
+    loop {
+        let (progress, seconds) = timed(|| m.progress_for_owner(&o.auth, &id).unwrap());
+        polls.push(seconds);
+        if !matches!(progress.job.state.as_str(), "queued" | "running") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    wait(&m);
+    let render = started.elapsed().as_secs_f64();
+    let upload = m.read(&id).unwrap();
+    assert_eq!(
+        (upload.state.as_str(), upload.job.done, upload.job.total),
+        ("rendered", 500, 500),
+        "{:?}",
+        upload.job
+    );
+    assert_no_partial_pages(&m, &id);
+    let (_, poll) = timed(|| m.progress_for_owner(&o.auth, &id).unwrap());
+    let (upload, read) = timed(|| m.read_for_owner(&o.auth, &id).unwrap());
+    let revision = upload.revision;
+    let (html, screen) = timed(|| crate::auth::screen_html_for_test(upload, 1));
+    let (contract, contract_seconds) = timed(|| m.contract(&id).unwrap());
+    assert_eq!(contract.pages.len(), 500);
+    let (proposals, propose) = timed(|| m.propose_exclusions(&o.auth, &id, revision).unwrap());
+    assert!(!proposals.is_empty(), "the running header must be proposed");
+    report(&serde_json::json!({
+        // Every time here is warm-cache: the staged copy was just written (not cold-disk figures).
+        "test": "manager_500", "sha256": sha256, "cache": "warm",
+        "stage_and_inspect_s": stage_and_inspect, "render_s": render,
+        "poll_during_render_max_s": polls.iter().copied().fold(0., f64::max),
+        "polls_during_render": polls.len(), "progress_after_s": poll,
+        "read_for_owner_s": read, "screen_s": screen, "screen_html_bytes": html.len(),
+        "contract_s": contract_seconds, "propose_s": propose, "proposals": proposals.len(),
+    }));
+    m.discard(&o, &id).unwrap();
+
+    // Cancel mid-render: the tree is reaped and every published page is whole.
+    let id = stage_pdf(&m, &o, &bytes);
+    selected(&m, &o, &id, &all);
+    observed.hold_before_page(60);
+    start(&m, &o, &id);
+    observed.wait_until_held();
+    let tree = descendants();
+    assert!(!tree.is_empty(), "a sandbox tree must be running");
+    let (cancelled, cancel_seconds) = timed(|| m.cancel(&o, &id));
+    cancelled.unwrap();
+    assert_gone(&tree);
+    let upload = m.read(&id).unwrap();
+    assert_eq!(upload.job.state, "cancelled", "{:?}", upload.job);
+    assert!(
+        !upload.pages.is_empty() && upload.pages.len() < 60,
+        "{} pages",
+        upload.pages.len()
+    );
+    assert_no_partial_pages(&m, &id);
+    assert_eq!(m.0.ledger.usage().unwrap().1, 0, "no reservation is left");
+    report(&serde_json::json!({
+        "test": "manager_cancel", "cancel_s": cancel_seconds, "kept_pages": upload.pages.len(),
+    }));
+    m.discard(&o, &id).unwrap();
+
+    // Reconciliation only, not a crash: a new manager over the same store and files reconciles
+    // while the old render is held (its process is not killed); the job is interrupted, the
+    // dropped pages leave no file, and a retry renders everything again.
+    let id = stage_pdf(&m, &o, &bytes);
+    selected(&m, &o, &id, &all);
+    observed.hold_before_page(60);
+    start(&m, &o, &id);
+    observed.wait_until_held();
+    let before = m.read(&id).unwrap().pages.len();
+    let old_tree = descendants();
+    assert!(!old_tree.is_empty(), "a sandbox tree must be running");
+    let restarted =
+        Uploads::initialize(m.0.store.clone(), data.path(), Arc::new(PdfWorker), false).unwrap();
+    let after = restarted.read(&id).unwrap();
+    assert_eq!(after.job.state, "failed");
+    assert_eq!(after.job.reason.as_deref(), Some("interrupted"));
+    // An interrupted render keeps no page (its pins died with it; `initialize`).
+    assert!(after.pages.is_empty());
+    assert_eq!(staged_names(&restarted, &id), ["document.pdf"]);
+    observed.abort.store(true, Ordering::SeqCst);
+    observed.release.store(true, Ordering::SeqCst);
+    wait(&m);
+    assert_gone(&old_tree);
+    assert_no_partial_pages(&restarted, &id);
+    let revision = restarted.read(&id).unwrap().revision;
+    let started = Instant::now();
+    restarted.start(&o, &id, revision, false).unwrap();
+    wait(&restarted);
+    let retry = started.elapsed().as_secs_f64();
+    let upload = restarted.read(&id).unwrap();
+    assert_eq!(
+        (upload.state.as_str(), upload.job.done, upload.job.total),
+        ("rendered", 500, 500),
+        "{:?}",
+        upload.job
+    );
+    assert_no_partial_pages(&restarted, &id);
+    assert_eq!(restarted.contract(&id).unwrap().pages.len(), 500);
+    report(&serde_json::json!({
+        "test": "manager_reconcile_only", "cache": "warm", "published_before_restart": before,
+        "kept_after_restart": after.pages.len(), "retry_render_s": retry,
+    }));
+    restarted.discard(&o, &id).unwrap();
 }

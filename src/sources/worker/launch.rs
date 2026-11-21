@@ -93,9 +93,20 @@ pub fn inspect_pinned(path: &Path, pins: &Pins, cancel: &Cancel) -> Result<Inspe
 }
 
 fn inspect_with(path: &Path, pins: Option<&Pins>, cancel: &Cancel) -> Result<Inspection, Reason> {
+    inspect_run(path, pins, cancel, &Options::production()?)
+}
+
+/// [`inspect_with`] under the given options (the live large-document gate reads the run's
+/// measurements back from them; production passes `Options::production()`).
+pub(super) fn inspect_run(
+    path: &Path,
+    pins: Option<&Pins>,
+    cancel: &Cancel,
+    options: &Options,
+) -> Result<Inspection, Reason> {
     super::availability::require()?;
     let spec = spec(records::Operation::Inspect, vec![]);
-    execute_with(path, pins, &spec, cancel, &Options::production()?, |pipe| {
+    execute_with(path, pins, &spec, cancel, options, |pipe| {
         let extension = pipe.wall_extension();
         records::read_inspection_observed(pipe, || {
             extension.fetch_add(INSPECT_WALL_PER_PAGE_MS, Ordering::AcqRel);
@@ -117,8 +128,15 @@ const INSPECT_CPU_CEILING: u64 = 200;
 /// One more CPU second per this many bytes of PDF.
 const INSPECT_CPU_BYTES: u64 = 32 << 20;
 
-fn inspect_cpu_seconds(size: u64) -> u64 {
+pub(super) fn inspect_cpu_seconds(size: u64) -> u64 {
     (INSPECT_CPU_BASE + size / INSPECT_CPU_BYTES).min(INSPECT_CPU_CEILING)
+}
+
+/// The wall budget an inspection of `pages` pages has earned by the time its last page arrives.
+#[cfg(test)]
+pub(super) fn inspect_wall_seconds(pages: u64) -> f64 {
+    let millis = u32::try_from(pages * INSPECT_WALL_PER_PAGE_MS).unwrap_or(u32::MAX);
+    INSPECT_WALL_BASE.as_secs_f64() + f64::from(millis) / 1000.
 }
 
 /// Yield individually validated pages with bounded memory on a dedicated reader thread.
@@ -154,6 +172,18 @@ fn render_with(
     pins: Option<&Pins>,
     pages: Vec<Page>,
     cancel: &Cancel,
+    page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
+) -> Result<(), Reason> {
+    render_run(path, pins, pages, cancel, &Options::production()?, page)
+}
+
+/// [`render_with`] under the given options (see [`inspect_run`]).
+pub(super) fn render_run(
+    path: &Path,
+    pins: Option<&Pins>,
+    pages: Vec<Page>,
+    cancel: &Cancel,
+    options: &Options,
     mut page: impl FnMut(RenderedPage) -> Result<(), Error> + Send,
 ) -> Result<(), Reason> {
     // Validate geometry and request cardinality before spawning anything.
@@ -163,7 +193,7 @@ fn render_with(
         records::Operation::Render,
         pages.iter().map(|p| p.n).collect(),
     );
-    execute_with(path, pins, &spec, cancel, &Options::production()?, |pipe| {
+    execute_with(path, pins, &spec, cancel, options, |pipe| {
         #[cfg(test)]
         let pipe = {
             let mut pipe = pipe;
@@ -278,6 +308,9 @@ pub(super) struct Options {
     pub worker_peak_rss_kib: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     pub parent_killed: Arc<AtomicBool>,
+    /// CPU milliseconds of the finished run's tree, from the runner's `wait4` rusage.
+    #[cfg(test)]
+    pub cpu_ms: Arc<std::sync::atomic::AtomicU64>,
     pub runner: RunnerCommand,
     pub executable: PathBuf,
     pub argv: Vec<String>,
@@ -292,6 +325,7 @@ impl Options {
             self,
             outcome.wait4_rss_kib,
             outcome.worker_rss_kib,
+            outcome.wait4_cpu_ms,
             outcome.parent_killed,
         );
     }
@@ -302,6 +336,7 @@ impl Options {
             .store(outcome.wait4_rss_kib, Ordering::Release);
         self.worker_peak_rss_kib
             .store(outcome.worker_rss_kib, Ordering::Release);
+        self.cpu_ms.store(outcome.wait4_cpu_ms, Ordering::Release);
         self.parent_killed
             .store(outcome.parent_killed, Ordering::Release);
         self.observed_exit
@@ -334,6 +369,8 @@ impl Options {
             worker_peak_rss_kib: Arc::default(),
             #[cfg(test)]
             parent_killed: Arc::default(),
+            #[cfg(test)]
+            cpu_ms: Arc::default(),
             executable: runner.program.clone(),
             runner,
             argv: vec![
@@ -465,6 +502,8 @@ struct Tree {
     reaped: Option<std::process::ExitStatus>,
     peak_rss_kib: u64,
     worker_peak_rss_kib: u64,
+    /// User plus system CPU of the runner and the descendants it waited for (`wait4`).
+    cpu_ms: u64,
 }
 impl Tree {
     fn new(child: std::process::Child, pin: Watched) -> Self {
@@ -476,6 +515,7 @@ impl Tree {
             reaped: None,
             peak_rss_kib: 0,
             worker_peak_rss_kib: 0,
+            cpu_ms: 0,
         }
     }
     fn sample_inner(&mut self) {
@@ -539,8 +579,13 @@ impl Tree {
                 }
             } else if result > 0 {
                 // SAFETY: successful wait4 initialized usage.
-                self.peak_rss_kib =
-                    u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).unwrap_or(u64::MAX);
+                let usage = unsafe { usage.assume_init() };
+                self.peak_rss_kib = u64::try_from(usage.ru_maxrss).unwrap_or(u64::MAX);
+                let millis = |time: libc::timeval| {
+                    u64::try_from(time.tv_sec).unwrap_or(0) * 1000
+                        + u64::try_from(time.tv_usec).unwrap_or(0) / 1000
+                };
+                self.cpu_ms = millis(usage.ru_utime) + millis(usage.ru_stime);
                 self.reaped = Some(std::process::ExitStatus::from_raw(status));
             }
         }
@@ -947,6 +992,7 @@ struct Outcome {
     parent: Option<Reason>,
     wait4_rss_kib: u64,
     worker_rss_kib: u64,
+    wait4_cpu_ms: u64,
     parent_killed: bool,
 }
 
@@ -1024,6 +1070,7 @@ fn watch(
         parent,
         wait4_rss_kib: tree.peak_rss_kib,
         worker_rss_kib: tree.worker_peak_rss_kib,
+        wait4_cpu_ms: tree.cpu_ms,
         parent_killed,
     }
 }
@@ -1284,6 +1331,7 @@ mod tests {
             reaped: None,
             peak_rss_kib: 0,
             worker_peak_rss_kib: 0,
+            cpu_ms: 0,
         };
         let start = Instant::now();
         let result = tree.settle();
@@ -1309,6 +1357,7 @@ mod tests {
             reaped: None,
             peak_rss_kib: 0,
             worker_peak_rss_kib: 0,
+            cpu_ms: 0,
         };
         let error = tree.settle_within(Duration::from_millis(20)).unwrap_err();
         let alive = other.try_wait().unwrap().is_none();
@@ -1382,6 +1431,7 @@ mod tests {
             reaped: None,
             peak_rss_kib: 0,
             worker_peak_rss_kib: 0,
+            cpu_ms: 0,
         };
         let started = Instant::now();
         tree.settle().unwrap();

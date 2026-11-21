@@ -342,7 +342,11 @@ page rows removed by missing-file sweeps or render replacement.
 
 `Uploads::propose_exclusions` reads staged text under the publication/deletion gate, one page
 at a time: it checks the stored byte count and SHA-256, validates the text-line schema and page
-bounds again, feeds the page to the streaming proposer and drops it. Only candidate groups
+bounds again, and drops it after use. It does so twice, and the gate is held for both passes
+(measured figures below). Pass 1 counts, for each distinct normalized text of 4 to 200 characters, the
+pages it appears on (a text once a page, keyed by its 128-bit digest, about 48 bytes a text).
+A text on fewer pages than the threshold can never reach it, so after pass 1 it is forgotten
+and never seeds a group; pass 2 is the streaming proposer. Only candidate groups
 outlive a page.
 It requires a complete current selection, no queued/running job, and Owner read admission
 before and after the read. Propose responses never include an automatic refresh.
@@ -380,15 +384,31 @@ so lines whose normalized text is not 4 to 200 characters are dropped right afte
 sorting). Scans do not copy the per-text index sets: a
 page skips the groups it already matched and the ones it created. The run holds the upload
 gate, as does `set_exclusion` when it confirms proposals, so the budget is what bounds the
-hold. It is not a measured time: the constants (`WORK_BUDGET`, 8 per line, 8 bytes per unit) are
-sized so that a manual of 20,000 pages with about 20 KB of text and 50 lines each fits: the
-bytes are charged twice, about 100 million units, the normalized text about 50 million more,
-and the lines 8 million. Slice 6 sets them from timings on large inputs. Reaching any bound
-refuses with the same "comparison limit" error. A group that alone can no longer reach the
+hold. Pass 1 spends the same kinds of units as pass 2 and shares the budget and the memory
+budget; each pass charges the read of every page (one unit per 8 bytes of JSON), so the bytes
+are charged twice. Lines over 200 characters are charged (read, line and normalized-byte
+units) but not counted or grouped. Measured with the release benchmark `proposer_calibration`
+(12 cores; it serializes, hashes, parses and validates each page with the production function,
+no disk reads): ordinary manuals of 20,000 pages fit the default bounds with at most 3 live
+groups. At 47 lines of 80 characters a page (4 KB): 8.3 s, 90 million units (18%), 93 ns a
+unit, 940,003 counted texts (45 MB). At 47 lines of 400 characters (about 20 KB): 27.7 s,
+315 million units (63%), 88 ns a unit; a page of about 30 KB of such lines would no longer fit
+`WORK_BUDGET`. At 47 lines of 200 characters (10 KB of groupable text): 16.3 s, 174 million
+units (35%). A manual of 20,000 pages with 97 distinct lines of 200 characters a page (about 20
+KB of groupable text) exceeds the count map's share of the 64 MiB budget (1.4 million texts) and
+is refused after 12 s. A unit costs 74 ns (tombstone scans) to 144 ns (NFKC expansion) here, so
+the longest the gate is held by one run is `WORK_BUDGET` times the highest cost, about 72 s of
+CPU (37 s measured for the tombstone worst case, which is refused at the budget), plus the
+disk reads of two passes over the staged text (not measured; the host gate reports them for the
+render). Reaching any bound refuses with the same "comparison limit" error. A group that alone can no longer reach the
 threshold becomes a tombstone: its boxes are freed but its seed and index stay, so later
 scans and budgets behave as before and a match on it is consumed without a box; a text none of
 whose groups can reach it is freed whole and only its digest is remembered. The output equals
-that of the previous whole-corpus function (kept as the test oracle).
+that of the previous whole-corpus function (kept as the test oracle) with one intended
+difference in the result: that function refused when nothing qualified and some text had
+exhausted its per-text budget; a text on too few pages now never spends that budget, so a run
+can return no proposal where the old function refused. The work also differs: the staged text
+is read, hashed and parsed twice, and the budget is charged for both.
 If budget exhaustion leaves no qualifying proposal, an HTML error explains the remedy:
 "draw an exclusion by hand". IoU comparisons are therefore bounded per text, and a colliding
 text cannot suppress another text's valid footer proposal (SRC-REPEAT-COST).
