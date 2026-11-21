@@ -109,7 +109,7 @@ valid.
    bounded, validated results; the server never parses the uploaded PDF. Renderer: MuPDF through
    a maintained crate, built from source (selection, CI build cost and REL-2 recorded as a DEP
    decision). The watermark proposal (repeated text at the same place) and the exclusion box are
-   part of the upload flow. Upload: its own route with a streaming 128 MiB limit, Owner, CSRF and REL-5 checks,
+   part of the upload flow. Upload: a streaming route bounded by the free-space reservation (SRC-15), Owner, CSRF and REL-5 checks,
    spooled to a private file, a staging table outside 007 with cleanup of abandoned uploads, one
    upload and one job at a time. Jobs: progress, cancel (kills the worker tree), and a clean
    failure across a restart. A hostile-PDF corpus (deep nesting, decompression bomb, xref loop,

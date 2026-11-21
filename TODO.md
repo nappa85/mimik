@@ -101,22 +101,15 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   a release ships: pin it from crates.io, drop `vendor/mupdf`, the `[patch.crates-io]` entry and
   the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
 
-- **Source size limits (SRC-15, owner decisions 2026-11-07):** worker opens the PDF from its file
-  (no in-memory copy; PDF bounded by disk only); remove the per-upload totals (64 pages, 128 MiB
-  PNGs, 512 MiB text, 20,000 units) and the fixed 2 GiB staging total (use free space minus the
-  512 MiB margin); keep per-page/per-request bounds and one upload at a time; CLI import keeps
-  its JSON bounds. Plan reviewed and merged (`docs/source-limits-plan.md`, also several exclusion
-  boxes per page and a content-addressed PDF store). Slices 1 (worker opens by path, 20,000-page
-  frame bound; its four live tests run only in CI) and 2 (migration 036: upload tables recreated
-  for 20,000 pages, box lists) merged 2026-11-20. Slice 3 (job pins, hash outside
-  locks, `document_changed`) merged 2026-11-21. Slice 4 (free-space admission and the upload
-  route) merged 2026-11-21. Slice 5 (totals removed, any page subset with a ranges UI, up to eight
-  boxes per page, several proposals per exclusion, streaming bounded proposals) merged 2026-11-21.
-  Slice 6 (large-input gate): harness built (live large-document tests, 20,000-page fake-worker
-  timings, proposer calibration and a counting pass so ordinary manuals fit); host measurement
-  run pending (command in the plan), then the inspection constants are fixed from it. Slice 7
-  (content-addressed PDF store, migration 037) merged 2026-11-21. Next: slice 8 (docs), before
-  route A's 4c builds on staging.
+- **Source size limits (SRC-15, `docs/decisions.md`):** slices 1-2 merged 2026-11-20 and 3-8
+  2026-11-21 (docs in `sources-and-retrieval.md`; the plan file is deleted). Still to do: run the
+  host large-input gate (weekend or after 18:00, one thread, large directory on the magnetic disk,
+  release test build with the release application as runner) and fix the inspection constants
+  (`INSPECT_WALL_*`, `INSPECT_CPU_*` in `src/sources/worker/launch.rs`) from its report:
+  `MIMIK_LIVE_RUNNER=<built release mimik binary> MIMIK_LIVE_LARGE_DIR=/media/data/mimik/large-gate MIMIK_LIVE_REPORT=/media/data/mimik/large-gate/report.jsonl cargo test --release --locked --lib live_large -- --ignored --nocapture --test-threads=1`.
+  The report's figures (inspect/render at 500, 5,000 and 20,000 pages, with their ratio to each
+  limit; the 500-page manager test; the disk-read time of the two proposer passes) go into
+  `docs/results.md`. Then route A's 4c can build on staging.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions

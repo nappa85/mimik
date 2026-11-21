@@ -307,10 +307,12 @@ Remaining before any route-A measurement:
     exclusion provenance immutable without weakening 007/015/017, except that cleanup may delete
     the rows of a `finalizing` source.
   - 4a/4c measure batch and cleanup durations so other requests are not held.
-  Add permanent exclusion provenance (pages, geometry, rationale, revisions, confirming
-  actor/time and opaque fingerprint), crossing flags and explicit rejection-event links.
-- Apply the confirmed geometry **after** derivation: wholly contained unit rectangles (inclusive
-  edges) receive attributed `rejected` decisions citing the exclusion; positive-area overlap
+  Add permanent exclusion provenance (pages, each page's list of one to eight boxes, rationale,
+  revisions, confirming actor/time and the list of up to eight opaque proposal fingerprints,
+  empty for manual boxes), crossing flags and explicit rejection-event links.
+- Apply the confirmed geometry **after** derivation, with the staged rule `exclusions::masking`
+  over the union of a page's boxes: unit rectangles wholly contained (inclusive edges) in that
+  union (a header drawn as adjacent boxes covers it) receive attributed `rejected` decisions citing the exclusion; positive-area overlap
   without containment stays `unreviewed` and flagged. Mere edge contact is not crossing. Raw
   output stays complete. At creation confirmation the current Owner authorizes these rejections;
   retain the original confirmer separately. Check all expected revision-1 units first, then
@@ -465,8 +467,8 @@ Remaining before any route-A measurement:
 - **Bare Bones reference:** Claude drafts it from the original page images only (never from
   route A text, raw readings or a remote model) in the IT reference's format; the owner checks
   every row and the page list before any scoring. The draft and the reference stay local.
-- **Source limits (2026-11-07, SRC-15):** limits only where technically or security-justified;
-  no whole-source totals in route A, storage and processing per page.
+- **Source limits (SRC-15):** no whole-source totals in route A; storage and processing per page
+  (`docs/decisions.md`).
 - **Probe policy:** `probe-v1` as proposed, advice only with visible reasons and an Owner override.
 - **Bar failure:** step 4 stays blocked; a new versioned derivation is allowed only with a
   rationale, review and fresh measurements of both bars, never by waiving the bar.

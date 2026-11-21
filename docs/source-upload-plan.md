@@ -97,8 +97,6 @@ This is what step 4 reads, without parsing the PDF again:
   - the text-layer statistics;
 - the selected pages, with the upload revision; a page's rendering is current when it is
   still selected and its render settings match, whatever revision it was rendered for;
-- the source limits it was built to: 64 pages, 128 MiB of PNG, 20,000 units (checked again by
-  each route);
 - the system id, edition and language;
 - the current exclusion and its revision, or none.
 
@@ -346,12 +344,12 @@ MuPDF entry points) is a TODO follow-up after 3a, not only a limitation.
 *Before reading the body:*
 - the Owner session;
 - REL-5's Host and Origin check;
-- `Content-Length` at most 128 MiB plus 64 KiB (multipart overhead), when present (413 at once);
-- the staging ledger's reservation for the upload (below);
 - the upload slot (one stream at a time; a second gets 409 "an upload is in progress").
 
-*Body stream:* the body is wrapped in a counting stream that enforces the whole-request limit
-(128 MiB + 64 KiB) whether or not `Content-Length` is sent, and passes at most 4 KiB (multipart
+*Body stream:* the body is wrapped in a counting stream with no limit on file bytes (bounded by
+the disk reservation, taken after CSRF admission and the metadata fields: the declared length
+or 1 MiB, topped up 64 MiB at a time; limits in `docs/sources-and-retrieval.md`, SRC-15), at
+most 512 KiB of non-file bytes after admission (413), and it passes at most 4 KiB (multipart
 headers and the `csrf` field) to the parser before the CSRF admission; HTTP/1 transport
 buffering is bounded as described by SRC-UPLOAD-POLL. Instrumented-body tests: a
 request refused for authentication, Host or Origin polls no byte; a refused CSRF token
@@ -361,20 +359,19 @@ delete the partial file.
 *Fields, in this exact order:*
 1. `csrf`, at most 256 bytes. It goes through `csrf_admission` before the file field is read.
 2. `system`, `edition` and `language`, each capped and validated with the import rules.
-3. `file`, last, at most 128 MiB.
+3. `file`, last.
 
 *Refused:*
 - any other field;
 - a duplicate field;
 - a field out of order;
 - a field after the file;
-- a file over the limit (413).
+- a file for which free space cannot be reserved (507).
 
 In each case the partial file is deleted.
 
 *Deadlines:*
-- 30 s with no bytes;
-- 15 minutes in all.
+- 30 s with no bytes (idle only; no total deadline).
 
 The slot and the partial file are released by a drop guard, so a client that disconnects or a
 cancelled future cleans up too.
@@ -409,24 +406,10 @@ shows the size, the hash prefix and the page count.
   - **`source_upload_pages`:** upload, PDF page, the revision it was rendered for, the PNG's
     hash, pixel size, displayed size, transform, text statistics and the text file's hash.
   - **`source_upload_exclusions`:** 3c.
-- **Selection:** at most 64 pages per upload, the existing per-source limit (`import.rs`
-  limits a run's 20,000 units and 128 MiB of images). A longer book is several uploads, and so
-  several readings of one document.
-- **Budgets:**
-  - per upload: 128 MiB of PDF, 128 MiB of PNG (the per-source image limit, `import.rs`, so a
-    rendered upload can always become a source) and 512 MiB of text; a render past the PNG
-    budget fails as "too large for one source: select fewer pages";
-  - all staging: 2 GiB;
-  - **reservations:** a process-wide staging ledger holds the bytes staging uses (measured
-    from the files at start-up, then kept up to date on every write and delete) and the open
-    reservations. Before each write phase it reserves that phase's worst case (an upload:
-    128 MiB + 64 KiB; a render batch: 8 × 20 MiB, covering retries, whose earlier files are
-    replaced, not added) and releases it after, keeping only what was written. A phase starts
-    only when used plus reserved stays within 2 GiB and free space covers every open
-    reservation plus a 512 MiB margin kept for the database and its WAL (publication writes
-    only rows). Disk-full tests use an injected free-space source and
-    a real `ENOSPC` on a small test filesystem.
-  Over a budget the job fails as "not enough space".
+- **Selection and budgets:** limits are in `docs/sources-and-retrieval.md` (SRC-15): any page subset up
+  to 20,000 pages, no per-upload or staging total, and a process-wide ledger of used bytes and
+  reservations admitted by the filesystem's free space minus a 512 MiB margin. A render batch
+  reserves 8 x 20 MiB. Over capacity the job fails as "not enough space".
 - **Uploads:** one open upload at a time. A PDF whose hash matches a `source_documents` row
   says so ("already document N"); going on gives a new reading of the same document.
 

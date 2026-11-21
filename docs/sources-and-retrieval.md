@@ -33,14 +33,16 @@ zero, nice to 10, and equal soft/hard CPU limits (inspection: 20 seconds plus on
 32 MiB of PDF, at most 200 seconds, because the page count is not yet known; 25 seconds per
 rendered page). The parent enforces 30 seconds for inspection plus 0.1 second for each page
 record received and validated (not for a claimed count), or 30 seconds per render page. The inspection
-constants are provisional pending the large-input measurements (SRC-15). The worker opens the bound `/in/document.pdf` by path with MuPDF's stdio stream, which seeks and reads on
+constants are provisional until the host large-input gate has run (`TODO.md`, SRC-15). The worker opens the bound `/in/document.pdf` by path with MuPDF's stdio stream, which seeks and reads on
 demand: the PDF is never copied into memory, so its size adds no address space and no limit
 of its own (a PDF can be larger than 128 MiB, or have its xref beyond 4 GiB). The pre-open
 check (`%PDF-` in the first 1,024 bytes, `%%EOF` in the last 1,024) reads those two windows
 by seek. A failure to open is `Unreadable`; `TooLarge` is only for allocation and limit errors
 after the open. The worker accepts at most 20,000 pages: the inspection record is one 9 MiB frame
 and a page record is at most about 450 bytes. The upload tables store the same 20,000 pages (a
-longer document fails as `too_many_pages` after inspection).
+longer document fails as `too_many_pages` after inspection). A damaged large file makes MuPDF
+repair it by scanning the whole file; the inspection deadline, which grows per page, bounds that
+scan, and a miss is reported as `took too long`.
 Cancellation/deadlines kill through pinned pidfds, and results wait for tree exit. Stdout
 uses the framed record reader; a separate stderr drain matches at most 64 KiB and discards
 the remainder without logging raw output. The closure executes the explicitly bound loader
@@ -295,7 +297,7 @@ CPU/wall limits (hostile PDFs); 160 MiB per eight-page render reservation (8 x (
 one upload in progress and one retained upload; 20,000 pages (the inspection record is one 9 MiB
 frame); eight boxes a page and eight proposal fingerprints (row size); 50,000 proposal groups,
 a 64 MiB proposal memory budget, 50,000,000 proposal comparisons and a 500,000,000-unit proposal
-work budget (server memory, and the time the gate is held). The CLI import keeps its whole-file bounds (below).
+work budget (server memory, and the time the gate is held); the 30-second idle upload deadline and the 512 KiB of non-file multipart bytes (a stalled client holds the single slot; the parser buffers a part header); the 512 MiB free-space margin (keeps SQLite and its WAL writable) and 64 MiB reservation top-ups (the declared length may be absent or wrong). No limit applies to a whole upload or source: not the PDF size, the number of selected pages, the sum of PNGs or text, or the unit count. The CLI import keeps its whole-file bounds, because it holds each file in memory (see Import).
 
 One dedicated worker thread runs inspection/rendering. The production `Worker` adapter uses
 the confined 3a API; synthetic unit tests inject a fake. Jobs transition queued → running →
@@ -438,7 +440,7 @@ Only the operator imports prepared sources, through the CLI. Browser PDF uploads
 - Units must match exactly the eligible raw leaf nodes: same id, kind, polygon and HTML, with no extras and none missing. Eligible kinds are in `schemas/source-kinds.json` (text, list, heading, table, form, caption, code, footnote, equation and similar). Kinds in `schemas/source-leaf-kinds.json` (`ListGroup`) are units only when they have no children: Marker's OCR gives a whole list as one `ListGroup`, its text-layer path a `ListGroup` of `ListItem` units. A bundle prepared before this rule that left such a group out is refused (SRC-10). An eligible node with children or a `<content-ref` is rejected, so a table or form is one unit and nested groups are never flattened. Other kinds (pictures, page headers) stay only in the raw tree and the page image.
 - Polygons have exactly 4 finite points inside the page. Block ids are at most 512 bytes. The raw tree depth is at most 32, with at most 40,000 nodes per page.
 - PNG: hash matches; no APNG; at most 4,096×8,192 px and 12 Mpx; aspect within 0.01 of the page; full decode within 64 MiB.
-- Size limits: PDF 128 MiB, `source.json` 32 MiB, `bundle.json` 8 MiB, 64 pages, 20,000 units, 64 KiB HTML per unit, 12 MiB per PNG and 128 MiB of PNGs in total. Over-limit input is rejected, never truncated.
+- Size limits, which apply to the CLI import only (it reads each file whole into memory and parses the JSON and the PDF with `lopdf` in one process, so these bound its memory; the browser upload path has none of them): PDF 128 MiB, `source.json` 32 MiB, `bundle.json` 8 MiB, 64 pages, 20,000 units, 64 KiB HTML per unit, 12 MiB per PNG and 128 MiB of PNGs in total. Over-limit input is rejected, never truncated. The PNG, decode and tree bounds above are per page or per object and stay for the same reason as in the upload path.
 - Every unit's HTML must pass the sanitiser and both text projections, or the import fails.
 
 **Word boxes** (migration 029, SRC-20). After `load_import` has the hash-verified PDF, the CLI asks the confined worker for the words of every bundle page that has none: it writes the PDF to a private 0600 file (`O_EXCL|O_NOFOLLOW`) in the data directory's own 0700 `import-spool` folder (never the system temporary directory, and not `staging`, whose upload sweep deletes unknown files; stale `import-*.part` files over an hour old are removed at the start of an import), pins the descriptor (device, inode, size, mtime, ctime), hashes it through the same descriptor and hands the worker that file by path through the pinned launch (it compares the file with the pins before the sandbox starts and after each worker exits; the same residual limits as for staged uploads apply), runs `inspect` (page sizes must be within 2 points of the bundle's, else the page is skipped) and then `Words` in batches of at most eight pages, each with the render deadline (30 s a page) and the same sandbox; a batch that fails is retried page by page so one hostile page costs only itself, a word whose box collapses when narrowed to `f32` is dropped, and the file is removed afterwards. Word text with a control character is refused by the parent and the reader (the worker splits words at control characters like whitespace). Size-mismatched pages are counted apart in the report (running again cannot help), and a worker that goes away after some pages were stored is reported as partial. The worker never runs inside the write transaction: the validated, encoded rows are inserted in it. A `Words` record is a JSON array of `{text, box}` per page in the same corrected page space as `TextLine` (PDF points, y down), at most 20,000 words of 1 to 256 bytes with finite boxes inside the page (a 8 MiB frame, parent-validated). `source_page_words(page_id, words)` is append-only (insert once, update/delete triggers, a one-row-per-page insert trigger because `OR REPLACE` skips delete triggers): byte `1`, then per word four little-endian `f32` (`x0 y0 x1 y1`) and a little-endian `u16` text length with 1 to 256 bytes of UTF-8, at most 5,480,001 bytes; a page with no words is the version byte alone. A stored row is validated again when read (version, lengths, UTF-8, finite boxes, no box past 4,000 points) and an invalid row is treated as absent. The rows are never evidence, never shown as text of their own and not indexed for search. Re-running `import-source` on an existing matching source inserts rows only for its pages that have none and touches no review history. Without a usable worker (no sandbox, a platform without one) the import succeeds without words and prints why; run it again where the worker works. The table form reads the stored row (no worker, cache or busy state on the review screens).
@@ -459,7 +461,7 @@ Only the operator imports prepared sources, through the CLI. Browser PDF uploads
 ## Documents and primary pages
 
 `source_documents` identifies a PDF by its unique hash, with immutable `source_document_members`
-linking each reading to its document. The PDF bytes remain on `sources` in schema 24.
+linking each reading to its document. The PDF itself is in the PDF store, named by `sources.pdf_hash`.
 `source_primary_pages` selects at most one source per document/PDF-page pair. Selection does
 not review units or change their state. Lookup excludes every non-primary reading, even if
 the primary reading is incomplete or outside the requested ruleset/source set.
