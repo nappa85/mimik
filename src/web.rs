@@ -441,7 +441,9 @@ impl AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let message = if self.status() == StatusCode::INTERNAL_SERVER_ERROR {
+        let message = if self.status() == StatusCode::INTERNAL_SERVER_ERROR
+            && !matches!(self, Self::PdfCorrupt)
+        {
             eprintln!("Mimik error: {self}");
             "An internal error occurred. Check the application log.".into()
         } else {

@@ -26,6 +26,7 @@ mod import;
 #[cfg(target_os = "linux")]
 mod import_words;
 pub(crate) mod page_words;
+pub mod pdf_store;
 pub(crate) mod proposals;
 #[cfg(all(test, target_os = "linux"))]
 mod replacement_tests;

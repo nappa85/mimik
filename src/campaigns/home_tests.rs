@@ -133,7 +133,7 @@ async fn seed_source(store: &Store, id: i64, title: &str, complete: &[bool]) {
     let complete = complete.to_vec();
     store
         .run(move |db| {
-            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(?1,?2,?3,?4,'mork-borg','Edition','en',?5,x'',x'',x'',?6)",
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(?1,?2,?3,?4,'mork-borg','Edition','en',?5,x'',x'',?6)",
                 params![id, format!("{id:064}"), format!("source-{id}"), title, "b".repeat(64), complete.len()])?;
             for (index, done) in complete.iter().enumerate() {
                 let page = id * 100 + i64::try_from(index).unwrap();
@@ -401,7 +401,7 @@ async fn owner_home_runs_no_campaign_query_and_a_player_home_no_owner_query() {
 async fn seed_rulesets(store: &Store) {
     store
         .run(|db| {
-            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(900,'native-fixture','fixture','OWNER-ONLY-TITLE','mork-borg','Italian fixture','it','fixture',x'',x'',x'',1)", [])?;
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(900,'native-fixture','fixture','OWNER-ONLY-TITLE','mork-borg','Italian fixture','it','fixture',x'',x'',1)", [])?;
             db.execute("INSERT INTO source_rulesets VALUES(900,'mork-borg','it-2025')", [])?;
             Ok(())
         })

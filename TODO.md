@@ -114,7 +114,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   boxes per page, several proposals per exclusion, streaming bounded proposals) merged 2026-11-21.
   Slice 6 (large-input gate): harness built (live large-document tests, 20,000-page fake-worker
   timings, proposer calibration and a counting pass so ordinary manuals fit); host measurement
-  run pending (command in the plan), then the inspection constants are fixed from it, before
+  run pending (command in the plan), then the inspection constants are fixed from it. Slice 7
+  (content-addressed PDF store, migration 037) merged 2026-11-21. Next: slice 8 (docs), before
   route A's 4c builds on staging.
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`

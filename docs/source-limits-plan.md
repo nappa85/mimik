@@ -31,9 +31,8 @@ nothing re-verifies the file. Pages are published inside the render callback
 
 | Limit | Where |
 | --- | --- |
-| Whole-source PDF BLOB | `003_sources.sql:10` `sources.pdf BLOB NOT NULL`; written only by `import.rs:584`, read only by the `import.rs:375` equality check; no other reader |
 | Tests | `live_tests` 128 MiB cases |
-| Docs | `sources-and-retrieval.md` (worker/RSS sections near `:28-70`, import `:286-287`); `release-scope.md:33` and its backup note (`:119`); `limitations.md` C5, L-SRC-3, L-SRC-8; `source-upload-plan.md` historical totals; `source-route-a-plan.md` ("PDF BLOB once"); the TODO entry |
+| Docs | `sources-and-retrieval.md` (worker/RSS sections near `:28-70`, import `:286-287`); `release-scope.md:33`; `limitations.md` L-SRC-3, L-SRC-8; `source-upload-plan.md` historical totals; `source-route-a-plan.md` ("PDF BLOB once"); the TODO entry |
 
 ## Design decisions
 
@@ -89,42 +88,8 @@ nothing re-verifies the file. Pages are published inside the render callback
 6-8. (Selection and ranges UI, several boxes per page, several proposals per exclusion and the
    streaming, bounded proposer are built; the reference is `sources-and-retrieval.md`. Slice 6
    confirms the proposer's 50,000,000-comparison, 50,000-group and 64 MiB constants.)
-9. **Finished-source PDFs are content-addressed files.** A `sources/` directory beside the
-   database: `<sha256>.pdf`, directory 0700, files 0400, written to a temp name with
-   `O_CREAT|O_EXCL`, fsynced, `renameat`ed, directory fsynced; opened via a dirfd with
-   `O_NOFOLLOW`; the name is the 64-hex `pdf_hash` from the database, never user input.
-   `sources.pdf` is dropped; the row keeps `pdf_hash`; identical PDFs share one file (resolves C5).
-   This removes SQLite's BLOB limit (about 1 GB) and the in-memory copy. Interface for route A /
-   step 4 (replacing "insert the PDF BLOB once"): `put(file, sha256)` (a **verified copy**, never a
-   hard link: a link would make the staged file's link count 2 and a later job would report
-   `document_changed`; idempotent) and `open(hash) -> File`
-   (no-follow, regular, streaming hash check before use; mismatch is a fixed `pdf_corrupt`
-   error). The CLI import (`import.rs:375,584`) stores through the same call after its hash check
-   and compares by hash.
-   - *Migration.* The migration loop (`store.rs:111-117`, one IMMEDIATE transaction) runs a Rust
-     pre-step only when version >= 3 and < 37, just before 037: read blobs one at a time
-     (`sqlite3_blob_open`, streaming), write each to the store, verify SHA-256 equals `pdf_hash`,
-     then SQL drops the column. Idempotent if interrupted (files are complete before the column
-     goes). **Disk (N5):** the pre-step doubles every PDF and `DROP COLUMN` rewrites every
-     `sources` row inside the transaction (journal about the blob total), so before it starts
-     the step checks free space >= 2 x total blob bytes + 512 MiB and refuses with a fixed message
-     naming the needed size. `VACUUM` is not run by migration; the reference doc tells the Owner
-     to run it (or a CLI `compact`) afterwards to reclaim the space.
-   - *Hash failure.* Default: abort with a fixed message naming source ids (no paths). Ways out,
-     documented: restore from backup, or a CLI command that moves the bad blob to
-     `sources/quarantine/`. Before 037 `pdf` is NOT NULL, so the command writes an empty blob
-     plus a quarantine marker for that row; the pre-step treats a marked row as a missing file
-     (`pdf_corrupt` on use) instead of aborting again.
-   - *Backup/restore.* The database file alone no longer holds PDFs: `release-scope.md:119` and
-     the reference doc say the backup is the database file plus `sources/`; a missing file is
-     reported at startup (count only, no paths) and as `pdf_corrupt` on use; existing sheets and
-     evidence do not read the PDF and keep working.
-   - *Orphans and ordering (N4).* `import-source` is another process (`main.rs:460`) and the
-     rundir lock covers only the assistant, so the sweep needs its own protocol: a cross-process
-     `flock` on `sources/`, shared by `put` from before the file is created until the database row
-     commits, exclusive for the sweep, taken non-blocking (the sweep skips that run if busy); additionally the sweep skips files younger than one hour.
-     Ordering: temp write, fsync, rename, directory fsync, then the DB commit. Route A's
-     finalization follows the same rule (put before the finalizing row).
+9. (The content-addressed PDF store is built; the reference is `sources-and-retrieval.md`, "PDF
+   store". Route A's finalization uses its `put`, holding the guard across the finalizing row.)
 10. **Kept limits, each with its reason** (written into `sources-and-retrieval.md`): form field
     sizes and the 4 KiB pre-CSRF read (unauthenticated memory); per-PNG 4,096 x 8,192 px, 12 Mpx,
     12 MiB, 64 MiB decode (decompression bombs); per-page text 8 MiB, depth 32, 40,000 nodes,
@@ -182,19 +147,13 @@ nothing re-verifies the file. Pages are published inside the render callback
    (`sources-and-retrieval.md`; its caps and work budget are calibrated in the container and
    stay). Remaining: run the host gate and fix the inspection constants (`INSPECT_WALL_*`,
    `INSPECT_CPU_*`) from its report.
-7. **Content-addressed PDF store** (decision 9): store, interface, Rust pre-step, migration 037,
-   CLI import through it, sweep with the `flock` and age rule, backup note; test fixtures inserting `pdf` (`documents.rs:509`, `search.rs:455`, `campaigns/tests.rs`) updated. Tests: legacy blobs migrated and verified (hash
-   mismatch aborts untouched), an interrupted migration resumes, two sources with one PDF share a
-   file, a tampered or missing file is `pdf_corrupt`, a symlink in the store directory is refused,
-   orphans are swept, an import (separate process) racing the sweep keeps its file; the hash-mismatch abort and the quarantine command; insufficient free space refuses before the pre-step; the staged file's link count stays 1 after `put`.
-   Question for the coordinator (not changed here): under the 2026-11-11 owner decision (no release, disposable local data) the pre-step that migrates legacy `sources.pdf` blobs, its free-space check, quarantine command and resume logic may be unnecessary; 037 could drop the column and the `sources` rows (or the whole local data set) instead.
 8. **Docs.** Rewrite the reference sections in the table (each kept limit with its reason),
    `release-scope.md`, `limitations.md` (add: damaged-file inspection bound, exclusion history
-   growth, CLI memory bounds; reword C5, L-SRC-3, L-SRC-8 as CLI-only), `decisions.md` DEP-29,
+   growth, CLI memory bounds; reword L-SRC-3, L-SRC-8 as CLI-only), `decisions.md` DEP-29,
    `source-upload-plan.md`, `source-route-a-plan.md` (containment rule over the union of boxes,
    fingerprint list and per-page box lists as provenance), TODO; delete this plan.
-Review: this plan and each slice get a fresh Opus reviewer (AGENTS.md); slices 1, 3, 4 and 7
-(sandbox input, TOCTOU, accounting, store security) need the adversarial pass. Builds and tests
+Review: this plan and each slice get a fresh Opus reviewer (AGENTS.md); slices 1, 3 and 4
+(sandbox input, TOCTOU, accounting) need the adversarial pass. Builds and tests
 of agent work run in containers; weekday builds at 2 cores.
 
 ## Risks
@@ -208,10 +167,10 @@ of agent work run in containers; weekday builds at 2 cores.
   write failure releases slot, spool and reservation.
 - Hashing a multi-GB file once per job is heavy on the magnetic disk; it runs outside locks.
 - Migrations 036/037 touch live tables and the PDF column; both are tested on seeded data and sit
-  under the backup-before-upgrade guidance (the backup now includes `sources/`).
+  under the backup-before-upgrade guidance (the backup now includes `sources/`). 037 drops the
+  column without copying legacy blobs (owner decision 2026-11-11).
 - Unlimited selection moves failures to render time; step 4 must create the source page by page.
 
 ## Open questions for the owner
 
-None open. Decided: pages cap by frame, several boxes per page, hash-failure default (abort, with
-restore or quarantine command), idle-only deadline.
+None open. Decided: pages cap by frame, several boxes per page, idle-only deadline.

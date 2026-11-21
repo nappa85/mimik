@@ -770,7 +770,7 @@ async fn unit_rows_must_match_their_page_finalized_source_and_pair() {
     );
     // An unfinalized source of the right pair.
     db.execute(
-        "INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(50,?1,'unfinalized','Unfinalized','synthetic-game','First','en',?2,x'',x'',?3,1)",
+        "INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(50,?1,'unfinalized','Unfinalized','synthetic-game','First','en',?2,x'',?3,1)",
         params!["b".repeat(64), "a".repeat(64), json!({"contract_version": 1, "extraction_sha256": "0".repeat(64)}).to_string().as_bytes()],
     )
     .unwrap();

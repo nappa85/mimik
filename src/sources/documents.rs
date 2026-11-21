@@ -1168,7 +1168,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = Store::open(&dir.path().join("dims.sqlite3")).unwrap();
             let outcome = rt.block_on(store.run(move |db| {
-                db.execute_batch(&format!("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','aa',x'00','{{}}','{{\"pages\":[{{\"pdf_page\":1,\"width_points\":{dims},\"height_points\":300}}]}}',1); INSERT INTO source_pages (id,source_id,pdf_page,png) VALUES (1,1,1,x'00');"))?;
+                db.execute_batch(&format!("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','aa','{{}}','{{\"pages\":[{{\"pdf_page\":1,\"width_points\":{dims},\"height_points\":300}}]}}',1); INSERT INTO source_pages (id,source_id,pdf_page,png) VALUES (1,1,1,x'00');"))?;
                 Ok(validate_polygon(db, 1, &polygon))
             }));
             assert!(

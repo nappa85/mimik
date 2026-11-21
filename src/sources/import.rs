@@ -334,6 +334,8 @@ struct Import {
     bundle: Bundle,
     prepared: Vec<u8>,
     pdf: Vec<u8>,
+    /// The PDF's store file, held (shared lock) until the row naming it has committed.
+    pending: Option<super::pdf_store::Pending>,
     raw: Vec<u8>,
     images: Vec<Vec<u8>>,
     total_pages: i64,
@@ -372,7 +374,7 @@ fn normalized(page: &PreparedPage) -> Result<Vec<StoredUnit>, AppError> {
 
 fn verify_existing(db: &rusqlite::Connection, id: i64, data: &Import) -> Result<(), AppError> {
     let source = &data.bundle;
-    let matches: bool = db.query_row("SELECT source_id=?2 AND title=?3 AND system_id=?4 AND edition=?5 AND language=?6 AND pdf_hash=?7 AND pdf=?8 AND raw_json=?9 AND prepared_json=?10 AND bundle_hash=?11 FROM sources WHERE id=?1", params![id,source.source_id,source.title,source.system_id,source.edition,source.language,source.source_sha256,data.pdf,data.raw,data.prepared,hash(&data.prepared)], |row| row.get(0))?;
+    let matches: bool = db.query_row("SELECT source_id=?2 AND title=?3 AND system_id=?4 AND edition=?5 AND language=?6 AND pdf_hash=?7 AND raw_json=?8 AND prepared_json=?9 AND bundle_hash=?10 FROM sources WHERE id=?1", params![id,source.source_id,source.title,source.system_id,source.edition,source.language,source.source_sha256,data.raw,data.prepared,hash(&data.prepared)], |row| row.get(0))?;
     if !matches {
         return Err(invalid());
     }
@@ -547,6 +549,7 @@ fn load_import(directory: &Path, pdf_path: &Path) -> Result<Import, AppError> {
         bundle,
         prepared,
         pdf,
+        pending: None,
         raw,
         images,
         total_pages,
@@ -694,9 +697,16 @@ impl Store {
     ) -> Result<(i64, WordsReport), AppError> {
         let directory = directory.to_owned();
         let pdf = pdf.to_owned();
-        let data = tokio::task::spawn_blocking(move || load_import(&directory, &pdf))
-            .await
-            .map_err(|_| AppError::Worker)??;
+        let files = self.pdf_store().clone();
+        let data = tokio::task::spawn_blocking(move || {
+            let mut data = load_import(&directory, &pdf)?;
+            // Stored (verified copy) before the row commits; the shared lock is held in
+            // `pending` until `commit_import` is done, so the orphan sweep cannot take the file.
+            data.pending = Some(files.put(Cursor::new(&data.pdf), &data.bundle.source_sha256)?);
+            Ok::<_, AppError>(data)
+        })
+        .await
+        .map_err(|_| AppError::Worker)??;
         let Some(source) = words else {
             return self
                 .commit_import(data, Vec::new(), Fetched::default())
@@ -764,7 +774,7 @@ impl Store {
                 return Ok((id, report(stored, &wanted, &rows, &size_mismatch, unavailable)));
             }
             let source = &data.bundle;
-            tx.execute("INSERT INTO sources (bundle_hash, source_id, title, system_id, edition, language, pdf_hash, pdf, raw_json, prepared_json,total_pages) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)", params![bundle_hash, source.source_id, source.title, source.system_id, source.edition, source.language, source.source_sha256, data.pdf, data.raw, data.prepared,data.total_pages])?;
+            tx.execute("INSERT INTO sources (bundle_hash, source_id, title, system_id, edition, language, pdf_hash, raw_json, prepared_json,total_pages) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![bundle_hash, source.source_id, source.title, source.system_id, source.edition, source.language, source.source_sha256, data.raw, data.prepared,data.total_pages])?;
             let id = tx.last_insert_rowid();
             if let Some(key) = resolved {
                 tx.execute("INSERT INTO source_rulesets VALUES (?1,?2,?3)", params![id,key.game_id,key.edition_id])?;

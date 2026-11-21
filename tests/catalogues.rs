@@ -285,7 +285,7 @@ async fn sources_must_be_finalized() {
     let pdf_hash = "a".repeat(64);
     let prepared = json!({"contract_version": 1, "extraction_sha256": "0".repeat(64)}).to_string();
     db.execute(
-        "INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES(50,?1,'unfinalized','Unfinalized','synthetic-game','First','en',?2,x'',x'',?3,1)",
+        "INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(50,?1,'unfinalized','Unfinalized','synthetic-game','First','en',?2,x'',?3,1)",
         rusqlite::params!["b".repeat(64), pdf_hash, prepared.as_bytes()],
     )
     .unwrap();
@@ -509,7 +509,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     );
     // Schema 19 added the catalogues; schemas 20 (change notes), 21 (row notes), 22 (the
     // assistant's model setting) and 23 (the downloads) apply on the same upgrade.
-    assert_eq!(mimik::SCHEMA_VERSION, 36);
+    assert_eq!(mimik::SCHEMA_VERSION, 37);
     assert_eq!(counts(&db), before);
     let saved = reopened
         .save_catalogue_draft(serde_json::to_vec(&fixture.catalogue()).unwrap(), 0)

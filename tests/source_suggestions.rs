@@ -670,7 +670,7 @@ async fn migration_24_keeps_ids_dismissals_and_rewind_restores_original_guards()
 }
 
 fn insert_unfinalized_source(db: &Connection, id: i64, prepared: &Value) {
-    db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES(?1,?2,'synthetic','Synthetic','mork-borg','fixture','en',?3,x'00',x'7b7d',?4)",params![id, "b".repeat(64), "a".repeat(64), serde_json::to_vec(prepared).unwrap()]).unwrap();
+    db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json) VALUES(?1,?2,'synthetic','Synthetic','mork-borg','fixture','en',?3,x'7b7d',?4)",params![id, "b".repeat(64), "a".repeat(64), serde_json::to_vec(prepared).unwrap()]).unwrap();
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM source_finalizations WHERE source_id=?1",
@@ -754,11 +754,11 @@ fn unfinalized_bounds_survive_source_replacement() {
         (1, "c".repeat(64)),
     ] {
         assert!(
-            db.execute("INSERT OR REPLACE INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES(?1,?2,'synthetic','Synthetic','mork-borg','fixture','en',?3,x'00',x'7b7d',x'7b7d')", params![id, bundle, "a".repeat(64)]).is_err(),
+            db.execute("INSERT OR REPLACE INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json) VALUES(?1,?2,'synthetic','Synthetic','mork-borg','fixture','en',?3,x'7b7d',x'7b7d')", params![id, bundle, "a".repeat(64)]).is_err(),
             "replacement {id} {bundle}"
         );
     }
-    db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES(3,?1,'synthetic','Synthetic','mork-borg','fixture','en',?2,x'00',x'7b7d',x'7b7d')", params!["d".repeat(64), "a".repeat(64)]).unwrap();
+    db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json) VALUES(3,?1,'synthetic','Synthetic','mork-borg','fixture','en',?2,x'7b7d',x'7b7d')", params!["d".repeat(64), "a".repeat(64)]).unwrap();
     assert!(
         db.execute("UPDATE OR REPLACE sources SET id=1 WHERE id=3", [])
             .is_err()
@@ -819,7 +819,7 @@ async fn sql_notes_reports_and_null_envelopes() {
     assert!(c.db.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,rationale,report_id) SELECT 1,bundle_hash,'tool','note','{\"type\":\"page\",\"page\":1}','why',999 FROM sources WHERE id=1",[]).is_err());
     // Report id from a distinct source, with foreign keys off too.
     c.db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
-    c.db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json) VALUES('second','s','t','mork-borg','e','en','other',x'00',x'7b7d',x'7b7d')",[]).unwrap();
+    c.db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json) VALUES('second','s','t','mork-borg','e','en','other',x'7b7d',x'7b7d')",[]).unwrap();
     c.db.execute("INSERT INTO source_suggestion_reports(source_id,report_sha256,origin,schema_version,binding,created_at,correction,reject,merge,missing_text,note,failed_pages) VALUES(2,?1,'tool',1,'bundle','now',0,0,0,0,0,0)",["a".repeat(64)]).unwrap();
     assert!(c.db.execute("INSERT INTO source_suggestions(source_id,bundle_hash,origin,kind,targets,rationale,report_id) SELECT 1,bundle_hash,'tool','note','{\"type\":\"page\",\"page\":1}','why',2 FROM sources WHERE id=1",[]).is_err());
 }

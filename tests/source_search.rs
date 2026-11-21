@@ -34,7 +34,7 @@ fn seed(
     pages: &[(i64, bool)],
     units: &[Unit],
 ) {
-    db.execute("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,pdf,raw_json,prepared_json,total_pages) VALUES (?1,?2,'synthetic',?3,'mork-borg',?4,'it',printf('synthetic-pdf-%d',?1),x'00','{}','{}',?5)", params![source, format!("bundle-{source}"), format!("Synthetic {source}"), edition, i64::try_from(pages.len()).unwrap()]).unwrap();
+    db.execute("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES (?1,?2,'synthetic',?3,'mork-borg',?4,'it',printf('synthetic-pdf-%d',?1),'{}','{}',?5)", params![source, format!("bundle-{source}"), format!("Synthetic {source}"), edition, i64::try_from(pages.len()).unwrap()]).unwrap();
     if let Some(edition_id) = ruleset {
         db.execute(
             "INSERT INTO source_rulesets VALUES (?1,'mork-borg',?2)",

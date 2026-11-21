@@ -114,7 +114,7 @@ async fn finalized_import_rejects_artifact_mutation_and_replacement() {
         .unwrap();
     let db = rusqlite::Connection::open(&path).unwrap();
     assert!(
-        db.execute("UPDATE sources SET pdf=X'00' WHERE id=?1", [id])
+        db.execute("UPDATE sources SET pdf_hash='wrong' WHERE id=?1", [id])
             .is_err()
     );
     assert!(
@@ -161,7 +161,7 @@ async fn old_sources_are_unverified_until_exact_reimport_and_corruption_never_ge
         "UPDATE sources SET language='wrong'",
         "UPDATE sources SET edition='wrong'",
         "UPDATE sources SET system_id='dnd'",
-        "UPDATE sources SET pdf=X'00'",
+        "UPDATE sources SET pdf_hash='0000000000000000000000000000000000000000000000000000000000000000'",
         "UPDATE sources SET raw_json=X'00'",
         "UPDATE source_pages SET png=X'00'",
         "UPDATE source_units SET raw_text='Wrong'",
@@ -175,6 +175,11 @@ async fn old_sources_are_unverified_until_exact_reimport_and_corruption_never_ge
         let db = rusqlite::Connection::open(&path).unwrap();
         schema_fixture::pre_finalization(&db, true);
         db.execute("UPDATE sources SET total_pages=0", []).unwrap();
+        if sql.contains("pdf_hash") {
+            // The rewind keeps the document-registration guard, which refuses a hash change.
+            db.execute_batch("DROP TRIGGER sources_registered_update")
+                .unwrap();
+        }
         db.execute(sql, []).unwrap();
         assert!(!store.sources().await.unwrap()[0].finalized);
         assert!(
