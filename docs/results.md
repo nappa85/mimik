@@ -33,15 +33,14 @@ interrupted, kept no pages and a retry rendered all 500 in 91 s. The manager's r
 2.5 times the direct one (0.19 s a page, about an hour for 20,000 pages); the cause (writing,
 syncing and publishing each page) is not investigated.
 
-Conclusion: the inspection and render limits (inspection 30 s plus 0.1 s a page record, 20 s
+Conclusion: the inspection and render limits (inspection 30 s plus 1 s per 8 MiB up to 600 s, plus 0.1 s a page record; 20 s
 CPU plus 1 s per 32 MiB up to 200 s; render 30 s and 25 s CPU a page) are far above ordinary
 well-formed work (about 1000 times the measured cost a page) and stay as ceilings. The cost is
 occupancy: a hostile file can hold the single worker up to about 34 minutes in inspection
-(20,000 cheap page records) and far longer in rendering; the Owner's cancel (13 ms here) is the
+(20,000 cheap page records), plus up to 10 minutes more for a multi-GB file and far longer in rendering; the Owner's cancel (13 ms here) is the
 remedy, and the 0.1 s a page should be tightened only after a real large manual is measured.
-Before the first page record the inspection wall is a fixed 30 s whatever the file size, so a
-damaged file of several hundred MB whose repair scan (cold, on a magnetic disk) takes longer is
-refused as too slow (`L-SRC-INSPECT-DAMAGED`). Limits: synthetic, well-formed inputs only;
+The base wall before the first page record scales with the file size so a damaged file's repair
+scan can run; no real damaged file has been timed (`L-SRC-INSPECT-DAMAGED`). Limits: synthetic, well-formed inputs only;
 a real image-heavy manual of several hundred MB, a damaged file (MuPDF repair) and the proposer's
 disk reads at 20,000 pages are unmeasured.
 
