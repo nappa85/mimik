@@ -369,6 +369,7 @@ async fn assert_upload_action_admission(app: &Router, path: &str, id: Id, player
         "discard",
         "propose",
         "exclude",
+        "exclude-range",
         "remove-exclusion",
     ] {
         for case in ["csrf", "missing-csrf", "host", "origin", "non-owner"] {
@@ -1440,4 +1441,210 @@ async fn install_stored_page(store: &Store, id: String) {
         })
         .await
         .unwrap();
+}
+
+#[cfg(feature = "dev-endpoint")]
+async fn upload_screen(app: &Router, session: Id, location: &str) -> String {
+    let get = Request::builder()
+        .uri(location)
+        .header("host", "127.0.0.1:3000")
+        .header("cookie", format!("mimik_session={session}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(get).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    body_text(response).await
+}
+
+#[cfg(feature = "dev-endpoint")]
+#[tokio::test]
+async fn upload_route_range_boxes_redirect_with_counts_and_refusals_render_the_screen_again() {
+    let (dir, app, session, m, path, id) = setup_rendered_upload_route().await;
+    let post = |fields: &str| upload_action(session, &path, "exclude-range", fields);
+    let status = |app: &Router, fields: String| {
+        let request = post(&fields);
+        let app = app.clone();
+        async move { app.oneshot(request).await.unwrap() }
+    };
+    let base = "revision=2&p=1&source_page=1&boxes=3+3+97+17%0A5+5+10+10&rationale=range-marker";
+    // Add on every selected page: the redirect carries the counts, the screen words them.
+    let response = status(&app, format!("{base}&exclusion_revision=0&mode=add&all=1")).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        location,
+        format!("{path}?p=1&range_changed=3&range_sizes=1")
+    );
+    assert_eq!(m.read(&id).unwrap().exclusion.unwrap().boxes.len(), 3);
+    let text = upload_screen(&app, session, &location).await;
+    assert!(text.contains("3 pages changed, 1 page size"), "{text}");
+    assert!(text.contains("data-form=\"exclude-range\""));
+    assert!(
+        !text.contains("range-marker"),
+        "a saved rationale is never rendered"
+    );
+    // A stale exclusion revision is a conflict.
+    let stale = status(&app, format!("{base}&exclusion_revision=0&mode=add&all=1")).await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    // A page that is not rendered: 422, the screen again with the posted values and the page.
+    let refused = status(
+        &app,
+        format!("{base}&exclusion_revision=1&mode=add&pages=2-3,7"),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let text = body_text(refused).await;
+    assert!(
+        text.contains("Page 7 is not a selected rendered page"),
+        "{text}"
+    );
+    assert!(
+        text.contains("2-3,7")
+            && text.contains("3 3 97 17")
+            && text.contains(">range-marker</textarea>")
+    );
+    assert!(text.contains("data-form=\"exclude-range\""));
+    // Nothing to change, an unknown mode, a missing acknowledgement and a repeated field.
+    let same = status(&app, format!("{base}&exclusion_revision=1&mode=add&all=1")).await;
+    assert_eq!(same.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body_text(same).await.contains("Nothing to change"));
+    assert_range_form_refusals(&app, session, &path, base).await;
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+    // Remove states the pages without a match; clear with its acknowledgement empties it.
+    let response = status(
+        &app,
+        "revision=2&p=1&exclusion_revision=1&mode=remove&pages=1-3&source_page=1&boxes=5+5+10+10&rationale=r2"
+            .into(),
+    )
+    .await;
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        format!("{path}?p=1&range_changed=3&range_sizes=1&range_unmatched=0")
+    );
+    let response = status(
+        &app,
+        "revision=2&p=1&exclusion_revision=2&mode=clear&clear_ack=1&all=1&rationale=r3".into(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(m.read(&id).unwrap().exclusion.is_none());
+    assert_eq!(
+        app.oneshot(upload_action(session, &path, "discard", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    clean(&m, &dir).await;
+}
+
+#[cfg(feature = "dev-endpoint")]
+#[tokio::test]
+async fn upload_route_range_refusal_shows_without_rendered_pages_and_a_bad_address_is_ignored() {
+    let (dir, app, session, m, path, id) = setup_rendered_upload_route().await;
+    // A malformed count in the address never fails the screen and shows no notice.
+    let text = upload_screen(
+        &app,
+        session,
+        &format!("{path}?range_changed=abc&range_sizes=-1"),
+    )
+    .await;
+    assert!(!text.contains("changed,") && text.contains("data-form=\"exclude-range\""));
+    let text = upload_screen(
+        &app,
+        session,
+        &format!("{path}?range_changed=2&range_sizes=1&range_unmatched=x"),
+    )
+    .await;
+    assert!(text.contains("2 pages changed, 1 page size."), "{text}");
+    assert!(!text.contains("had no matching box"));
+    // With no page selected the screen has no manual editors, yet a refused range post still
+    // shows its message and the form.
+    let revision = m.read(&id).unwrap().revision;
+    let response = app
+        .clone()
+        .oneshot(upload_action(
+            session,
+            &path,
+            "set",
+            &format!("revision={revision}&system=mork-borg&edition=Synthetic&language=en&pages="),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let u = m.read(&id).unwrap();
+    assert!(u.selected_pages.is_empty(), "no page is selected");
+    assert!(
+        !upload_screen(&app, session, &path)
+            .await
+            .contains("data-region-editor")
+    );
+    let fields = format!(
+        "revision={}&exclusion_revision=0&p=1&mode=add&all=1&source_page=1&boxes=3+3+97+17&rationale=why",
+        u.revision
+    );
+    let response = app
+        .clone()
+        .oneshot(upload_action(session, &path, "exclude-range", &fields))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let text = body_text(response).await;
+    assert!(text.contains("data-form=\"exclude-range\""));
+    assert!(
+        text.contains("Page 1, where the boxes were drawn, is not a selected rendered page."),
+        "{text}"
+    );
+    assert_eq!(
+        app.oneshot(upload_action(session, &path, "discard", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    clean(&m, &dir).await;
+}
+
+/// The range form's refusals: each renders the screen again at 422 with its message, and a
+/// repeated field is refused whole.
+#[cfg(feature = "dev-endpoint")]
+async fn assert_range_form_refusals(app: &Router, session: Id, path: &str, base: &str) {
+    let post = |fields: String| {
+        let request = upload_action(session, path, "exclude-range", &fields);
+        let app = app.clone();
+        async move { app.oneshot(request).await.unwrap() }
+    };
+    let head = "revision=2&p=1&exclusion_revision=1&rationale=range-marker";
+    let drawn = "source_page=1&boxes=3+3+97+17";
+    for (fields, message) in [
+        (
+            format!("{head}&mode=replace&all=1&{drawn}"),
+            "Choose add, remove or clear.",
+        ),
+        (
+            format!("{head}&mode=clear&all=1"),
+            "Tick the acknowledgement",
+        ),
+        (format!("{head}&mode=add&{drawn}"), "Give the pages"),
+        (
+            format!("{head}&mode=add&all=1&source_page=1&boxes=1+2+3"),
+            "Invalid displayed exclusion box.",
+        ),
+    ] {
+        let response = post(fields).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{message}"
+        );
+        assert!(body_text(response).await.contains(message), "{message}");
+    }
+    let twice = post(format!(
+        "{base}&exclusion_revision=1&mode=add&all=1&mode=add"
+    ))
+    .await;
+    assert_eq!(twice.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }

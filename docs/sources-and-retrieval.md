@@ -139,7 +139,7 @@ and overlapping ranges are merged) or ticks "select all"; the list is prefilled 
 form `1-500,520`. The longest list, alternate pages of a 20,000-page document, is about 75 KB
 form-encoded, inside the 131,072-byte action body limit.
 POST actions at `/{id}/set`, `/inspect`, `/render`, `/cancel`, `/discard`, `/propose`,
-`/exclude` and `/remove-exclusion` require Owner,
+`/exclude`, `/exclude-range` and `/remove-exclusion` require Owner,
 Host/Origin and session-bound CSRF; manager calls run on blocking threads. Render retries
 keep current pages and render the remainder. Failed/restarted uploads offer inspection
 again and rendering the remaining pages. Progress at `/{id}/progress` is an HTML fragment.
@@ -176,6 +176,26 @@ Every write requires a rationale.
 Absent pages' median boxes require explicit extension after the missing-text warning. Removal
 requires a fresh rationale. Confirmed regions have opaque black SVG masks on staged renders;
 the stored PNG and the original-image endpoint remain unchanged (SRC-13).
+
+Boxes on a page range: a separate form on the exclusion screen (never nested in the `exclude`
+form), posted to `/{id}/exclude-range`, edits the saved exclusion only (unsaved edits of the
+screen form are discarded). It takes a page range (`parse_page_ranges`) or all selected pages, a
+mode (`add`, `remove` or `clear`, a strict enum; `clear` needs an acknowledgement that proposal
+boxes go too), one to eight boxes (*left top right bottom*, displayed points, origin top-left)
+with the page they were drawn on, and a rationale (an exclusion has one; a range edit replaces
+it; it is never prefilled, like every saved rationale). The boxes are checked on the source page
+(`check_box`), divided by its displayed size, multiplied by each target page's, clamped to the
+target's extent and rounded outward like every stored box; equal sizes keep their points exactly.
+`add` merges exactly equal boxes; `remove` deletes exactly matching boxes and counts the pages
+without a match; `clear` empties the pages. Proposal fingerprints are kept in every mode. A
+result with no box left appends a removal event; an empty set is never stored. The whole request
+is refused, naming the first page (422, the screen rendered again with the posted values), when a
+listed page is not a selected rendered page, a page would exceed eight boxes, or a box collapses
+on a page; a result equal to the saved exclusion and `clear` or `remove` without an exclusion are
+refused too. Stale upload or exclusion revisions are a conflict. Success redirects to the screen
+with the number of pages changed and of distinct page sizes among them (and, for `remove`, the
+pages without a match). With JavaScript each page editor has a button that copies its current
+boxes to the range form; each editor's legend shows the page size.
 
 Stored boxes are rounded outward to 0.01 pt (minimum floored, maximum ceiled, so coverage is
 never lost) and made bit-identical when numerically equal, because the migration compares boxes
