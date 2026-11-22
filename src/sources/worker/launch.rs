@@ -117,14 +117,21 @@ pub(super) fn inspect_run(
 // The inspection budget scales with the input (SRC-15). The host large-input gate (small
 // synthetic files, `docs/results.md`) used at most 1.6% of the CPU limit and 0.1% of the wall
 // deadline for 500, 5,000 and 20,000 pages, so the constants stay as ceilings for hostile
-// input. Before the first page record the wall is a fixed `INSPECT_WALL_BASE` whatever the
-// file size (a long repair scan of a large damaged file can miss it). The CPU limit must be set before the page count is
-// known (the first frame carries it) and `runner::worker_limits` refuses more than 200 s, so
-// it is sized from the file size up to that ceiling. The wall deadline grows with progress:
+// input. Before the first page record MuPDF may read the whole file (a damaged file's repair
+// scan, or a cold read from a magnetic disk), so the base wall grows by 1 s per 8 MiB (the CPU
+// limit's rate times four, for I/O wait) up to `INSPECT_WALL_CEILING`.
+// The CPU limit must be set before the page count is known (the first frame carries it) and
+// `runner::worker_limits` refuses more than 200 s, so it is sized from the file size up to
+// that ceiling. The wall deadline grows with progress:
 // each page frame the parent has received and validated adds `INSPECT_WALL_PER_PAGE_MS`
 // (never a lump sum on the claimed count, which a compromised worker could inflate), and the
 // deadline remains the enforcing bound.
-const INSPECT_WALL_BASE: Duration = Duration::from_secs(30);
+const INSPECT_WALL_BASE: u64 = 30;
+/// One more wall second before the first page record per this many bytes of PDF.
+const INSPECT_WALL_BYTES: u64 = 8 << 20;
+/// The base wall never exceeds this, whatever the file size (it bounds how long one upload
+/// holds the inspection slot before showing progress).
+const INSPECT_WALL_CEILING: u64 = 600;
 const INSPECT_WALL_PER_PAGE_MS: u64 = 100;
 const INSPECT_CPU_BASE: u64 = 20;
 const INSPECT_CPU_CEILING: u64 = 200;
@@ -135,11 +142,17 @@ pub(super) fn inspect_cpu_seconds(size: u64) -> u64 {
     (INSPECT_CPU_BASE + size / INSPECT_CPU_BYTES).min(INSPECT_CPU_CEILING)
 }
 
-/// The wall budget an inspection of `pages` pages has earned by the time its last page arrives.
+/// The wall deadline of an inspection of a `size`-byte PDF before its first page record.
+fn inspect_wall_base(size: u64) -> Duration {
+    Duration::from_secs((INSPECT_WALL_BASE + size / INSPECT_WALL_BYTES).min(INSPECT_WALL_CEILING))
+}
+
+/// The wall budget an inspection of a `size`-byte PDF of `pages` pages has earned by the time
+/// its last page arrives.
 #[cfg(test)]
-pub(super) fn inspect_wall_seconds(pages: u64) -> f64 {
+pub(super) fn inspect_wall_seconds(size: u64, pages: u64) -> f64 {
     let millis = u32::try_from(pages * INSPECT_WALL_PER_PAGE_MS).unwrap_or(u32::MAX);
-    INSPECT_WALL_BASE.as_secs_f64() + f64::from(millis) / 1000.
+    inspect_wall_base(size).as_secs_f64() + f64::from(millis) / 1000.
 }
 
 /// Yield individually validated pages with bounded memory on a dedicated reader thread.
@@ -782,22 +795,24 @@ fn read_output<T>(
     (result, terminal, empty)
 }
 
-/// Wall deadline and CPU seconds of one run: an explicit option wins, otherwise inspection
-/// uses its base wall and a file-size CPU budget, and other operations 30 s and 25 s a page.
+/// Wall deadline and CPU seconds of one run: an explicit option wins, otherwise
+/// [`default_budgets`].
 fn budgets(spec: &Spec, options: &Options, size: u64) -> Result<(Duration, u64), Reason> {
+    let (wall, cpu_seconds) = default_budgets(spec, size)?;
+    Ok((
+        options.wall.unwrap_or(wall),
+        options.cpu.unwrap_or(cpu_seconds),
+    ))
+}
+
+/// Inspection gets a file-size base wall and CPU budget; other operations 30 s and 25 s a page.
+fn default_budgets(spec: &Spec, size: u64) -> Result<(Duration, u64), Reason> {
     let pages = u64::try_from(spec.pages.len()).map_err(|_| Error::Unsupported)?;
-    let inspecting = spec.operation == records::Operation::Inspect;
-    let wall = options.wall.unwrap_or(if inspecting {
-        INSPECT_WALL_BASE
+    Ok(if spec.operation == records::Operation::Inspect {
+        (inspect_wall_base(size), inspect_cpu_seconds(size))
     } else {
-        Duration::from_secs(30 * pages)
-    });
-    let cpu_seconds = options.cpu.unwrap_or(if inspecting {
-        inspect_cpu_seconds(size)
-    } else {
-        25 * pages
-    });
-    Ok((wall, cpu_seconds))
+        (Duration::from_secs(30 * pages), 25 * pages)
+    })
 }
 
 /// The runner's request for one worker: descriptors 4, 12 and 13 carry the status, marker and
@@ -1238,6 +1253,21 @@ mod tests {
         assert_eq!(inspect_cpu_seconds(0), 20);
         assert_eq!(inspect_cpu_seconds(64 << 20), 22);
         assert_eq!(inspect_cpu_seconds(u64::MAX), 200);
+        assert_eq!(inspect_wall_base(0), Duration::from_secs(30));
+        assert_eq!(inspect_wall_base(64 << 20), Duration::from_secs(38));
+        assert_eq!(inspect_wall_base(u64::MAX), Duration::from_secs(600));
+    }
+    #[test]
+    fn a_large_inspection_gets_a_base_wall_that_covers_reading_the_file() {
+        // L-SRC-INSPECT-DAMAGED: a damaged 1 GiB file's repair scan runs before the first page
+        // record, so a fixed 30 s refused it whatever its size.
+        let (wall, cpu) =
+            default_budgets(&spec(records::Operation::Inspect, vec![]), 1 << 30).unwrap();
+        assert_eq!((wall, cpu), (Duration::from_secs(158), 52));
+        assert!(wall.as_secs() >= cpu);
+        let (wall, cpu) =
+            default_budgets(&spec(records::Operation::Render, vec![1, 2]), 1 << 30).unwrap();
+        assert_eq!((wall, cpu), (Duration::from_secs(60), 50));
     }
     #[test]
     fn validated_pages_extend_the_wall_deadline_and_nothing_else_does() {

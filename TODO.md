@@ -102,9 +102,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
 
 - **SRC-15 follow-ups:** done 2026-11-21, so route A's 4c can build on the new staging.
-  Open: scale the inspection base wall (fixed 30 s before the first page record) with the file
-  size, so a large damaged PDF's repair scan is not refused (L-SRC-INSPECT-DAMAGED); measure a
-  real image-heavy manual of several hundred MB; the manager's render costs 2.5 times the direct
+  Open: measure a real image-heavy manual of several hundred MB; the manager's render costs 2.5 times the direct
   one (`docs/results.md`); a manual box applied to a page range (L-SRC-PROPOSAL-BUDGET).
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`

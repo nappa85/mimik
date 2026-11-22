@@ -373,7 +373,7 @@ fn inspect_cold(name: &str, path: &Path, sha256: &str) -> Inspection {
     let cpu = cpu_of(&opts);
     check_rss(name, "inspect", &opts);
     let pages = inspected.document.pages;
-    let wall_limit = super::launch::inspect_wall_seconds(u64::from(pages));
+    let wall_limit = super::launch::inspect_wall_seconds(size, u64::from(pages));
     #[allow(clippy::cast_precision_loss)]
     let cpu_limit = super::launch::inspect_cpu_seconds(size) as f64;
     report(&serde_json::json!({
