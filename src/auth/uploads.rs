@@ -6,7 +6,8 @@ use crate::{
         uploads::{
             Metadata, OwnerWrite, PageModel, Upload, UploadPhase, UploadProgress, Uploads,
             exclusions::{
-                BoxPoints, COMPARISON_LIMIT, Confirmation, ExclusionRequest, Proposal, box_extent,
+                BoxPoints, COMPARISON_LIMIT, Confirmation, ExclusionRequest, Proposal, RangeMode,
+                RangeRefusal, RangeRequest, box_extent,
             },
             format_page_ranges, parse_page_ranges,
         },
@@ -492,6 +493,64 @@ struct Screen {
     proposals: Vec<ProposalView>,
     /// The selected rendered pages of the window, for manual boxes.
     manual: Vec<EditorPage>,
+    /// The "Boxes on a page range" form: prefilled, or the refused post with its message.
+    range: RangeView,
+}
+/// The values of the range form and the words above it.
+#[derive(Default)]
+struct RangeView {
+    pages: String,
+    all: bool,
+    /// `add`, `remove` or `clear`.
+    mode: String,
+    source_page: String,
+    boxes: String,
+    clear_ack: bool,
+    rationale: String,
+    /// Why the last post changed nothing.
+    refusal: Option<String>,
+    /// What the last post changed (from the redirect's counts).
+    notice: Option<String>,
+}
+impl RangeView {
+    fn posted(form: &BTreeMap<String, String>) -> Self {
+        let get = |key: &str| form.get(key).cloned().unwrap_or_default();
+        Self {
+            pages: get("pages"),
+            all: form.get("all").is_some_and(|v| v == "1"),
+            mode: get("mode"),
+            source_page: get("source_page"),
+            boxes: get("boxes"),
+            clear_ack: form.get("clear_ack").is_some_and(|v| v == "1"),
+            rationale: get("rationale"),
+            refusal: None,
+            notice: None,
+        }
+    }
+}
+fn plural(count: usize, one: &str, many: &str) -> String {
+    format!("{count} {}", if count == 1 { one } else { many })
+}
+/// The words of a refusal that names its page.
+fn refusal_text(refusal: RangeRefusal) -> String {
+    match refusal {
+        RangeRefusal::NotRendered(n) => {
+            format!("Page {n} is not a selected rendered page; nothing was changed.")
+        }
+        RangeRefusal::SourceNotRendered(n) => {
+            format!("Page {n}, where the boxes were drawn, is not a selected rendered page.")
+        }
+        RangeRefusal::TooManyBoxes(n) => {
+            format!("Page {n} would have more than eight boxes; nothing was changed.")
+        }
+        RangeRefusal::Collapsed(n) => {
+            format!("A box has no area on page {n} after scaling; nothing was changed.")
+        }
+        RangeRefusal::NoPages => "There are no selected rendered pages to edit.".into(),
+        RangeRefusal::NoExclusion => "There is no saved exclusion to remove boxes from.".into(),
+        RangeRefusal::NoMatch => "No page has a matching box; nothing was changed.".into(),
+        RangeRefusal::NoChange => "Nothing to change on these pages.".into(),
+    }
 }
 struct Window {
     number: u32,
@@ -661,7 +720,7 @@ impl Screen {
                     .collect(),
             })
             .collect();
-        let manual = upload
+        let manual: Vec<EditorPage> = upload
             .pages
             .iter()
             .filter(|p| window.contains(p.pdf_page) && selected.contains(&p.pdf_page))
@@ -691,6 +750,11 @@ impl Screen {
                 }
             })
             .collect();
+        let range = RangeView {
+            mode: "add".into(),
+            source_page: manual.first().map_or(1, |e| e.page.pdf_page).to_string(),
+            ..RangeView::default()
+        };
         let mut views = Vec::new();
         for p in proposals {
             ProposalView::merge(&mut views, p, &window);
@@ -705,6 +769,7 @@ impl Screen {
             rendered,
             proposals,
             manual,
+            range,
             window,
             upload,
             csrf,
@@ -721,6 +786,10 @@ impl Screen {
 #[derive(serde::Deserialize)]
 struct ScreenQuery {
     p: Option<u32>,
+    /// What a range edit changed (numbers only: no text travels in the address).
+    range_changed: Option<String>,
+    range_sizes: Option<String>,
+    range_unmatched: Option<String>,
 }
 async fn model(
     state: &AuthState,
@@ -748,7 +817,23 @@ async fn page(
     Path(id): Path<String>,
     Query(query): Query<ScreenQuery>,
 ) -> AuthResult {
-    materials::html(&model(&state, &session, id, query.p.unwrap_or(1), Vec::new()).await?)
+    let mut screen = model(&state, &session, id, query.p.unwrap_or(1), Vec::new()).await?;
+    let count = |v: &Option<String>| v.as_deref().and_then(|v| v.parse::<usize>().ok());
+    if let (Some(changed), Some(sizes)) = (count(&query.range_changed), count(&query.range_sizes)) {
+        let mut notice = format!(
+            "{} changed, {}.",
+            plural(changed, "page", "pages"),
+            plural(sizes, "page size", "page sizes")
+        );
+        if let Some(unmatched) = count(&query.range_unmatched) {
+            notice = format!(
+                "{notice} {} had no matching box.",
+                plural(unmatched, "page", "pages")
+            );
+        }
+        screen.range.notice = Some(notice);
+    }
+    materials::html(&screen)
 }
 #[derive(Template)]
 #[template(path = "upload_progress.html")]
@@ -813,6 +898,9 @@ async fn action(
         screen.refresh = false;
         return materials::html(&screen);
     }
+    if action == "exclude-range" {
+        return exclude_range(&state, &session, m, owner, id, form).await;
+    }
     let target = if action == "discard" {
         "/admin/materials/uploads".into()
     } else {
@@ -870,6 +958,103 @@ async fn action(
     })
     .await?;
     Ok(Redirect::to(&target).into_response())
+}
+/// The `exclude-range` action: boxes over a range of pages. A refusal that changes nothing
+/// renders the screen again at 422 with the posted values and the reason.
+async fn exclude_range(
+    state: &AuthState,
+    session: &Session,
+    m: Uploads,
+    owner: OwnerWrite,
+    id: String,
+    form: BTreeMap<String, String>,
+) -> AuthResult {
+    let number = |key: &str| form.get(key).and_then(|v| v.parse::<i64>().ok());
+    let (Some(revision), Some(excluded)) = (number("revision"), number("exclusion_revision"))
+    else {
+        return Err(materials::error(&AppError::Invalid("Invalid revision.")));
+    };
+    let screen = form.get("p").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let outcome = match range_form(&form) {
+        Ok(request) => {
+            let mode = request.mode;
+            let target = id.clone();
+            tokio::task::spawn_blocking(move || {
+                m.set_exclusion_range(&owner, &target, revision, excluded, &request)
+            })
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|done| done.map(|counts| (mode, counts)))
+        }
+        Err(error) => Err(error),
+    };
+    let reason = match outcome {
+        Ok(Ok((mode, counts))) => {
+            let mut target = format!(
+                "/admin/materials/uploads/{id}?p={screen}&range_changed={}&range_sizes={}",
+                counts.changed, counts.sizes
+            );
+            if mode == RangeMode::Remove {
+                target = format!("{target}&range_unmatched={}", counts.unmatched);
+            }
+            return Ok(Redirect::to(&target).into_response());
+        }
+        Ok(Err(refusal)) => refusal_text(refusal),
+        Err(AppError::Invalid(reason)) => reason.to_owned(),
+        Err(error) => return Err(materials::error(&error)),
+    };
+    let mut page = model(state, session, id, screen, Vec::new()).await?;
+    page.range = RangeView {
+        refusal: Some(reason),
+        ..RangeView::posted(&form)
+    };
+    let mut response = materials::html(&page)?;
+    *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    response.extensions_mut().insert(materials::TrustedDraft);
+    Ok(response)
+}
+/// The request of the range form; its mode is a strict enum and `clear` needs its
+/// acknowledgement.
+fn range_form(form: &BTreeMap<String, String>) -> Result<RangeRequest, AppError> {
+    let text = |key: &str| form.get(key).map_or("", String::as_str);
+    let mode =
+        RangeMode::parse(text("mode")).ok_or(AppError::Invalid("Choose add, remove or clear."))?;
+    let pages = if text("all") == "1" {
+        None
+    } else {
+        let pages = parse_page_ranges(text("pages"))?;
+        if pages.is_empty() {
+            return Err(AppError::Invalid(
+                "Give the pages, or tick all selected pages.",
+            ));
+        }
+        Some(pages)
+    };
+    let rationale = text("rationale").to_owned();
+    if mode == RangeMode::Clear {
+        if text("clear_ack") != "1" {
+            return Err(AppError::Invalid(
+                "Tick the acknowledgement that every box on these pages is removed.",
+            ));
+        }
+        return Ok(RangeRequest {
+            pages,
+            mode,
+            source_page: 0,
+            boxes: Vec::new(),
+            rationale,
+        });
+    }
+    let source_page = text("source_page")
+        .parse()
+        .map_err(|_| AppError::Invalid("Give the page the boxes were drawn on."))?;
+    Ok(RangeRequest {
+        pages,
+        mode,
+        source_page,
+        boxes: box_lines(text("boxes"))?,
+        rationale,
+    })
 }
 /// One box per line: four numbers separated by white space or commas.
 fn box_lines(text: &str) -> Result<Vec<BoxPoints>, AppError> {
@@ -1064,8 +1249,10 @@ mod tests {
         assert_eq!(screen.selection, "1-20000");
         let html = screen.render().unwrap();
         assert_eq!(html.matches("<li ").count(), 100);
-        // The `select all` choice is the only selection checkbox; no per-page input exists.
-        assert_eq!(html.matches("type=\"checkbox\"").count(), 1);
+        // The `select all` choice is the only selection checkbox; no per-page input exists (the
+        // range form adds its own two: all pages and the clear acknowledgement).
+        assert_eq!(html.matches("type=\"checkbox\"").count(), 3);
+        assert_eq!(html.matches("name=\"select_all\"").count(), 1);
         assert!(!html.contains("name=\"page_"));
         assert!(
             html.contains("?p=2\">Previous 100 pages") && html.contains("?p=4\">Next 100 pages")

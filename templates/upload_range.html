@@ -1,0 +1,15 @@
+<details {% if range.refusal.is_some() || range.notice.is_some() %}open{% endif %}><summary>Boxes on a page range</summary>
+{% if let Some(notice) = range.notice %}<p role="status" class="notice">{{ notice }} Inspect those pages on their screens.</p>{% endif %}
+{% if let Some(refusal) = range.refusal %}<p role="alert" class="error">{{ refusal }}</p>{% endif %}
+<form method="post" action="/admin/materials/uploads/{{ upload.id }}/exclude-range" data-form="exclude-range">
+<input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="revision" value="{{ upload.revision }}"><input type="hidden" name="exclusion_revision" value="{{ upload.exclusion_revision }}"><input type="hidden" name="p" value="{{ window.number }}">
+<p>Applies to the saved exclusion only; posting this form discards any unsaved edits in the form above. Boxes are scaled from the page they were drawn on to each page's size, so a mixed-size manual keeps a footer at the foot of each page. Inspect the changed pages afterwards.</p>
+<label>Pages (for example 1-350, 360)<input name="pages" value="{{ range.pages }}" maxlength="120000" autocomplete="off"></label>
+<label><input type="checkbox" name="all" value="1" {% if range.all %}checked{% endif %}>All selected pages (replaces the list above)</label>
+<label>Mode<select name="mode"><option value="add" {% if range.mode == "add" %}selected{% endif %}>Add these boxes</option><option value="remove" {% if range.mode == "remove" %}selected{% endif %}>Remove these boxes</option><option value="clear" {% if range.mode == "clear" %}selected{% endif %}>Clear every box on these pages</option></select></label>
+<label>Page the boxes were drawn on<input type="number" min="1" name="source_page" value="{{ range.source_page }}" autocomplete="off"></label>
+<label>Boxes (one to eight; one per line as <em>left top right bottom</em> in displayed points, origin top-left)<textarea name="boxes" rows="4" maxlength="2000">{{ range.boxes }}</textarea></label>
+<label><input type="checkbox" name="clear_ack" value="1" {% if range.clear_ack %}checked{% endif %}>Clear: every box on these pages, proposal boxes included, goes.</label>
+<label>Rationale (replaces the exclusion's rationale; never shown again)<textarea name="rationale" required maxlength="5000">{{ range.rationale }}</textarea></label>
+<span role="status" data-range-copy-status></span>
+<button>Apply to the page range</button></form></details>

@@ -124,6 +124,77 @@ pub struct ExclusionRequest {
     pub extend_absent: bool,
 }
 
+/// What a range edit does to the boxes of its pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeMode {
+    Add,
+    Remove,
+    Clear,
+}
+impl RangeMode {
+    /// The posted word: `add`, `remove` or `clear`; anything else is `None`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "add" => Some(Self::Add),
+            "remove" => Some(Self::Remove),
+            "clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+}
+
+/// One boxes-on-a-page-range edit of the saved exclusion: the boxes (drawn on `source_page`, in
+/// its displayed points) are scaled to each target page's size.
+#[derive(Clone, Debug)]
+pub struct RangeRequest {
+    /// The target pages; `None` is every selected rendered page.
+    pub pages: Option<Vec<u32>>,
+    pub mode: RangeMode,
+    /// The page the boxes were drawn on (ignored by `Clear`).
+    pub source_page: u32,
+    /// One to eight boxes for `Add` and `Remove`; ignored by `Clear`.
+    pub boxes: Vec<BoxPoints>,
+    /// The exclusion's new rationale: a range edit replaces it.
+    pub rationale: String,
+}
+
+/// Why a range edit changes nothing; each names the first page that is at fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeRefusal {
+    /// A listed page is not a selected rendered page.
+    NotRendered(u32),
+    /// The page the boxes were drawn on is not a selected rendered page.
+    SourceNotRendered(u32),
+    /// The page would carry more than eight boxes.
+    TooManyBoxes(u32),
+    /// The scaled box has no area on the page, or leaves it.
+    Collapsed(u32),
+    /// No selected rendered page is left to edit.
+    NoPages,
+    /// There is no saved exclusion to remove boxes from.
+    NoExclusion,
+    /// A `Remove` found none of its boxes on any listed page.
+    NoMatch,
+    /// The result equals the saved exclusion.
+    NoChange,
+}
+
+/// What a range edit changed: the pages whose boxes differ, the distinct sizes of those pages
+/// and, for `Remove`, the pages that had no matching box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RangeOutcome {
+    pub changed: usize,
+    pub sizes: usize,
+    pub unmatched: usize,
+}
+
+struct Planned {
+    exclusion: Exclusion,
+    removed: bool,
+    outcome: RangeOutcome,
+}
+
 pub(super) fn load(db: &Connection, id: &str) -> Result<(i64, Option<Exclusion>), AppError> {
     let row = db
         .query_row(
@@ -406,6 +477,213 @@ impl Uploads {
             append(tx, owner, id, exclusion_revision + 1, &exclusion, true)
         })
     }
+
+    /// Add, remove or clear boxes on a range of pages of the saved exclusion; the boxes are
+    /// scaled from the page they were drawn on to each target page. One whole revision is
+    /// appended (a removal event when no box is left). A refusal that names a page is returned
+    /// in the inner result and appends nothing.
+    /// # Errors
+    /// Refuses stale admission/revisions, an invalid rationale, a box count outside 1-8 and an
+    /// invalid box (checked on the source page before scaling).
+    pub fn set_exclusion_range(
+        &self,
+        owner: &OwnerWrite,
+        id: &str,
+        revision: i64,
+        exclusion_revision: i64,
+        request: &RangeRequest,
+    ) -> Result<Result<RangeOutcome, RangeRefusal>, AppError> {
+        let _gate = self
+            .0
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.write(owner, |tx| {
+            let u = load_upload(tx, id, revision, exclusion_revision)?;
+            match plan_range(&u, request)? {
+                Err(refusal) => Ok(Err(refusal)),
+                Ok(planned) => {
+                    append(
+                        tx,
+                        owner,
+                        id,
+                        exclusion_revision + 1,
+                        &planned.exclusion,
+                        planned.removed,
+                    )?;
+                    Ok(Ok(planned.outcome))
+                }
+            }
+        })
+    }
+}
+
+/// The new exclusion of a range edit, without touching the database.
+fn plan_range(
+    u: &Upload,
+    request: &RangeRequest,
+) -> Result<Result<Planned, RangeRefusal>, AppError> {
+    check_rationale(&request.rationale)?;
+    let usable = usable_pages(u);
+    let mut source = None;
+    if request.mode != RangeMode::Clear {
+        if request.boxes.is_empty() || request.boxes.len() > MAX_BOXES_PER_PAGE {
+            return Err(AppError::Invalid("Give one to eight boxes."));
+        }
+        let Some(page) = usable.get(&request.source_page) else {
+            return Ok(Err(RangeRefusal::SourceNotRendered(request.source_page)));
+        };
+        for b in &request.boxes {
+            check_box(b, extent(page))?;
+        }
+        source = Some((page.width_points, page.height_points));
+    }
+    let targets = range_targets(request, &usable);
+    if let Some(n) = targets.iter().find(|n| !usable.contains_key(n)) {
+        return Ok(Err(RangeRefusal::NotRendered(*n)));
+    }
+    if targets.is_empty() {
+        return Ok(Err(RangeRefusal::NoPages));
+    }
+    if u.exclusion.is_none() && request.mode != RangeMode::Add {
+        return Ok(Err(RangeRefusal::NoExclusion));
+    }
+    let before = u.exclusion.as_ref().map(|e| &e.boxes);
+    let mut boxes = before.cloned().unwrap_or_default();
+    let (mut changed, mut unmatched) = (0, 0);
+    let mut sizes = BTreeSet::new();
+    for n in targets {
+        let page = usable[&n];
+        let room = extent(page);
+        let saved: &[BoxPoints] = before.and_then(|b| b.get(&n)).map_or(&[], Vec::as_slice);
+        let mut scaled: Vec<BoxPoints> = Vec::new();
+        if let Some(from) = source {
+            for b in &request.boxes {
+                let b = scale_box(*b, from, (page.width_points, page.height_points));
+                if check_box(&b, room).is_err() {
+                    return Ok(Err(RangeRefusal::Collapsed(n)));
+                }
+                scaled.push(round_box(b, room));
+            }
+        }
+        let (after, matched) = edit_page(request.mode, saved, scaled);
+        if !matched {
+            unmatched += 1;
+        }
+        if after.len() > MAX_BOXES_PER_PAGE {
+            return Ok(Err(RangeRefusal::TooManyBoxes(n)));
+        }
+        if after == saved {
+            continue;
+        }
+        changed += 1;
+        sizes.insert((page.width_points.to_bits(), page.height_points.to_bits()));
+        if after.is_empty() {
+            boxes.remove(&n);
+        } else {
+            boxes.insert(n, after);
+        }
+    }
+    if changed == 0 {
+        return Ok(Err(if request.mode == RangeMode::Remove {
+            RangeRefusal::NoMatch
+        } else {
+            RangeRefusal::NoChange
+        }));
+    }
+    let outcome = RangeOutcome {
+        changed,
+        sizes: sizes.len(),
+        unmatched,
+    };
+    let mut exclusion = u.exclusion.clone().unwrap_or(Exclusion {
+        pages: Vec::new(),
+        boxes: BTreeMap::new(),
+        proposal_fingerprints: Vec::new(),
+        rationale: String::new(),
+    });
+    exclusion.rationale.clone_from(&request.rationale);
+    if boxes.is_empty() {
+        // Nothing is left: the removal event keeps the last boxes, as `remove_exclusion` does.
+        return Ok(Ok(Planned {
+            exclusion,
+            removed: true,
+            outcome,
+        }));
+    }
+    exclusion.pages = boxes.keys().copied().collect();
+    exclusion.boxes = boxes;
+    validate(&exclusion, u)?;
+    Ok(Ok(Planned {
+        exclusion,
+        removed: false,
+        outcome,
+    }))
+}
+
+/// The pages of a range edit, ascending and distinct (every selected rendered page by default).
+fn range_targets(request: &RangeRequest, usable: &HashMap<u32, &super::PageModel>) -> Vec<u32> {
+    let mut targets = request
+        .pages
+        .clone()
+        .unwrap_or_else(|| usable.keys().copied().collect());
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+/// One page's boxes after the edit (sorted, equal boxes merged) and whether a `Remove` matched
+/// a saved box there.
+fn edit_page(
+    mode: RangeMode,
+    saved: &[BoxPoints],
+    scaled: Vec<BoxPoints>,
+) -> (Vec<BoxPoints>, bool) {
+    match mode {
+        RangeMode::Clear => (Vec::new(), true),
+        RangeMode::Remove => (
+            saved
+                .iter()
+                .filter(|b| !scaled.contains(b))
+                .copied()
+                .collect(),
+            saved.iter().any(|b| scaled.contains(b)),
+        ),
+        RangeMode::Add => {
+            let mut all = saved.to_vec();
+            all.extend(scaled);
+            all.sort_by(|a, b| box_order(*a, *b));
+            all.dedup();
+            (all, true)
+        }
+    }
+}
+/// `b`, drawn on a page of size `from` (displayed points), as the same fractions of a page of
+/// size `to`, clamped to that page's room. An axis of equal size keeps its points exactly.
+fn scale_box(b: BoxPoints, from: (f64, f64), to: (f64, f64)) -> BoxPoints {
+    let room = box_extent(to.0, to.1);
+    let axis = |v: f64, from: f64, to: f64, room: f64| {
+        let scaled = if from.to_bits() == to.to_bits() {
+            v
+        } else {
+            v / from * to
+        };
+        scaled.min(room)
+    };
+    [
+        axis(b[0], from.0, to.0, room.0),
+        axis(b[1], from.1, to.1, room.1),
+        axis(b[2], from.0, to.0, room.0),
+        axis(b[3], from.1, to.1, room.1),
+    ]
+}
+/// A valid box rounded outward to 0.01 pt within its page's room.
+fn round_box(b: BoxPoints, room: (f64, f64)) -> BoxPoints {
+    [
+        grid_down(b[0]),
+        grid_down(b[1]),
+        grid_up(b[2]).min(room.0),
+        grid_up(b[3]).min(room.1),
+    ]
 }
 
 fn load_upload(
@@ -509,12 +787,7 @@ fn round_boxes(
         let mut rounded = Vec::with_capacity(boxes.len());
         for b in boxes {
             check_box(&b, room)?;
-            rounded.push([
-                grid_down(b[0]),
-                grid_down(b[1]),
-                grid_up(b[2]).min(room.0),
-                grid_up(b[3]).min(room.1),
-            ]);
+            rounded.push(round_box(b, room));
         }
         rounded.sort_by(|a, b| box_order(*a, *b));
         rounded.dedup();

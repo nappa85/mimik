@@ -3601,3 +3601,421 @@ fn live_large_manager_stages_renders_cancels_and_reconciles_on_500_pages() {
     }));
     restarted.discard(&o, &id).unwrap();
 }
+
+// Boxes over a page range (SRC-15 follow-up).
+use exclusions::{RangeMode, RangeOutcome, RangeRefusal, RangeRequest};
+
+type Boxes = std::collections::BTreeMap<u32, Vec<[f64; 4]>>;
+
+/// Sets the rendered size (displayed points) of the listed pages.
+fn page_sizes(m: &Uploads, sizes: &[(u32, f64, f64)]) {
+    m.0.store
+        .upload_storage(|db| {
+            for (n, w, h) in sizes {
+                db.execute(
+                    "UPDATE source_upload_pages SET width_points=?2,height_points=?3 WHERE pdf_page=?1",
+                    params![n, w, h],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+fn range(mode: RangeMode, pages: Option<&[u32]>, source: u32, boxes: &[[f64; 4]]) -> RangeRequest {
+    RangeRequest {
+        pages: pages.map(<[u32]>::to_vec),
+        mode,
+        source_page: source,
+        boxes: boxes.to_vec(),
+        rationale: "range".into(),
+    }
+}
+fn edit(
+    m: &Uploads,
+    o: &OwnerWrite,
+    id: &str,
+    request: &RangeRequest,
+) -> Result<Result<RangeOutcome, RangeRefusal>, AppError> {
+    let u = m.read(id).unwrap();
+    m.set_exclusion_range(o, id, u.revision, u.exclusion_revision, request)
+}
+fn saved(m: &Uploads, id: &str) -> Boxes {
+    m.read(id)
+        .unwrap()
+        .exclusion
+        .map(|e| e.boxes)
+        .unwrap_or_default()
+}
+fn near(got: [f64; 4], want: [f64; 4]) {
+    assert!(
+        got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.0101),
+        "{got:?} vs {want:?}"
+    );
+}
+
+#[test]
+fn a_range_box_is_scaled_between_a4_letter_and_a_rotated_page_and_equal_sizes_keep_their_points() {
+    let (_dir, m, o, _f, id) = rendered_upload(4);
+    page_sizes(
+        &m,
+        &[
+            (1, 595., 842.),
+            (2, 595., 842.),
+            (3, 612., 792.),
+            (4, 842., 595.),
+        ],
+    );
+    let drawn = [59.5, 84.2, 535.5, 126.3];
+    assert_eq!(
+        edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &[drawn])).unwrap(),
+        Ok(RangeOutcome {
+            changed: 4,
+            sizes: 3,
+            unmatched: 0
+        })
+    );
+    let stored = saved(&m, &id);
+    assert_eq!(stored[&1], [drawn], "the source keeps its points");
+    assert_eq!(
+        stored[&2],
+        [drawn],
+        "an equal size keeps its points exactly"
+    );
+    near(stored[&3][0], [61.2, 79.2, 550.8, 118.8]);
+    near(stored[&4][0], [84.2, 59.5, 757.8, 89.25]);
+    // Rounded outward, never inward, of the exact fractions.
+    assert!(stored[&3][0][0] <= 61.2 + 1e-9 && stored[&3][0][2] >= 550.8 - 1e-9);
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+}
+
+#[test]
+fn a_box_touching_the_edge_of_a_595_2756_pt_page_stays_valid_on_every_target() {
+    let (_dir, m, o, _f, id) = rendered_upload(3);
+    page_sizes(
+        &m,
+        &[
+            (1, 595.2756, 841.89),
+            (2, 595.2756, 841.89),
+            (3, 600., 800.),
+        ],
+    );
+    let edge = [500.1234, 800.0001, 595.2756, 841.89];
+    edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &[edge]))
+        .unwrap()
+        .unwrap();
+    let stored = saved(&m, &id);
+    assert_eq!(stored[&1], [[500.12, 800., 595.28, 841.89]]);
+    assert_eq!(stored[&2], stored[&1]);
+    assert_eq!(stored[&3][0][2], 600., "clamped to the page's room");
+    assert_eq!(stored[&3][0][3], 800.);
+}
+
+#[test]
+fn invalid_boxes_and_modes_are_refused_before_scaling_and_append_nothing() {
+    let (_dir, m, o, _f, id) = rendered_upload(2);
+    page_sizes(&m, &[(1, 600., 800.), (2, 300., 400.)]);
+    for bad in [
+        [f64::NAN, 1., 5., 5.],
+        [1., 1., f64::INFINITY, 5.],
+        [-1., 1., 5., 5.],
+        [5., 1., 5., 5.],
+        [1., 7., 5., 3.],
+        [1., 1., 601., 5.],
+        [1., 1., 5., 800.5],
+    ] {
+        let request = range(RangeMode::Add, None, 1, &[bad]);
+        assert!(edit(&m, &o, &id, &request).is_err(), "{bad:?}");
+    }
+    assert!(edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &[])).is_err());
+    let nine = [[1., 1., 2., 2.]; 9];
+    assert!(edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &nine)).is_err());
+    assert_eq!(RangeMode::parse("add"), Some(RangeMode::Add));
+    assert_eq!(RangeMode::parse("remove"), Some(RangeMode::Remove));
+    assert_eq!(RangeMode::parse("clear"), Some(RangeMode::Clear));
+    for unknown in ["", "Add", "replace", "add "] {
+        assert_eq!(RangeMode::parse(unknown), None, "{unknown:?}");
+    }
+    let mut blank = range(RangeMode::Add, None, 1, &[[1., 1., 5., 5.]]);
+    blank.rationale = " ".into();
+    assert!(edit(&m, &o, &id, &blank).is_err());
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 0);
+}
+
+#[test]
+fn a_page_that_is_not_rendered_a_ninth_box_and_a_collapsing_box_refuse_naming_the_page() {
+    let (_dir, m, o, _f, id) = rendered_upload(3);
+    page_sizes(&m, &[(1, 600., 800.), (2, 600., 800.), (3, 100.001, 100.)]);
+    let one = [[1., 1., 5., 5.]];
+    assert_eq!(
+        edit(
+            &m,
+            &o,
+            &id,
+            &range(RangeMode::Add, Some(&[2, 7, 9]), 1, &one)
+        )
+        .unwrap(),
+        Err(RangeRefusal::NotRendered(7))
+    );
+    assert_eq!(
+        edit(&m, &o, &id, &range(RangeMode::Add, None, 7, &one)).unwrap(),
+        Err(RangeRefusal::SourceNotRendered(7))
+    );
+    // Page 1 has eight boxes: a ninth refuses the whole request, page 2 stays untouched.
+    let eight: Vec<[f64; 4]> = (0..8)
+        .map(|i| [f64::from(i), 1., f64::from(i) + 0.5, 2.])
+        .collect();
+    let u = m.read(&id).unwrap();
+    let request = exclusions::ExclusionRequest {
+        manual: [(1, eight)].into(),
+        rationale: "eight".into(),
+        ..Default::default()
+    };
+    m.set_exclusion(&o, &id, u.revision, 0, &request).unwrap();
+    assert_eq!(
+        edit(
+            &m,
+            &o,
+            &id,
+            &range(RangeMode::Add, Some(&[2, 1]), 1, &[[50., 50., 60., 60.]])
+        )
+        .unwrap(),
+        Err(RangeRefusal::TooManyBoxes(1))
+    );
+    // A box valid on a 100.001 pt source page (its room is 100.01) collapses on a 50 pt one.
+    page_sizes(&m, &[(2, 50., 100.)]);
+    assert_eq!(
+        edit(
+            &m,
+            &o,
+            &id,
+            &range(
+                RangeMode::Add,
+                Some(&[2]),
+                3,
+                &[[100.005, 10., 100.01, 20.]]
+            )
+        )
+        .unwrap(),
+        Err(RangeRefusal::Collapsed(2))
+    );
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+    assert_eq!(saved(&m, &id).len(), 1);
+}
+
+#[test]
+fn adding_then_removing_the_same_boxes_restores_the_exclusion_and_unmatched_pages_are_counted() {
+    let (_dir, m, o, _f, id) = rendered_upload(3);
+    page_sizes(&m, &[(1, 600., 800.), (2, 600., 800.), (3, 300., 400.)]);
+    let u = m.read(&id).unwrap();
+    let base = exclusions::ExclusionRequest {
+        manual: [(1, vec![[1., 2., 4., 5.]]), (2, vec![[1., 2., 4., 5.]])].into(),
+        rationale: "base".into(),
+        ..Default::default()
+    };
+    m.set_exclusion(&o, &id, u.revision, 0, &base).unwrap();
+    let before = saved(&m, &id);
+    let drawn = [[10., 20., 40., 50.], [100., 700., 500., 790.]];
+    edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &drawn))
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved(&m, &id)[&3].len(), 2);
+    assert_eq!(saved(&m, &id)[&1].len(), 3);
+    // The same add again changes nothing.
+    assert_eq!(
+        edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &drawn)).unwrap(),
+        Err(RangeRefusal::NoChange)
+    );
+    let removed = edit(&m, &o, &id, &range(RangeMode::Remove, None, 1, &drawn))
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed.changed, 3);
+    let after = saved(&m, &id);
+    assert_eq!(after[&1], before[&1]);
+    assert_eq!(after[&2], before[&2]);
+    assert!(
+        !after.contains_key(&3),
+        "a page left without boxes leaves the list"
+    );
+    // Nothing matches any more.
+    assert_eq!(
+        edit(&m, &o, &id, &range(RangeMode::Remove, None, 1, &drawn)).unwrap(),
+        Err(RangeRefusal::NoMatch)
+    );
+    // The base box exists on pages 1 and 2 only: page 3 is counted, not refused.
+    let outcome = edit(
+        &m,
+        &o,
+        &id,
+        &range(RangeMode::Remove, None, 1, &[[1., 2., 4., 5.]]),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!((outcome.changed, outcome.unmatched), (2, 1));
+    assert!(
+        m.read(&id).unwrap().exclusion.is_none(),
+        "an empty set is never stored"
+    );
+}
+
+#[test]
+fn clear_removes_every_box_keeps_the_fingerprints_and_an_empty_result_is_a_removal_event() {
+    let (_dir, m, o, _f, id) = rendered_upload(3);
+    let u = m.read(&id).unwrap();
+    assert_eq!(
+        edit(&m, &o, &id, &range(RangeMode::Clear, None, 1, &[])).unwrap(),
+        Err(RangeRefusal::NoExclusion)
+    );
+    let proposals = m.propose_exclusions(&o.auth, &id, u.revision).unwrap();
+    m.set_exclusion(
+        &o,
+        &id,
+        u.revision,
+        0,
+        &confirming(&proposals[0].fingerprint),
+    )
+    .unwrap();
+    edit(&m, &o, &id, &range(RangeMode::Clear, Some(&[1]), 1, &[]))
+        .unwrap()
+        .unwrap();
+    let kept = m.read(&id).unwrap().exclusion.unwrap();
+    assert_eq!(kept.pages, [2, 3]);
+    assert_eq!(
+        kept.proposal_fingerprints,
+        [proposals[0].fingerprint.clone()]
+    );
+    // Pages that have no box change nothing.
+    assert_eq!(
+        edit(&m, &o, &id, &range(RangeMode::Clear, Some(&[1]), 1, &[])).unwrap(),
+        Err(RangeRefusal::NoChange)
+    );
+    let outcome = edit(&m, &o, &id, &range(RangeMode::Clear, None, 1, &[]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.changed, 2);
+    let after = m.read(&id).unwrap();
+    assert!(after.exclusion.is_none());
+    assert_eq!(after.exclusion_revision, 3);
+    let (removed, text): (bool, String) =
+        m.0.store
+            .upload_storage(|db| {
+                Ok(db.query_row(
+                "SELECT removed,pages FROM source_upload_exclusions ORDER BY revision DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+            })
+            .unwrap();
+    assert!(removed);
+    assert_eq!(text, "[2,3]", "the removal keeps the last boxes");
+}
+
+#[test]
+fn a_stale_exclusion_revision_is_refused_and_a_windowed_edit_keeps_the_other_screens() {
+    let (_dir, m, o, _f, id) = rendered_upload(150);
+    page_sizes(&m, &(1..=150).map(|n| (n, 600., 800.)).collect::<Vec<_>>());
+    let u = m.read(&id).unwrap();
+    let drawn = [[10., 20., 40., 50.]];
+    let all = range(RangeMode::Add, None, 1, &drawn);
+    m.set_exclusion_range(&o, &id, u.revision, 0, &all)
+        .unwrap()
+        .unwrap();
+    // A screen form opened before the range edit still carries revision 0.
+    assert!(matches!(
+        m.set_exclusion_range(&o, &id, u.revision, 0, &all),
+        Err(AppError::Conflict)
+    ));
+    assert!(matches!(
+        m.set_exclusion(&o, &id, u.revision, 0, &exclusion()),
+        Err(AppError::Conflict)
+    ));
+    assert_eq!(saved(&m, &id).len(), 150);
+    // A windowed edit of screen one keeps the boxes of page 101 and on.
+    let screen = exclusions::ExclusionRequest {
+        manual: [(5, vec![[1., 1., 3., 3.]])].into(),
+        window: Some((1, 100)),
+        rationale: "screen".into(),
+        ..Default::default()
+    };
+    m.set_exclusion(&o, &id, u.revision, 1, &screen).unwrap();
+    let stored = saved(&m, &id);
+    assert_eq!(stored.len(), 51);
+    assert_eq!(stored[&5], [[1., 1., 3., 3.]]);
+    assert_eq!(stored[&101], [[10., 20., 40., 50.]]);
+    assert_eq!(stored[&150], [[10., 20., 40., 50.]]);
+}
+
+#[test]
+fn twenty_thousand_pages_take_eight_boxes_each_within_the_history_bound() {
+    let (_dir, m, o, id) = rendered_twenty_thousand();
+    let page = m.read(&id).unwrap().pages[0].clone();
+    let (width, height) = (page.width_points, page.height_points);
+    let boxes: Vec<[f64; 4]> = (0..8)
+        .map(|i| {
+            let i = f64::from(i);
+            [
+                width * (0.05 + i * 0.01),
+                height * (0.1 + i * 0.01),
+                width * (0.5 + i * 0.01),
+                height * (0.2 + i * 0.01),
+            ]
+        })
+        .collect();
+    let outcome = edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &boxes))
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.changed, 20_000);
+    let stored = saved(&m, &id);
+    assert_eq!(stored.len(), 20_000);
+    assert!(stored.values().all(|b| b.len() == 8));
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 1);
+}
+
+#[test]
+fn after_a_removal_a_range_add_starts_a_fresh_exclusion_and_remove_and_clear_find_none() {
+    let (_dir, m, o, _f, id) = rendered_upload(3);
+    let u = m.read(&id).unwrap();
+    let proposals = m.propose_exclusions(&o.auth, &id, u.revision).unwrap();
+    m.set_exclusion(
+        &o,
+        &id,
+        u.revision,
+        0,
+        &confirming(&proposals[0].fingerprint),
+    )
+    .unwrap();
+    m.remove_exclusion(&o, &id, u.revision, 1, "removed")
+        .unwrap();
+    let box_ = [[1., 1., 5., 5.]];
+    for mode in [RangeMode::Remove, RangeMode::Clear] {
+        assert_eq!(
+            edit(&m, &o, &id, &range(mode, None, 1, &box_)).unwrap(),
+            Err(RangeRefusal::NoExclusion)
+        );
+    }
+    assert_eq!(m.read(&id).unwrap().exclusion_revision, 2);
+    edit(&m, &o, &id, &range(RangeMode::Add, None, 1, &box_))
+        .unwrap()
+        .unwrap();
+    let after = m.read(&id).unwrap();
+    assert_eq!(after.exclusion_revision, 3);
+    let fresh = after.exclusion.unwrap();
+    assert_eq!(fresh.proposal_fingerprints, Vec::<String>::new());
+    assert_eq!(fresh.boxes.len(), 3);
+    assert!(fresh.boxes.values().all(|b| b == &box_));
+}
+
+#[test]
+fn distinct_sizes_are_counted_on_the_raw_page_size_not_the_rounded_room() {
+    let (_dir, m, o, _f, id) = rendered_upload(2);
+    // Both round up to the same 0.01 pt room (600.01), but they are two sizes.
+    page_sizes(&m, &[(1, 600.001, 800.), (2, 600.002, 800.)]);
+    let outcome = edit(
+        &m,
+        &o,
+        &id,
+        &range(RangeMode::Add, None, 1, &[[1., 1., 5., 5.]]),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!((outcome.changed, outcome.sizes), (2, 2));
+}

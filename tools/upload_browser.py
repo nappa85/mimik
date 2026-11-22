@@ -137,9 +137,10 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         clean()
         # The selection is a range list (a screen lists 100 pages; no checkbox per page).
         require(page.locator('[name^="page_"]').count() == 0, "A per-page checkbox came back")
-        page.locator('[name="pages"]').fill("1-3")
+        page.locator('form[data-form="set"] [name="pages"]').fill("1-3")
         submit("set")
-        require(page.locator('[name="pages"]').input_value() == "1-3", "Selection range lost")
+        selection = page.locator('form[data-form="set"] [name="pages"]')
+        require(selection.input_value() == "1-3", "Selection range lost")
         submit("render")
         wait_rows(directory, "SELECT count(*) FROM source_upload_pages", lambda r: r[0][0] >= 1)
         submit("cancel")
@@ -233,7 +234,7 @@ def scenario(browser, binary, directory, viewport, javascript, password):
         )
         # Numeric adjustment is exercised with JavaScript enabled and disabled.
         editor = page.locator('form[data-form="exclude"]')
-        page.locator("#repeated-text details summary").click()
+        page.locator("#repeated-text details summary").first.click()
         if javascript:
             region = editor.locator("[data-region-editor]").first
             region.locator("[data-region-keyboard]").click()
@@ -253,6 +254,44 @@ def scenario(browser, binary, directory, viewport, javascript, password):
             "Replacement did not append history",
         )
         require(page.locator(".exclusion-mask").first.get_attribute("x") == "4", "Adjust lost")
+        # Boxes on a page range: the copy button (JavaScript only) fills the range form from
+        # page 2's current inputs; without JavaScript the boxes are typed.
+        page.locator('summary:text("Boxes on a page range")').click()
+        ranged = page.locator('form[data-form="exclude-range"]')
+        copy_buttons = page.locator("[data-range-copy]")
+        # The exclusion editor's section is closed again after the reload.
+        page.locator("#repeated-text details").first.evaluate("d => { d.open = true; }")
+        if javascript:
+            require(copy_buttons.first.is_visible(), "Copy button hidden with JavaScript")
+            editor.locator("[data-region-editor]").nth(1).locator("[data-range-copy]").click()
+            require(
+                ranged.locator('[name="source_page"]').input_value() == "2",
+                "Copy lost the source page",
+            )
+            copied = ranged.locator('[name="boxes"]').input_value().split()
+            require(len(copied) == 4, f"Copy did not fill the range form: {copied}")
+            ranged.locator('[name="boxes"]').fill("5 5 20 20")
+        else:
+            require(not copy_buttons.first.is_visible(), "Copy button shown without JavaScript")
+            ranged.locator('[name="source_page"]').fill("1")
+            ranged.locator('[name="boxes"]').fill("5 5 20 20")
+        ranged.locator('[name="mode"]').select_option("add")
+        ranged.locator('[name="all"]').check()
+        ranged.locator('[name="rationale"]').fill("Synthetic range edit")
+        submit("exclude-range")
+        require(
+            "3 pages changed, 1 page size" in page.locator("body").inner_text(),
+            "Range feedback missing",
+        )
+        require(
+            rows(directory, "SELECT revision FROM source_upload_exclusions ORDER BY revision")
+            == [(1,), (2,), (3,)],
+            "Range edit did not append one revision",
+        )
+        require(
+            page.locator("article").nth(2).locator(".exclusion-mask").count() == 2,
+            "Range boxes missing on the last page",
+        )
         page.locator('form[data-form="remove-exclusion"] [name="rationale"]').fill(
             "Synthetic removal"
         )

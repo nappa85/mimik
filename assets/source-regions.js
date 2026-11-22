@@ -191,5 +191,29 @@
         update(clamp(p), corners[other]);
       });
     }
+    // Copy this page's current (possibly unsaved) boxes to the page-range form.
+    const copy = root.querySelector('[data-range-copy]');
+    const target = document.querySelector('form[data-form="exclude-range"]');
+    if (copy && target) {
+      copy.hidden = false;
+      copy.addEventListener('click', () => {
+        const status = target.querySelector('[data-range-copy-status]');
+        const lines = [];
+        if (selected?.checked && fields.every(field => field.value.trim() !== '')) {
+          lines.push(fields.map(field => field.value).join(' '));
+        }
+        const more = root.querySelector('textarea[name^="more_"]');
+        for (const line of (more ? more.value : '').split('\n')) {
+          if (line.trim() !== '') lines.push(line.trim());
+        }
+        if (lines.length === 0) {
+          if (status) status.textContent = 'This page has no boxes to copy.';
+          return;
+        }
+        target.elements.boxes.value = lines.join('\n');
+        target.elements.source_page.value = root.dataset.page;
+        if (status) status.textContent = `Copied ${lines.length} box${lines.length === 1 ? '' : 'es'} from page ${target.elements.source_page.value}.`;
+      });
+    }
   }
 })();
