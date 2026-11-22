@@ -105,8 +105,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   Open: scale the inspection base wall (fixed 30 s before the first page record) with the file
   size, so a large damaged PDF's repair scan is not refused (L-SRC-INSPECT-DAMAGED); measure a
   real image-heavy manual of several hundred MB; the manager's render costs 2.5 times the direct
-  one (`docs/results.md`); a manual box applied to a page range (L-SRC-PROPOSAL-BUDGET); CI's
-  actions still target Node.js 20.
+  one (`docs/results.md`); a manual box applied to a page range (L-SRC-PROPOSAL-BUDGET).
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
   (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
