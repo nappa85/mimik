@@ -30,8 +30,11 @@ cache): stage and inspect 0.26 s, render 93 s with 373 progress polls of at most
 proposal passes 0.21 s (3 proposals); a cancel at page 60 took 13 ms and kept 59 whole pages
 with every sandbox process gone; reconciliation by a second manager failed the held job as
 interrupted, kept no pages and a retry rendered all 500 in 91 s. The manager's render is about
-2.5 times the direct one (0.19 s a page, about an hour for 20,000 pages); the cause (writing,
-syncing and publishing each page) is not investigated.
+2.5 times the direct one (0.19 s a page, about an hour for 20,000 pages). The likely cause is
+durability on the magnetic data disk (ext4): each page's PNG and text are written, fsynced,
+renamed and their directory fsynced, and one such write took 75 ms there (a probe of 50 writes
+of 150 KB during other I/O, 2026-11-22), so two a page would cover the extra 0.11 s; that run's
+SQLite database was on tmpfs. Not confirmed by re-running the manager on a fast disk.
 
 Conclusion: the inspection and render limits (inspection 30 s plus 1 s per 8 MiB up to 600 s, plus 0.1 s a page record; 20 s
 CPU plus 1 s per 32 MiB up to 200 s; render 30 s and 25 s CPU a page) are far above ordinary
@@ -41,8 +44,8 @@ occupancy: a hostile file can hold the single worker up to about 34 minutes in i
 remedy, and the 0.1 s a page should be tightened only after a real large manual is measured.
 The base wall before the first page record scales with the file size so a damaged file's repair
 scan can run; no real damaged file has been timed (`L-SRC-INSPECT-DAMAGED`). Limits: synthetic, well-formed inputs only;
-a real image-heavy manual of several hundred MB, a damaged file (MuPDF repair) and the proposer's
-disk reads at 20,000 pages are unmeasured.
+a damaged file (MuPDF repair) and the proposer's disk reads at 20,000 pages are unmeasured; real
+image-heavy manuals are below (local manuals check).
 
 ## Name suggestions at the entry cap (step 4, 2026-11-19)
 
@@ -497,7 +500,14 @@ EN Bare Bones and IT, passed inspection and every render batch: 76 pages in 6.2 
 (median 0.064 seconds/page) and 96 pages in 24.1 seconds (median 0.206, maximum 0.709
 seconds/page). Peak natural-exit wait4 RSS was at most 136,588 KiB. The test reports sampled
 worker VmHWM separately; this wait4 maximum is the supplied natural-exit upper bound, not a
-dedicated worker allocator measurement. This conclusion covers these two local manuals only.
+dedicated worker allocator measurement. A host run (release build, 2026-11-22) on two
+image-heavy owner manuals, 125 MB with 194 pages and 1.3 GB with 351 pages: both passed
+inspection and every render batch, in 89 s (median 0.44, maximum 0.82 s a page) and 293 s
+(median 0.82, maximum 1.01 s a page). The slowest batch of eight took 6.9 s against a 240 s
+limit, and the peak natural-exit wait4 RSS was 274 MiB (2 GiB address-space limit). So real
+image-heavy pages cost five to eleven times the synthetic ones (0.075-0.088 s a page) and stay
+far inside the render limits. The check does not time inspection separately, so it says
+nothing about the inspection wall. These conclusions cover these four local manuals only.
 
 ## Extractor screen on MÖRK BORG IT pages 22–39 (2026-10-29/30)
 
