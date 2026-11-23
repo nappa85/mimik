@@ -61,6 +61,7 @@ pub struct Stats {
     pub chars: u32,
     pub unmapped: u32,
     pub image_area: f64,
+    pub shading_area: f64,
     #[serde(deserialize_with = "font_names")]
     pub fonts_substituted: Vec<String>,
     pub fonts_skipped: u32,
@@ -300,6 +301,7 @@ pub(super) fn validate_stats(s: &Stats, n: u32) -> Result<(), Error> {
         || s.chars > 1_000_000
         || s.unmapped > s.chars
         || !(0.0..=1.0).contains(&s.image_area)
+        || !(0.0..=1.0).contains(&s.shading_area)
         || s.fonts_substituted.len() > FONT_LIMIT
         || s.fonts_skipped > 10000
         || s.dropped_lines > 1_000_000

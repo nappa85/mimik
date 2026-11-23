@@ -13,11 +13,15 @@ How this directory was made (reproduce exactly to check it):
    (`.github/`, `.gitignore`, `.gitmodules`), `Cargo.lock` (unused for a dependency) and `Cargo.toml.orig` (it still listed the removed
    targets) removed. The unit tests inside `src/` need those
    fixtures; they run in the fork's own repository, not here.
-3. The fork's change applied: `git diff v0.8.0 1adf801 -- src` in mupdf-rs
-   (branch `mimik/text-direction-structure`, commits bd4b703, f84972e, fe37046, 230e6eb,
-   1adf801), diff SHA-256 `c95716de35045d69b74ad2803a587d089e55734abaec92a2caf518d01d168c43`.
-   It touches `src/lib.rs` and `src/text_page.rs` only: safe `TextLine::dir`,
-   `TextChar::bidi`/`is_rtl`, `TextBlock::structure`, `TextStruct` and `StructureType`.
+3. The fork's changes applied: `git diff v0.8.0 b51d16f -- src` in mupdf-rs (branch
+   `mimik/scissor-shade-bounds`: b51d16f on 1adf801, the head of
+   `mimik/text-direction-structure`, commits bd4b703, f84972e, fe37046, 230e6eb, 1adf801), diff SHA-256
+   `be05741e1d2003b7ffb0c9499c3a172bf34404ed5249155def447f7f915da369`.
+   It touches `src/lib.rs`, `src/text_page.rs`, `src/shade.rs` and `src/device/native.rs` only:
+   safe `TextLine::dir`, `TextChar::bidi`/`is_rtl`, `TextBlock::structure`, `TextStruct` and
+   `StructureType`; and `Shade::bounds` (over `fz_bound_shade`) plus the provided
+   `NativeDevice::fill_image_in_scissor`, `fill_image_mask_in_scissor` and `fill_shade_in_scissor`,
+   which pass `fz_device_current_scissor` and default to the existing callbacks.
 
 `mupdf-sys` is unchanged and still comes from crates.io (`=0.8.0`, MuPDF 1.27.2).
 Licence: AGPL-3.0, as upstream (`LICENSE`).

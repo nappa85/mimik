@@ -73,7 +73,7 @@ jobs:
               cargo about generate --locked --fail about.hbs -o target/THIRD-PARTY-NOTICES.md
               python3 tools/mupdf_notices.py target/THIRD-PARTY-NOTICES.md
               cargo build --release --locked
-              cargo package --locked --allow-dirty
+              cargo package --locked --allow-dirty --no-verify
               python tools/vendored_fork.py package target/package/mimik-0.1.0.crate
               python tools/verify_source_package.py target/package/mimik-0.1.0.crate
               cargo vendor --locked target/vendor > target/vendor-config.toml

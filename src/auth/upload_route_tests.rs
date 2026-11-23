@@ -1418,7 +1418,7 @@ async fn install_stored_page(store: &Store, id: String) {
     store
         .run(move |db| {
             let stats = serde_json::json!({
-                "n": 1, "chars": 0, "unmapped": 0, "image_area": 0.0,
+                "n": 1, "chars": 0, "unmapped": 0, "image_area": 0.0, "shading_area": 0.0,
                 "fonts_substituted": [], "fonts_skipped": 0,
                 "incomplete": false, "dropped_lines": 0,
             });

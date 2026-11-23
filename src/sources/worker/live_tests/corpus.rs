@@ -18,6 +18,7 @@ const HOSTILE: &[&str] = &[
     "operators-50m",
     "type3-recursion",
     "shading-pattern",
+    "shading-only",
     "huge-mediabox",
     "extreme-userunit",
     "bad-jbig2",
@@ -221,7 +222,10 @@ fn generated(name: &str) -> Vec<u8> {
                 "/AA << /O << /S /URI /URI (http://127.0.0.1:9/) >> >> /Type /Page",
             );
         }
-        "bad-font" | "type3-recursion" | "shading-pattern" | "many-fonts" => {
+        "bad-font" | "type3-recursion" | "shading-pattern" | "shading-only" | "many-fonts" => {
+            if name == "shading-only" {
+                page = page.replace("600 800", "4000 4000");
+            }
             resource_case(name, &mut font, &mut extra, &mut content, &mut resources);
         }
         "text-300" | "password" => {}
@@ -287,6 +291,20 @@ fn resource_case(
             extra.push(stream("/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep .01 /YStep .01 /Resources << >>", b"0 0 .5 .5 re f"));
             extra.push(b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 600 800] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >> /Extend [true true] >>".to_vec());
             *content = b"/Pattern cs /P scn 0 0 600 800 re f /S sh\n".repeat(10_000);
+        }
+        "shading-only" => {
+            // 64 shading paints at zero opacity, then one opaque, on the largest page inspection
+            // accepts (4000 x 4000 points), no tiling pattern. The draw device skips the
+            // invisible ones, but the stext device with `PRESERVE_IMAGES` rasterised each into a
+            // page-sized pixmap (16 MP with alpha, 64 MiB) and kept it: about 4 GiB, over the
+            // worker's 2 GiB address space.
+            *resources =
+                "<< /Shading << /S 7 0 R >> /ExtGState << /G0 << /ca 0 >> /G1 << /ca 1 >> >> >>"
+                    .into();
+            extra.push(b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 4000 4000] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >> /Extend [true true] >>".to_vec());
+            *content = b"/G0 gs\n".to_vec();
+            content.extend(b"/S sh\n".repeat(64));
+            content.extend(b"/G1 gs /S sh\n");
         }
         "many-fonts" => {
             let mut names = Vec::new();
@@ -435,6 +453,7 @@ fn expected(name: &str) -> Expected {
         "nested-filters"
         | "image-bomb"
         | "tiny-images"
+        | "shading-only"
         | "prev-loop"
         | "object-stream-cycle"
         | "xref-repair"
@@ -509,7 +528,15 @@ fn run_case(name: &str, valid: bool) {
         let result = execute(&path, &spec, &Cancel::default(), &opts, |pipe| {
             let mut reader = records::RenderReader::new(pipe, batch.to_vec()).unwrap();
             let result = (|| {
-                while reader.next_page()?.is_some() {}
+                while let Some(page) = reader.next_page()? {
+                    if name == "shading-only" {
+                        assert!(
+                            (page.stats.shading_area - 1.0).abs() < 1e-6,
+                            "{name}: shading_area {}",
+                            page.stats.shading_area
+                        );
+                    }
+                }
                 Ok(())
             })();
             (result, reader.terminal_error())

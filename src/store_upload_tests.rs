@@ -60,7 +60,7 @@ fn insert_upload(db: &Connection, pages: u32, selected: &str) -> rusqlite::Resul
 }
 
 fn insert_page(db: &Connection, n: u32) -> rusqlite::Result<usize> {
-    let stats = json!({"n": n, "chars": 0, "unmapped": 0, "image_area": 0,
+    let stats = json!({"n": n, "chars": 0, "unmapped": 0, "image_area": 0, "shading_area": 0,
         "fonts_substituted": [], "fonts_skipped": 0, "incomplete": false, "dropped_lines": 0});
     db.execute(
         "INSERT INTO source_upload_pages(upload_id,pdf_page,rendered_revision,png_sha256,png_bytes,

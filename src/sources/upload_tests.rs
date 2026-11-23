@@ -731,6 +731,7 @@ fn rendered(n: u32) -> RenderedPage {
             chars: 4,
             unmapped: 0,
             image_area: 0.,
+            shading_area: 0.0,
             fonts_substituted: vec!["FixtureFont".into()],
             fonts_skipped: 0,
             incomplete: false,

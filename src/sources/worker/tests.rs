@@ -2338,3 +2338,193 @@ fn boundary_allows_only_the_exact_vendored_mupdf_patch() {
     let root = dir.path();
     assert!(std::panic::catch_unwind(|| boundary_files(root)).is_err());
 }
+
+/// A 200 x 300 page painting `content`, with an image `I1`, an axial shading `S` (with the
+/// given `/BBox` when set), `ca 0.3` as `A3` and a luminosity soft mask `SM` whose group paints
+/// the image in the lower left 100 x 100.
+fn paint_fixture(content: &[u8], shading_bbox: Option<[i32; 4]>) -> Vec<u8> {
+    let mut doc = Document::load_mem(&fixture(0, [0, 0, 200, 300], 1.0, false)).unwrap();
+    let page = doc.get_pages()[&1];
+    let resources = doc
+        .get_dictionary(page)
+        .unwrap()
+        .get(b"Resources")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let image=doc.add_object(Stream::new(dictionary!{"Type"=>"XObject","Subtype"=>"Image","Width"=>1,"Height"=>1,"ColorSpace"=>"DeviceRGB","BitsPerComponent"=>8},vec![255,0,0]));
+    let mut shading = dictionary! {
+        "ShadingType" => 2,
+        "ColorSpace" => "DeviceRGB",
+        "Coords" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+        "Function" => dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into()],
+            "C1" => vec![1.into(), 1.into(), 1.into()],
+            "N" => 1,
+        },
+        "Extend" => vec![true.into(), true.into()],
+    };
+    if let Some(bbox) = shading_bbox {
+        shading.set("BBox", bbox.map(Object::from).to_vec());
+    }
+    let shading = doc.add_object(shading);
+    let mask_group = doc.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+            "Group" => dictionary! {
+                "S" => "Transparency",
+                "CS" => "DeviceGray",
+            },
+            "Resources" => dictionary! {"XObject" => dictionary! {"I1" => image}},
+        },
+        b"q 100 0 0 100 0 0 cm /I1 Do Q".to_vec(),
+    ));
+    let resources = doc.get_dictionary_mut(resources).unwrap();
+    resources.set("XObject", dictionary! {"I1" => image});
+    resources.set("Shading", dictionary! {"S" => shading});
+    resources.set(
+        "ExtGState",
+        dictionary! {
+            "A3" => dictionary! {"ca" => 0.3},
+            "SM" => dictionary! {
+                "SMask" => dictionary! {"S" => "Luminosity", "G" => mask_group},
+            },
+        },
+    );
+    let stream = doc.add_object(Stream::new(dictionary! {}, content.to_vec()));
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("Contents", stream);
+    saved(&mut doc)
+}
+
+fn rendered_stats(content: &[u8], shading_bbox: Option<[i32; 4]>) -> records::Stats {
+    render_bytes(&paint_fixture(content, shading_bbox), &[1])
+        .unwrap()
+        .remove(0)
+        .stats
+}
+
+const PAGE_AREA: f64 = 200.0 * 300.0;
+
+#[test]
+fn an_image_clipped_by_a_smaller_path_counts_only_the_clip() {
+    let stats = rendered_stats(b"q 0 0 50 50 re W n q 100 0 0 100 0 0 cm /I1 Do Q Q", None);
+    assert!((stats.image_area - 2500.0 / PAGE_AREA).abs() < 1e-6);
+}
+
+#[test]
+fn an_image_below_half_opacity_counts_nothing() {
+    let stats = rendered_stats(b"/A3 gs q 100 0 0 100 0 0 cm /I1 Do Q", None);
+    assert!(stats.image_area.abs() < 1e-9);
+}
+
+#[test]
+fn an_image_inside_a_soft_mask_counts() {
+    let stats = rendered_stats(b"/SM gs 0 0 200 300 re f", None);
+    assert!((stats.image_area - 10_000.0 / PAGE_AREA).abs() < 1e-6);
+}
+
+#[test]
+fn a_full_page_shading_covers_the_page() {
+    let stats = rendered_stats(b"/S sh", None);
+    assert!((stats.image_area - 1.0).abs() < 1e-6);
+    assert!((stats.shading_area - 1.0).abs() < 1e-6);
+}
+
+#[test]
+fn a_shading_in_a_half_page_clip_covers_half() {
+    let stats = rendered_stats(b"q 0 0 200 150 re W n /S sh Q", None);
+    assert!((stats.image_area - 0.5).abs() < 1e-6);
+    assert!((stats.shading_area - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn a_shading_with_a_bbox_covers_the_box() {
+    let stats = rendered_stats(b"/S sh", Some([0, 0, 100, 150]));
+    assert!((stats.image_area - 0.25).abs() < 1e-6);
+    assert!((stats.shading_area - 0.25).abs() < 1e-6);
+}
+
+#[test]
+fn an_image_adds_to_image_area_but_not_to_shading_area() {
+    let stats = rendered_stats(b"q 100 0 0 100 0 0 cm /I1 Do Q", None);
+    assert!((stats.image_area - 10_000.0 / PAGE_AREA).abs() < 1e-6);
+    assert!(stats.shading_area.abs() < 1e-9);
+}
+
+/// The text of every line of a native text page built with `flags`.
+fn native_lines(bytes: &[u8], flags: mupdf::TextPageFlags) -> Vec<String> {
+    let (_file, native) = open_native(bytes);
+    let text = native
+        .load_pdf_page(0)
+        .unwrap()
+        .to_text_page(flags)
+        .unwrap();
+    text.blocks()
+        .flat_map(|block| block.lines().collect::<Vec<_>>())
+        .map(|line| line.chars().filter_map(|c| c.char()).collect())
+        .collect()
+}
+
+/// Without `PRESERVE_IMAGES` an image painted between two text runs on one baseline no longer
+/// splits the line: the stext device starts a new block for the image otherwise
+/// (`stext-device.c`), so the runs stayed two lines. Fails with `PRESERVE_IMAGES` in the render
+/// stage's flags.
+#[test]
+fn an_image_between_text_runs_on_one_baseline_does_not_split_the_line() {
+    let content = b"BT /F1 10 Tf 35 60 Td (Left) Tj ET q 2 0 0 2 52.5 60 cm /I1 Do Q \
+                    BT /F1 10 Tf 55 60 Td (Right) Tj ET";
+    let bytes = paint_fixture(content, None);
+    let kept = native_lines(&bytes, WORDS_FLAGS | mupdf::TextPageFlags::PRESERVE_IMAGES);
+    assert_eq!(kept, ["Left", "Right"], "the old flags split the line");
+    let page = render_bytes(&bytes, &[1]).unwrap().remove(0);
+    let lines: Vec<&str> = page.lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(lines, ["Left Right"]);
+}
+
+/// The text page runs the page contents only, so an annotation appearance that paints a
+/// full-page image adds nothing to `image_area`. Fails when the bounds pass uses `page.run`
+/// (contents, annotations and widgets).
+#[test]
+fn an_annotation_appearance_image_does_not_count() {
+    let mut doc = Document::load_mem(&paint_fixture(b"", None)).unwrap();
+    let page = doc.get_pages()[&1];
+    let image=doc.add_object(Stream::new(dictionary!{"Type"=>"XObject","Subtype"=>"Image","Width"=>1,"Height"=>1,"ColorSpace"=>"DeviceRGB","BitsPerComponent"=>8},vec![255,0,0]));
+    let appearance = doc.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+            "Resources" => dictionary! {"XObject" => dictionary! {"I1" => image}},
+        },
+        b"q 200 0 0 300 0 0 cm /I1 Do Q".to_vec(),
+    ));
+    let annot = doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Stamp",
+        "Rect" => vec![0.into(), 0.into(), 200.into(), 300.into()],
+        "F" => 4,
+        "AP" => dictionary! {"N" => appearance},
+    });
+    doc.get_dictionary_mut(page)
+        .unwrap()
+        .set("Annots", vec![annot.into()]);
+    let stats = render_bytes(&saved(&mut doc), &[1])
+        .unwrap()
+        .remove(0)
+        .stats;
+    assert!(stats.image_area.abs() < 1e-9, "{}", stats.image_area);
+}
+
+/// More than 20,000 image paints on one page latch `TooLarge` in the recording device.
+#[test]
+fn more_than_20000_image_paints_are_too_large() {
+    let content = b"q 10 0 0 10 0 0 cm /I1 Do Q\n".repeat(20_001);
+    let bytes = paint_fixture(&content, None);
+    assert_eq!(render_bytes(&bytes, &[1]).err(), Some(Error::TooLarge));
+}
