@@ -102,7 +102,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
   Second fork branch `mimik/scissor-shade-bounds` (on 1adf801; `Shade::bounds` and the scissor
   passed to `NativeDevice` image/shading callbacks): the vendored copy carries it until its
-  change is released upstream; the owner opens the upstream PR (rebased onto upstream main).
+  change is released upstream: PR messense/mupdf-rs#283 (opened 2026-11-23, on upstream main).
   When the pin returns to crates.io, also remove CI's `cargo package --no-verify` (DEP-29-FORK).
 
 - **SRC-15 follow-ups:** done 2026-11-21, so route A's 4c can build on the new staging.
