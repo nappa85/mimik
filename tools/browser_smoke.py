@@ -290,33 +290,6 @@ def run_scenario(browser, viewport):
         )
         expect(page.get_by_text("Defense: d20", exact=False)).to_contain_text("DR 16")
         no_overflow(page, "stats with long name")
-        page.get_by_role("link", name="Open contextual base-rule checklist", exact=False).click()
-        context_revision = page.locator('input[name="revision"]').input_value()
-        for name in [
-            "base",
-            "can_act",
-            "movement_remaining",
-            "melee_reach",
-            "ranged_ready",
-            "ranged_in_range",
-            "incoming_attack",
-            "scroll_available",
-            "blocking_armor",
-            "route_clear",
-        ]:
-            page.locator(f"#{name}").select_option("yes")
-        for name in ["action_remaining", "zweihander", "disoriented"]:
-            page.locator(f"#{name}").select_option("no")
-        page.locator("#power_uses").fill("3")
-        page.get_by_role("button", name="Explain the standard options").click()
-        expect(page.locator('[data-option="melee"] h2')).to_contain_text("blocked standard path")
-        expect(page.locator('[data-option="move"] h2')).to_contain_text("standard check supported")
-        expect(page.locator('[data-option="defense"]')).to_contain_text("DR 16")
-        require(
-            page.locator('input[name="revision"]').input_value() == context_revision,
-            "Advice changed sheet revision",
-        )
-        no_overflow(page, "context checklist")
         page.goto("http://127.0.0.1:3000/sources")
         expect(page.get_by_text("synthetic-game / first", exact=True)).to_be_visible()
         no_overflow(page, "source list with hash")

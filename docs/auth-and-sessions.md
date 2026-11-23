@@ -43,7 +43,7 @@ admission), `migrations/010`, `011`, `013`, `014`.
 Serves the old unauthenticated editor (`src/web.rs`, `/characters`, global source
 routes) on loopback only, with a startup warning that account setup does not secure it.
 It cannot reach campaign or private-sheet tables. Authenticated mode never falls back
-to it: legacy character, global source/image/context and export routes return 403 in
+to it: legacy character, global source/image and export routes return 403 in
 authenticated mode, including for the Owner.
 
 ### Owner and gameplay

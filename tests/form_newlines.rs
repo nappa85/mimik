@@ -122,34 +122,6 @@ async fn mork_borg_sheet_textareas_crlf_at_the_limit_are_stored_as_lf() {
 }
 
 #[tokio::test]
-async fn mork_context_goal_crlf_at_the_limit_is_kept_as_lf() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("context.sqlite3")).unwrap();
-    let (id, revision) = mork_character(&store).await;
-    let goal = format!("\n{}", typed(998, 'g'));
-    assert_eq!(goal.chars().count(), 999);
-    let body =
-        serde_urlencoded::to_string([("revision", revision.to_string()), ("goal", crlf(&goal))])
-            .unwrap();
-    let response = app(store)
-        .oneshot(post(&format!("/characters/{id}/context"), body))
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "within the 1,000-character goal limit"
-    );
-    let html = text(response).await;
-    assert!(!html.contains('\r'), "no CR echoed");
-    assert_eq!(
-        textarea(&html, "goal"),
-        goal,
-        "goal echoed with LF and its leading newline"
-    );
-}
-
-#[tokio::test]
 async fn creation_notes_crlf_at_the_limit_are_stored_as_lf() {
     let dir = tempfile::tempdir().unwrap();
     support::fixture_pair(dir.path()).unwrap();

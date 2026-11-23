@@ -874,7 +874,7 @@ mork-borg-core-en-2019   3d2873f68f4cc83598724c28ab820353566c23728d0f34550417c70
 
 Known hazards: Pathfinder reference-sheet Markdown loses action-cost glyphs and interleaves sidebars; the D&D text layer has OCR defects; IT and EN MÖRK BORG differ (e.g. occult treasure 9) and are never merged or corrected against each other.
 
-**MÖRK BORG native adapter.** It is pinned to `MÖRK BORG — IT 2025`. Its citations come from a manual visual audit of original PDF pages 28, 30, 31, 32, 33, 34 and 38 (printed 24, 26–29 and 34), recorded in `src/mork_borg.rs` and `src/mork_advice.rs`. These pages were checked by eye. They are not reviewed source units.
+**MÖRK BORG native adapter.** It is pinned to `MÖRK BORG — IT 2025`. Its citations come from a manual visual audit of original PDF pages 28, 30, 31, 32, 33, 34 and 38 (printed 24, 26–29 and 34), recorded in `src/mork_borg.rs`. These pages were checked by eye. They are not reviewed source units.
 
 ## Licensing of sources and assets
 

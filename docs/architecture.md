@@ -70,7 +70,7 @@ Rebuilt refusals and the unauthenticated navigation's login redirect keep only
 | `main.rs`, `account_cli.rs` | Argument parsing, serving modes, operator subcommands |
 | `lib.rs` | Module wiring, `AppError`, legacy prototype character input |
 | `store.rs` | `Store`: one rusqlite connection behind a mutex, run on `spawn_blocking`; migrations; `busy_timeout` 5 s, `foreign_keys = ON` |
-| `web.rs` | Unauthenticated prototype router: legacy characters, native MÖRK BORG sheet and context checklist, source routes, bundled assets |
+| `web.rs` | Unauthenticated prototype router: legacy characters, native MÖRK BORG sheet, source routes, bundled assets |
 | `network.rs` | LAN/loopback selection, peer admission, canonical external URL |
 | `auth/` | Sign-in, sessions, request admission, security headers, error pages; Owner pages `/admin` (accounts), `/admin/materials` (source review), `/admin/rulesets` (registry), `/admin/assistant` (model runtime) |
 | `accounts/` | Accounts, Owner binding, invitations, resets, disable, epochs; Argon2 hashing; protected credential files; browser transport |
@@ -80,7 +80,7 @@ Rebuilt refusals and the unauthenticated navigation's login redirect keep only
 | `catalogues/` | Read-only game catalogues: decode, admission, drafts, sealed publication with projections and name index, read-only lookups |
 | `sources/` | Prepared-source import, page/unit review evidence, FTS5 lexical search, region previews, Owner material operations, prototype source routes |
 | `registry.rs`, `registry_admin.rs` | Immutable game/edition identities and legacy aliases; Owner browser registration |
-| `games.rs`, `mork_borg.rs`, `mork_form.rs`, `mork_advice.rs` | Native Italian-2025 MÖRK BORG adapter (`mork-borg-it-2025`), an exploration fixture |
+| `games.rs`, `mork_borg.rs`, `mork_form.rs` | Native Italian-2025 MÖRK BORG adapter (`mork-borg-it-2025`), an exploration fixture |
 | `form_text.rs`, `local_file.rs`, `pagination.rs`, `presentation.rs` | CR LF → LF form text, bounded descriptor-based local reads, 50+1 keyset pages, date presentation |
 
 ## Storage

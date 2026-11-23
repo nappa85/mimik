@@ -848,71 +848,6 @@ def smoke_sources(binary, directory, fixture):
     return correction_query
 
 
-def smoke_positive_advice():
-    status, headers, _ = request(
-        "/characters",
-        {
-            "name": "Positive advice fixture",
-            "adapter_id": "mork-borg-it-2025",
-            "notes": "synthetic",
-        },
-    )
-    require(status == 303, "Positive context record creation failed")
-    path = headers["location"].removesuffix("/mork-borg")
-    sheet = {
-        "agility": 0,
-        "presence": 0,
-        "strength": -3,
-        "toughness": 0,
-        "hp": 3,
-        "max_hp": 5,
-        "worn_armor": 0,
-        "protection": 0,
-        "standard_items": 6,
-        "silver": 10,
-        "omens": 2,
-        "equipment": "synthetic context",
-        "revision": 1,
-    }
-    saved = request(path + "/mork-borg", sheet)
-    current = revision(saved[2])
-    context = {
-        "revision": current,
-        "base": "yes",
-        "can_act": "yes",
-        "action_remaining": "no",
-        "movement_remaining": "yes",
-        "route_clear": "yes",
-        "melee_reach": "yes",
-        "incoming_attack": "yes",
-        "blocking_armor": "no",
-        "disoriented": "no",
-        "power_uses": "3",
-        "goal": "\n\nreach the gate",
-    }
-    html = request(path + "/context", context)[2]
-    goal = FormFields()
-    goal.feed(html)
-    require(
-        goal.values.get("goal") == "\n\nreach the gate",
-        "Context goal lost its leading newlines",
-    )
-    require(
-        "Ordinary melee attack — blocked standard path" in html,
-        "Exhausted ordinary action not blocked",
-    )
-    require(
-        "Ordinary room movement — standard check supported" in html,
-        "Ordinary budget incorrectly blocked movement",
-    )
-    require(
-        "Triggered defense reference — standard check supported" in html,
-        "Ordinary budget incorrectly blocked defense",
-    )
-    require("meet or exceed DR 14" in html, "Context target incorrect")
-    assert_fields(request(path + "/mork-borg")[2], dict(sheet, revision=current))
-
-
 def auth_request(path, *, cookie=None, form=None, body=None, headers=None):
     """No redirects, implicit cookies, htmx headers or origin rewriting."""
     values = {"Host": "127.0.0.1:3000"}
@@ -1345,7 +1280,6 @@ AUTH_DENIED_PATHS = (
     "/characters",
     "/characters/1",
     "/characters/1/mork-borg",
-    "/characters/1/context",
     "/sources",
     "/sources/setup",
     "/sources/search",
@@ -2216,33 +2150,6 @@ def main():
                 "Identity revision did not protect sheet",
             )
             assert_fields(request(sheet_path)[2], dict(sheet_state, revision=final_revision))
-            context = {
-                "revision": final_revision,
-                "base": "yes",
-                "can_act": "yes",
-                "action_remaining": "no",
-                "movement_remaining": "yes",
-                "route_clear": "yes",
-                "incoming_attack": "yes",
-                "blocking_armor": "yes",
-                "disoriented": "no",
-                "power_uses": "3",
-            }
-            context_path = path + "/context"
-            context_response = request(context_path, context)
-            require(
-                context_response[0] == 200
-                and "broken outcome" in context_response[2]
-                and "Saved-sheet snapshot" in context_response[2]
-                and "meet or exceed DR" not in context_response[2],
-                "Broken-context adjudication guard failed",
-            )
-            require(
-                request(context_path, dict(context, revision=final_revision - 1))[0] == 409,
-                "Stale context accepted",
-            )
-            assert_fields(request(sheet_path)[2], dict(sheet_state, revision=final_revision))
-            smoke_positive_advice()
             correction_query = (
                 smoke_sources(binary, directory, fixture) if args.source_fixture else None
             )

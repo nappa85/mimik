@@ -241,7 +241,6 @@ async fn rotate_and_switch(app: Router, owner_cookie: String) -> String {
     for path in [
         "/characters",
         "/characters/1",
-        "/characters/1/context",
         "/sources",
         "/sources/1/pages/1",
         "/history",

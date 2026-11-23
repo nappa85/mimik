@@ -1,38 +1,17 @@
 # Removing the native MÖRK BORG game (C11)
 
 Owner decision 2026-11-23: Mimik reproduces the sheet, not the table (PROD-1, PROD-5,
-PROD-24).
-- **Advice:** the situation/action checklist (`src/mork_advice.rs`) is deleted with no
-  replacement.
-- **Sheet:** the hardcoded MÖRK BORG sheet, form, adapter and registry seed go too.
+PROD-24, PROD-25). The advice checklist is already gone.
+- **Sheet:** the hardcoded MÖRK BORG sheet, form, adapter and registry seed go.
 - **What remains:** sheets come only from runtime definitions the Owner registers. Games and
   editions are never in code.
 
 Inventory: a read-only Opus survey on 2026-11-23. File references below are from that survey;
 the implementer re-checks them.
 
-## Slice 1: the advice checklist
+## The native sheet, the registry's native concept and the seed
 
-- **Delete:**
-  - `src/mork_advice.rs`;
-  - the `/characters/{id}/context` route, its handler and template (`src/web.rs`,
-    `templates/mork_context.html`);
-  - `tests/advice.rs`;
-  - `tools/smoke_release.py` `smoke_positive_advice` and its call;
-  - the CSS used only by it.
-- **Docs:**
-  - **New decision line in `docs/decisions.md`:** "Mimik reproduces the sheet, not the table:
-    no situation or action evaluation and no native games; games come only from
-    Owner-registered runtime definitions."
-  - **`docs/limitations.md`:** remove PROD-L3, keeping "dice are notation only" if still true
-    elsewhere, and ROAD-3 ("situational companion").
-  - **`TODO.md`:** drop "situation input" from the pending questions.
-  - **Other references:** amend any doc that cites the advice, such as `assisted-entry.md` and
-    `architecture.md`.
-
-## Slice 2: the native sheet, the registry's native concept and the seed
-
-Former slices 2 and 3 land together. `src/games.rs` is still called from `registry.rs`,
+These land together. `src/games.rs` is still called from `registry.rs`,
 `definitions/store.rs` and `catalogues/store.rs`, so neither half compiles alone.
 
 ### Code
@@ -152,9 +131,9 @@ databases already at version 37.
 
 ## Checks
 
-Each slice runs:
+The change runs:
 - the full container gate (fmt, both clippy runs, all tests, Python tests, ruff, actionlint);
 - the browser check of the tools it changes;
 - `tools/smoke_release.py` against a release build.
 
-Every regression found gets a failing-first test. One independent review per slice.
+Every regression found gets a failing-first test. One independent review.
