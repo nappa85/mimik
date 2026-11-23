@@ -293,12 +293,18 @@ fn resource_case(
             *content = b"/Pattern cs /P scn 0 0 600 800 re f /S sh\n".repeat(10_000);
         }
         "shading-only" => {
-            // 400 full-page shading paints on the largest page inspection accepts (4000 x 4000 points),
-            // no tiling pattern: the stext device used
-            // to rasterise and keep one page-sized pixmap per paint (`PRESERVE_IMAGES`).
-            *resources = "<< /Shading << /S 7 0 R >> >>".into();
+            // 64 shading paints at zero opacity, then one opaque, on the largest page inspection
+            // accepts (4000 x 4000 points), no tiling pattern. The draw device skips the
+            // invisible ones, but the stext device with `PRESERVE_IMAGES` rasterised each into a
+            // page-sized pixmap (16 MP with alpha, 64 MiB) and kept it: about 4 GiB, over the
+            // worker's 2 GiB address space.
+            *resources =
+                "<< /Shading << /S 7 0 R >> /ExtGState << /G0 << /ca 0 >> /G1 << /ca 1 >> >> >>"
+                    .into();
             extra.push(b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 4000 4000] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 1 1] /N 1 >> /Extend [true true] >>".to_vec());
-            *content = b"/S sh\n".repeat(400);
+            *content = b"/G0 gs\n".to_vec();
+            content.extend(b"/S sh\n".repeat(64));
+            content.extend(b"/G1 gs /S sh\n");
         }
         "many-fonts" => {
             let mut names = Vec::new();
