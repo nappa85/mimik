@@ -151,7 +151,8 @@ exactly fds 0, 1 and 2:
       PNGs are fully decoded through IEND with no trailing bytes; worker images require
       RGB, 8-bit samples. Import and worker readers share the validator.
     - render `stats`: `n` (same page), `chars` and `unmapped` (0–10⁶, `unmapped` ≤ `chars`),
-      `image_area` (0–1, a fraction of the page), `fonts_substituted` (at most 8 names of 64
+      `image_area` (0–1, a fraction of the page covered by images and shadings together),
+      `shading_area` (0–1, the part of it covered by shadings), `fonts_substituted` (at most 8 names of 64
       bytes, so even worst-case JSON escapes fit the 4 KiB frame), `fonts_skipped`
       (0–10,000 malformed entries), `incomplete` (diagnostic scan budget exhausted or
       malformed resources), `dropped_lines` (0–10⁶ zero-area/clipped-away lines).
@@ -258,7 +259,13 @@ files, and per-file versus total quotas.
   - the PNG at 150 dpi, scaled down to fit 4,096 × 8,192 and 12 MP, with fixed deflate
     settings. A PNG over 12 MiB fails that page as "too large".
   - the text-layer statistics: characters, characters without a Unicode mapping, the area
-    covered by images, and the substituted fonts.
+    covered by images and shadings together and by shadings alone, and the substituted fonts.
+    The image and shading boxes come from a recording device that runs the page contents only,
+    like the text page (annotations and widgets are not counted), and keeps no pixels (clipped by
+    the scissor and the page box, paints below half opacity skipped, at most 20,000 boxes), not
+    from the text page, which is built without `PRESERVE_IMAGES`: an image or shading painted
+    between two text runs on one baseline no longer starts a new line, so such runs can merge
+    into one line with a space (as the words stage already does).
   - the page's structured-text lines with boxes: at most 20,000 lines and 4 KiB per line, with
     the 8 MiB per-page byte limit as the one that binds.
   Deadline: 30 s per page.

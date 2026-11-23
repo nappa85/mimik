@@ -1922,6 +1922,7 @@ fn load_pages(db: &Connection, id: &str) -> Result<Vec<PageModel>, AppError> {
                     chars: 0,
                     unmapped: 0,
                     image_area: 0.,
+                    shading_area: 0.0,
                     fonts_substituted: Vec::new(),
                     fonts_skipped: 0,
                     incomplete: false,

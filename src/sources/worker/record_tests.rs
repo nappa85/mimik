@@ -40,6 +40,7 @@ fn maximum_stats_fit_small_frame() {
     p.stats.fonts_skipped = 10000;
     p.stats.dropped_lines = 1_000_000;
     p.stats.image_area = 0.123_456_789_123_456_78;
+    p.stats.shading_area = 0.123_456_789_123_456_78;
     p.stats.fonts_substituted = vec!["\u{1}".repeat(64); FONT_LIMIT];
     let bytes = json(&p.stats).unwrap();
     assert!(
@@ -257,6 +258,7 @@ fn rendered(n: u32) -> RenderedPage {
             chars: 1,
             unmapped: 0,
             image_area: 0.0,
+            shading_area: 0.0,
             fonts_substituted: vec![],
             fonts_skipped: 0,
             incomplete: false,
@@ -368,7 +370,7 @@ fn hostile_framing_order_and_completeness() {
 
 #[test]
 fn hostile_image_stats_and_text_values() {
-    for invalid in 0..10 {
+    for invalid in 0..11 {
         let mut p = rendered(1);
         match invalid {
             0 => p.width_px += 1,
@@ -382,6 +384,7 @@ fn hostile_image_stats_and_text_values() {
             6 => p.lines[0].bounds[2] = 11.0,
             7 => p.lines[0].bounds[2] = f64::NAN,
             8 => p.lines[0].text = "a".repeat(4097),
+            10 => p.stats.shading_area = 1.1,
             _ => p.lines = vec![p.lines[0].clone(); 20_001],
         }
         let mut wire = Vec::new();

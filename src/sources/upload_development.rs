@@ -97,6 +97,7 @@ impl Worker for Synthetic {
                     chars: 26,
                     unmapped: 0,
                     image_area: 0.0,
+                    shading_area: 0.0,
                     fonts_substituted: vec![],
                     fonts_skipped: 0,
                     incomplete: false,

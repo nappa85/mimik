@@ -5,14 +5,16 @@ use super::{
     records::{self, Document, MAX_PAGES, PageWords, Stats, TextLine, Word},
 };
 use mupdf::{
-    Colorspace, Device, Matrix, Pixmap, TextCharFlags, TextPageFlags,
+    Colorspace, Device, Matrix, NativeDevice, Pixmap, TextCharFlags, TextPageFlags,
     pdf::{PdfDocument, PdfObject},
 };
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
+    rc::Rc,
 };
 
 /// Input is opened only in the worker; callers must not use this API in the server.
@@ -521,38 +523,160 @@ fn clipped(bounds: mupdf::Rect, info: &Page, correction: &Matrix) -> [f64; 4] {
         b[3].min(info.height),
     ]
 }
+/// The most image and shading paints one page may record (the old text-page block cap).
+const MAX_PAINTS: usize = 20_000;
+
+/// Rectangles of a page's image and shading paints, recorded without keeping any pixels.
+///
+/// The text page used to learn them from image blocks (`PRESERVE_IMAGES`), and the stext device
+/// rasterised every shading paint into a pixmap it kept until the text page was dropped. This
+/// device applies the same rules to the paint callbacks only: an image or shading with alpha of
+/// at least one half counts, as its box (the unit square through the matrix, or `MuPDF`'s
+/// `fz_bound_shade`) clipped by the current scissor and the page box (`stext-device.c`
+/// `fz_stext_fill_image` and `fz_stext_fill_shade`). Tiling patterns and soft masks keep the
+/// stext device's behaviour: the default `begin_tile` makes `MuPDF` run a tile's content once, and
+/// the mask content is run like any other.
+///
+/// Callbacks cannot return an error or stop the run, and a panic across `extern "C"` aborts the
+/// worker, so the first failure is latched in `error`, later events are ignored, and nothing
+/// here indexes or can overflow. After a latched error the run continues to the end of the page
+/// (no cookie abort: `Cookie::abort` needs `&mut` while `run_with_cookie` borrows the cookie);
+/// the stage deadline bounds it. The device runs the page contents only, like the text page
+/// (`fz_new_stext_page_from_page` runs `fz_run_page_contents`): annotations and widgets are not
+/// painted.
+struct PaintRecorder {
+    page: mupdf::Rect,
+    /// Boxes of images and shadings together.
+    boxes: Vec<mupdf::Rect>,
+    /// Boxes of shadings alone (also in `boxes`).
+    shadings: Vec<mupdf::Rect>,
+    error: Option<Error>,
+}
+
+impl PaintRecorder {
+    fn record(&mut self, bounds: mupdf::Rect, scissor: mupdf::Rect, shading: bool) {
+        let clip = bounds.intersect(&scissor).intersect(&self.page);
+        if clip.is_empty() {
+            return;
+        }
+        if self.boxes.len() >= MAX_PAINTS {
+            self.error = Some(Error::TooLarge);
+            return;
+        }
+        self.boxes.push(clip);
+        if shading {
+            self.shadings.push(clip);
+        }
+    }
+
+    fn image(&mut self, cmt: &Matrix, alpha: f32, scissor: mupdf::Rect) {
+        if self.error.is_none() && alpha >= 0.5 {
+            let unit = mupdf::Rect::new(0.0, 0.0, 1.0, 1.0);
+            self.record(unit.transform(cmt), scissor, false);
+        }
+    }
+}
+
+impl NativeDevice for PaintRecorder {
+    fn fill_image_in_scissor(
+        &mut self,
+        _img: &mupdf::Image,
+        cmt: Matrix,
+        alpha: f32,
+        _cp: mupdf::ColorParams,
+        scissor: mupdf::Rect,
+    ) {
+        self.image(&cmt, alpha, scissor);
+    }
+
+    fn fill_image_mask_in_scissor(
+        &mut self,
+        _img: &mupdf::Image,
+        cmt: Matrix,
+        _color_space: &Colorspace,
+        _color: &[f32],
+        alpha: f32,
+        _cp: mupdf::ColorParams,
+        scissor: mupdf::Rect,
+    ) {
+        self.image(&cmt, alpha, scissor);
+    }
+
+    fn fill_shade_in_scissor(
+        &mut self,
+        shade: &mupdf::Shade,
+        cmt: Matrix,
+        alpha: f32,
+        _cp: mupdf::ColorParams,
+        scissor: mupdf::Rect,
+    ) {
+        if self.error.is_none() && alpha >= 0.5 {
+            match shade.bounds(&cmt) {
+                Ok(bounds) => self.record(bounds, scissor, true),
+                Err(_) => self.error = Some(Error::Unreadable),
+            }
+        }
+    }
+}
+
+/// Image and shading boxes of one page, clipped to it and mapped by `correction`.
+struct PaintBoxes {
+    images: Vec<[f64; 4]>,
+    shadings: Vec<[f64; 4]>,
+}
+
+fn paint_boxes(
+    page: &mupdf::pdf::PdfPage,
+    info: &Page,
+    correction: &Matrix,
+) -> Result<PaintBoxes, Error> {
+    let recorder = Rc::new(RefCell::new(PaintRecorder {
+        page: page.bounds()?,
+        boxes: Vec::new(),
+        shadings: Vec::new(),
+        error: None,
+    }));
+    let device = Device::from_native(Rc::clone(&recorder))?;
+    let run = page.run_contents(&device, &Matrix::IDENTITY);
+    drop(device);
+    let mut recorder = recorder.borrow_mut();
+    if let Some(error) = recorder.error.take() {
+        return Err(error);
+    }
+    run?;
+    let convert = |boxes: Vec<mupdf::Rect>| -> Vec<[f64; 4]> {
+        boxes
+            .into_iter()
+            .map(|b| clipped(b, info, correction))
+            .filter(|b| b[0] < b[2] && b[1] < b[3])
+            .collect()
+    };
+    Ok(PaintBoxes {
+        images: convert(std::mem::take(&mut recorder.boxes)),
+        shadings: convert(std::mem::take(&mut recorder.shadings)),
+    })
+}
+
 fn text(
     page: &mupdf::pdf::PdfPage,
     info: &Page,
     correction: &Matrix,
 ) -> Result<(Stats, Vec<TextLine>), Error> {
-    let text = page.to_text_page(
-        TextPageFlags::CLIP
-            | TextPageFlags::PRESERVE_IMAGES
-            | TextPageFlags::USE_CID_FOR_UNKNOWN_UNICODE,
-    )?;
+    let paints = paint_boxes(page, info, correction)?;
+    let text = page.to_text_page(WORDS_FLAGS)?;
     let mut stats = Stats {
         n: info.n,
         chars: 0,
         unmapped: 0,
         image_area: 0.0,
+        shading_area: 0.0,
         fonts_substituted: Vec::new(),
         fonts_skipped: 0,
         incomplete: false,
         dropped_lines: 0,
     };
     let mut lines = Vec::new();
-    let mut images = Vec::new();
     for block in text.blocks() {
-        if block.ctm().is_some() {
-            let b = clipped(block.bounds(), info, correction);
-            if images.len() == 20_000 {
-                return Err(Error::TooLarge);
-            }
-            if b[0] < b[2] && b[1] < b[3] {
-                images.push(b);
-            }
-        }
         for line in block.lines() {
             if lines.len() == 20_000 {
                 return Err(Error::TooLarge);
@@ -591,8 +715,9 @@ fn text(
             }
         }
     }
-    stats.image_area =
-        (geometry::image_coverage(&images) / (info.width * info.height)).clamp(0.0, 1.0);
+    let page_area = info.width * info.height;
+    stats.image_area = (geometry::image_coverage(&paints.images) / page_area).clamp(0.0, 1.0);
+    stats.shading_area = (geometry::image_coverage(&paints.shadings) / page_area).clamp(0.0, 1.0);
     let mut scan = FontScan {
         remaining: 10000,
         ..FontScan::default()
@@ -647,7 +772,7 @@ fn push_word(
     Ok(())
 }
 
-/// The text-page flags of the words stage. No `PRESERVE_IMAGES`: words never read image blocks,
+/// The text-page flags of the words and render stages. No `PRESERVE_IMAGES`: neither reads image blocks,
 /// and the stext device keeps one per image or shading paint, so a hostile page would grow
 /// memory with its operator count.
 pub(super) const WORDS_FLAGS: TextPageFlags =

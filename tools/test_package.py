@@ -156,7 +156,7 @@ class PackageTests(unittest.TestCase):
         ci = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text()
         lines = [line.strip() for line in ci.splitlines()]
         steps = [
-            lines.index("cargo package --locked --allow-dirty"),
+            lines.index("cargo package --locked --allow-dirty --no-verify"),
             lines.index("python tools/vendored_fork.py package target/package/mimik-0.1.0.crate"),
             lines.index("python tools/verify_source_package.py target/package/mimik-0.1.0.crate"),
         ]

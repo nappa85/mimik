@@ -100,6 +100,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   API is identical to the vendored fork. No release yet (latest v0.8.0, checked 2026-11-12). When
   a release ships: pin it from crates.io, drop `vendor/mupdf`, the `[patch.crates-io]` entry and
   the `tools/vendored_fork.py` packaging steps, re-check `mupdf-sys`/MuPDF notices, update DEP-29.
+  Second fork branch `mimik/scissor-shade-bounds` (on 1adf801; `Shade::bounds` and the scissor
+  passed to `NativeDevice` image/shading callbacks): the vendored copy carries it until its
+  change is released upstream; the owner opens the upstream PR (rebased onto upstream main).
+  When the pin returns to crates.io, also remove CI's `cargo package --no-verify` (DEP-29-FORK).
 
 - **SRC-15 follow-ups:** done 2026-11-21, so route A's 4c can build on the new staging.
   Optional: confirm that the
@@ -148,11 +152,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Other next actions
 
-- Render-stage image blocks (review 2026-11-20, Major): `text()` in
-  `src/sources/worker/operations.rs` keeps `PRESERVE_IMAGES`, so a page of a few hundred plain
-  full-page `sh` operators (no tiling pattern) can rasterise within the deadline and then retain
-  N x mediabox RGBA pixmaps. Add a `shading-only` hostile-corpus case and either cap image blocks
-  before allocation or get image bounds without `PRESERVE_IMAGES`.
 - Browser smoke CSP coverage (review 2026-11-17, Minor): the signed-in scenario checks for CSP
   violations only on the page each Owner stage ends on (the probe resets per page), and
   `tools/lan_client.py` installs no probe; record violations across navigations (a
