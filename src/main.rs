@@ -283,7 +283,7 @@ enum Command {
         #[arg(long)]
         legacy_edition: String,
     },
-    /// List stable identities and implemented adapter status as JSON.
+    /// List stable identities and sheet availability as JSON.
     ListRulesets,
     /// Import a prepared source bundle, always unreviewed.
     ImportSource {

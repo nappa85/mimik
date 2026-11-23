@@ -29,9 +29,7 @@ key or internet access is needed; the assistant and its model downloads are opti
     model. Saved runtime sheet pages load one script module under a strict CSP; every save,
     Undo, switch, quick-add, row action, catalogue warning, Browse and "Which one?" also works
     without JavaScript. Name suggestions and the assistant's readings and reminders need it;
-  - native sheets for the Italian 2025 MÖRK BORG core rules, once that exact source is
-    registered;
-  - on both, a "Not validated" flag in the header of any saved revision whose checks did not
+  - a "Not validated" flag in the header of any saved revision whose checks did not
     all pass or that no checks cover (it never blocks a save).
 - **Owner materials.** The Owner registers games and editions at `/admin/rulesets`, and reviews
   imported source pages against the original page images at `/admin/materials`. Source import,
@@ -168,7 +166,7 @@ succeeded for the same revision:
   member allowlist, vendored dependency sources and these archives with checksums (`llama/`
 holding exactly the pinned files);
 - **artifact-smoke:** the unpacked binary from these archives, run from an isolated directory:
-  startup, assets, accounts, campaigns, native and runtime sheets, formulas, list editing,
+  startup, assets, accounts, campaigns, runtime sheets, formulas, list editing,
   catalogues, assisted entry, rejections, restart and persistence, with synthetic inputs; then
   an offline rebuild of the corresponding source with no dependency cache;
 - **browser-smoke:** the same binary in offline Chromium at 1280×720 and 390×844: forms,

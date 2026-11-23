@@ -492,10 +492,10 @@ async fn pin_of(setup: &Setup) -> String {
 }
 
 #[tokio::test]
-async fn native_unsupported_and_corrupt_pins_are_the_uniform_403_on_suggest_and_which() {
+async fn unsupported_and_corrupt_pins_are_the_uniform_403_on_suggest_and_which() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    for variant in ["native", "unsupported", "corrupt"] {
+    for variant in ["unsupported", "corrupt"] {
         let setup = world(None, &[("Sword", None)]).await;
         forget_facts();
         assert_eq!(
@@ -505,10 +505,6 @@ async fn native_unsupported_and_corrupt_pins_are_the_uniform_403_on_suggest_and_
         );
         let pin = pin_of(&setup).await;
         match variant {
-            "native" => {
-                let native = r#"{"type":"native","adapter":"mork-borg-it-2025","schema":1,"calculation_version":1}"#;
-                tamper(&setup, native.to_owned(), "native").await;
-            }
             "unsupported" => {
                 tamper(
                     &setup,

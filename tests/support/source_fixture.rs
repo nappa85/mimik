@@ -50,23 +50,25 @@ pub fn fixture(root: &Path) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Er
     Ok((bundle, pdf))
 }
 
-/// Generate separate lookup-only and ready-adapter sources with independent identities.
+/// Generate separate lookup-only, material-review and unknown-game sources with independent identities.
 ///
 /// # Errors
 /// Returns fixture/JSON/filesystem failures.
 pub fn fixture_pair(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let (lookup, _) = fixture(root)?;
-    let ready = root.join("adapter-bundle");
-    fs::create_dir(&ready)?;
+    // A second, independent reading of the same pages for the Owner's material-review smoke:
+    // a version-1 bundle that stays unfinalized and unresolved.
+    let material = root.join("material-bundle");
+    fs::create_dir(&material)?;
     for name in ["source.json", "page-1.png"] {
-        fs::copy(lookup.join(name), ready.join(name))?;
+        fs::copy(lookup.join(name), material.join(name))?;
     }
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(lookup.join("bundle.json"))?)?;
-    manifest["source_id"] = json!("synthetic-mork-adapter");
-    manifest["title"] = json!("Synthetic MÖRK BORG adapter materials");
-    manifest["edition"] = json!(mimik::mork_borg::EDITION);
-    fs::write(ready.join("bundle.json"), serde_json::to_vec(&manifest)?)?;
+    manifest["source_id"] = json!("synthetic-material-review");
+    manifest["title"] = json!("Synthetic material-review source");
+    manifest["edition"] = json!("Material review edition");
+    fs::write(material.join("bundle.json"), serde_json::to_vec(&manifest)?)?;
     let unknown = root.join("unknown-bundle");
     fs::create_dir(&unknown)?;
     for name in ["source.json", "page-1.png"] {

@@ -4,7 +4,7 @@
 //! citations or controls; long text keeps its line breaks (`white-space: pre-wrap`).
 //!
 //! Errors explain themselves (plan §19): a malformed address answers 400 before any lookup;
-//! every refusal (unreadable or unknown sheet, native or unsupported pin, unlinked, unknown,
+//! every refusal (unreadable or unknown sheet, unsupported pin, unlinked, unknown,
 //! other games' or unsealed catalogue, revoked grant or session) answers one uniform 403 page
 //! whose only variable is the sheet link taken from the address; an entry key or entry type
 //! missing from a catalogue the reader may browse answers 404.

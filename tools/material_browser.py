@@ -1,4 +1,4 @@
-"""Native Owner material review acceptance, shared by loopback and LAN/proxy gates."""
+"""Owner material review acceptance, shared by loopback and LAN/proxy gates."""
 
 import re
 import time
@@ -8,9 +8,9 @@ from smoke_release import require
 
 
 def run_material_browser(page, origin):
-    """Use only generated native-adapter evidence, never published runtime mappings."""
+    """Use only the generated material-review source, never published runtime mappings."""
     page.goto(origin + "/admin/materials")
-    article = page.locator("article").filter(has_text="mork-borg / it-2025").first
+    article = page.locator("article").filter(has_text="Synthetic material-review source").first
     article.get_by_role("link").click()
     page.get_by_role("link", name="PDF page", exact=False).first.click()
     path = urlsplit(page.url).path

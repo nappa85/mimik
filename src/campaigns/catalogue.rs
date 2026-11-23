@@ -2,7 +2,7 @@
 //!
 //! A catalogue is reached only through a sheet the reader may read: its immutable runtime pin
 //! must link the catalogue by id, within the pin's own game and edition, and the latest sealed
-//! version is read. Native pins, unsupported pins, unlinked, unknown or unsealed catalogues and
+//! version is read. Unsupported pins, unlinked, unknown or unsealed catalogues and
 //! unreadable sheets all answer `NotFound`, which the routes render as one uniform refusal, so
 //! they cannot be used to probe what exists or which check failed. Only once every check has
 //! passed (the reader is inside a catalogue it may browse) does an unknown entry key or entry
@@ -368,7 +368,7 @@ impl Store {
                         schema: 1,
                         ..
                     } if snapshots::supported(&raw.identity) => private_pin::load(&tx, version_id)?,
-                    _ => return Err(AppError::NotFound),
+                    Pin::Runtime { .. } => return Err(AppError::NotFound),
                 };
                 first.recheck(&tx)?;
                 tx.commit()?;

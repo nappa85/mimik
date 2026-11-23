@@ -123,9 +123,9 @@ async fn ruleset_router_owner_matrix_and_escaped_listing() {
             StatusCode::FORBIDDEN
         );
     }
-    assert_eq!(counts(&store).await, [1, 1, 1, 0, 0]);
+    assert_eq!(counts(&store).await, [0, 0, 0, 0, 0], "no game is seeded");
     let page = text(router_request(&app, &auth[0], "/admin/rulesets", None).await).await;
-    assert!(page.contains("MÖRK BORG — IT 2025"), "{page}");
+    assert!(!page.contains("MÖRK BORG"), "{page}");
     assert!(page.contains(&"a".repeat(64)));
     let hostile = ruleset_form(
         "script-game",
@@ -226,7 +226,7 @@ async fn ruleset_missing_wrong_revoked_csrf_and_foreign_origin_do_not_mutate() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
-    assert_eq!(counts(&store).await, [1, 1, 1, 0, 0]);
+    assert_eq!(counts(&store).await, [0, 0, 0, 0, 0]);
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn ruleset_events_are_idempotent_append_only_and_attributed_only_for_brows
         .register_ruleset(ruleset("web-game", "Web game", "first", "First edition"))
         .await
         .unwrap();
-    assert_eq!(counts(&store).await, [2, 2, 1, 1, 1]);
+    assert_eq!(counts(&store).await, [1, 1, 0, 1, 1]);
     let unchanged = store
         .owner_register_ruleset(
             auth[0].clone(),
@@ -258,7 +258,7 @@ async fn ruleset_events_are_idempotent_append_only_and_attributed_only_for_brows
         .register_ruleset(ruleset("web-game", "Web game", "second", "Second edition"))
         .await
         .unwrap();
-    assert_eq!(counts(&store).await, [2, 3, 1, 2, 1]);
+    assert_eq!(counts(&store).await, [1, 2, 0, 2, 1]);
     let alias = alias_form("web-game", "first", "Old first label");
     for _ in 0..2 {
         let response = router_request(
@@ -270,7 +270,7 @@ async fn ruleset_events_are_idempotent_append_only_and_attributed_only_for_brows
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
-    assert_eq!(counts(&store).await, [2, 3, 2, 3, 2]);
+    assert_eq!(counts(&store).await, [1, 2, 1, 3, 2]);
     store
         .run(|db| {
             let rows = db
@@ -314,7 +314,7 @@ async fn ruleset_events_are_idempotent_append_only_and_attributed_only_for_brows
 }
 
 #[tokio::test]
-async fn ruleset_collisions_and_native_alias_retain_escaped_input_without_writes() {
+async fn ruleset_collisions_and_unregistered_alias_retain_escaped_input_without_writes() {
     let _lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
     store
@@ -359,8 +359,12 @@ async fn ruleset_collisions_and_native_alias_retain_escaped_input_without_writes
     }
     for (form, retained) in [
         (
-            alias_form("mork-borg", "it-2025", "<script>native()</script>"),
-            "native()",
+            alias_form(
+                "unregistered-game",
+                "first",
+                "<script>unregistered()</script>",
+            ),
+            "unregistered()",
         ),
         (
             alias_form("kept-game", "first", "Second"),
@@ -423,15 +427,15 @@ async fn ruleset_listing_composite_cursor_covers_more_than_fifty_editions() {
     assert_eq!(
         next,
         RulesetKey {
-            game_id: "mork-borg".into(),
-            edition_id: "it-2025".into()
+            game_id: "zz-game".into(),
+            edition_id: "e00".into()
         }
     );
     let second = store
         .owner_rulesets(auth[0].clone(), Some(next))
         .await
         .unwrap();
-    assert_eq!(second.rows.len(), 11);
+    assert_eq!(second.rows.len(), 10);
     assert_eq!(second.next, None);
     let mut seen = first
         .rows
@@ -441,18 +445,18 @@ async fn ruleset_listing_composite_cursor_covers_more_than_fifty_editions() {
         .collect::<Vec<_>>();
     let total = seen.len();
     seen.dedup();
-    assert_eq!((total, seen.len()), (61, 61));
+    assert_eq!((total, seen.len()), (60, 60));
     let app = crate::auth::app(store.clone()).await.unwrap();
     let page = text(router_request(&app, &auth[0], "/admin/rulesets", None).await).await;
     assert!(
-        page.contains("/admin/rulesets?after_game=mork-borg&amp;after_edition=it-2025"),
+        page.contains("/admin/rulesets?after_game=zz-game&amp;after_edition=e00"),
         "{page}"
     );
     let page = text(
         router_request(
             &app,
             &auth[0],
-            "/admin/rulesets?after_game=mork-borg&after_edition=it-2025",
+            "/admin/rulesets?after_game=zz-game&after_edition=e00",
             None,
         )
         .await,
@@ -460,10 +464,10 @@ async fn ruleset_listing_composite_cursor_covers_more_than_fifty_editions() {
     .await;
     assert!(page.contains("zz-game") && !page.contains("aa-game"));
     for query in [
-        "after_game=mork-borg",
-        "after_edition=it-2025",
-        "after_game=Bad&after_edition=it-2025",
-        "after_game=mork-borg&after_edition=",
+        "after_game=zz-game",
+        "after_edition=e00",
+        "after_game=Bad&after_edition=e00",
+        "after_game=zz-game&after_edition=",
         "after=1",
     ] {
         assert_ne!(
@@ -541,7 +545,7 @@ async fn ruleset_queued_expiry_and_revocation_reject_registration() {
             release.send(()).unwrap();
             lock.await.unwrap().unwrap();
             assert!(matches!(write.await.unwrap(), Err(AppError::NotFound)));
-            assert_eq!(counts(&store).await, [1, 1, 1, 0, 0]);
+            assert_eq!(counts(&store).await, [0, 0, 0, 0, 0]);
         }
     }
 }
@@ -567,7 +571,7 @@ async fn ruleset_audit_failure_and_final_recheck_roll_back_registration() {
             .await
             .is_err()
     );
-    assert_eq!(counts(&store).await, [1, 1, 1, 0, 0]);
+    assert_eq!(counts(&store).await, [0, 0, 0, 0, 0]);
     store
         .run(move |db| {
             db.execute_batch("DROP TRIGGER registry_audit_fault;")?;
@@ -595,7 +599,7 @@ async fn ruleset_audit_failure_and_final_recheck_roll_back_registration() {
             .await,
         Err(AppError::NotFound)
     ));
-    assert_eq!(counts(&store).await, [1, 1, 1, 0, 0]);
+    assert_eq!(counts(&store).await, [0, 0, 0, 0, 0]);
 }
 
 #[tokio::test]
@@ -640,7 +644,7 @@ async fn populated_schema15_upgrade_preserves_registry_and_adds_unattributed_his
         .run(|db| crate::store::register_auth_clock(db, Arc::new(|| Ok(100))))
         .await
         .unwrap();
-    assert_eq!(counts(&reopened).await, [2, 2, 2, 0, 0]);
+    assert_eq!(counts(&reopened).await, [1, 1, 1, 0, 0]);
     let listing = reopened
         .owner_rulesets(auth[0].clone(), None)
         .await
@@ -671,7 +675,7 @@ async fn populated_schema15_upgrade_preserves_registry_and_adds_unattributed_his
             .await
             .unwrap()
     );
-    assert_eq!(counts(&reopened).await, [2, 3, 2, 1, 1]);
+    assert_eq!(counts(&reopened).await, [1, 2, 1, 1, 1]);
     reopened
         .run(|db| {
             assert_eq!(
@@ -718,7 +722,7 @@ async fn ruleset_web_attribution_rejects_non_latest_event_even_for_valid_owner_r
         })
         .await
         .unwrap();
-    assert_eq!(counts(&store).await, [2, 3, 1, 2, 1]);
+    assert_eq!(counts(&store).await, [1, 2, 0, 2, 1]);
 }
 
 #[tokio::test]

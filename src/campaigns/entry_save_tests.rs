@@ -1,5 +1,5 @@
 //! Slice 1.1 connected saves (assisted sheet plan §5): lenient number entry through the real
-//! router on the existing full-form save, with native sheets kept strict.
+//! router on the existing full-form save.
 use super::formula_tests::{Setup, setup};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -225,41 +225,12 @@ async fn unkeepable_entry_is_still_422_with_the_draft() {
     }
 }
 
-/// Native sheets keep their strict path (`native_draft(...).validate()`), and protocol
-/// integers keep the strict `values::integer`.
+/// Protocol integers keep the strict `values::integer`: a sum is no revision.
 #[tokio::test]
-async fn native_sheets_and_protocol_integers_stay_strict() {
+async fn protocol_integers_stay_strict() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&assist()).await;
-    let campaign = setup
-        .store
-        .create_campaign(
-            setup.auth[1].clone(),
-            "Native".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    let mut native = super::native(campaign, 2);
-    native.sheet_id = 1;
-    super::insert_native(&setup.store, setup.auth[1].clone(), native).await;
-    let mut native_form = super::native_form();
-    let (_, before) = saved(&setup, 1).await;
-    for (key, value) in &mut native_form {
-        match key.as_str() {
-            "revision" => *value = "1".into(),
-            "hp" => *value = "84 -15".into(),
-            _ => {}
-        }
-    }
-    assert_eq!(
-        setup.post("/private-sheets/1", native_form).await.0,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "native HP sum refused"
-    );
-    assert_eq!(saved(&setup, 1).await, (1, before), "nothing saved");
     for raw in ["+1", "84 -15", "84-15", "01", " 1"] {
         assert!(super::values::integer(raw).is_err(), "{raw:?}");
     }
@@ -267,20 +238,20 @@ async fn native_sheets_and_protocol_integers_stay_strict() {
     created(&setup).await;
     let mut edit = form(1, "84", "-1", "", &[("r1-1", "Rope", "1", "1")]);
     edit[1].1 = "0+1".into();
-    let (status, _) = setup.post("/private-sheets/2", edit).await;
+    let (status, _) = setup.post("/private-sheets/1", edit).await;
     assert_ne!(status, StatusCode::SEE_OTHER, "a revision sum is refused");
-    assert_eq!(saved(&setup, 2).await.0, 1, "nothing saved");
+    assert_eq!(saved(&setup, 1).await.0, 1, "nothing saved");
 }
 
 /// Runtime integer inputs have no `inputmode` (the iOS numeric keypad hides minus and
-/// space); native inputs keep `inputmode="numeric"`.
+/// space).
 #[tokio::test]
 async fn runtime_integer_inputs_have_no_numeric_inputmode() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let setup = setup(&assist()).await;
     created(&setup).await;
-    // By name on the full forms (create, native); by DOM id in the unit forms (slice 1.5a).
+    // By name on the full create form; by DOM id in the unit forms (slice 1.5a).
     let input = |html: &str, name: &str| {
         let page = scraper::Html::parse_document(html);
         let selector = if name.starts_with('#') {
@@ -311,27 +282,5 @@ async fn runtime_integer_inputs_have_no_numeric_inputmode() {
                 assert_eq!(input(&html, name), None, "{path} {name}");
             }
         }
-    }
-    let campaign = setup
-        .store
-        .create_campaign(
-            setup.auth[1].clone(),
-            "Native".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    let mut native = super::native(campaign, 2);
-    native.sheet_id = 2;
-    super::insert_native(&setup.store, setup.auth[1].clone(), native).await;
-    let (status, html) = setup.get("/private-sheets/2").await;
-    assert_eq!(status, StatusCode::OK);
-    for name in ["hp", "max_hp", "strength", "omens", "silver"] {
-        assert_eq!(
-            input(&html, name).as_deref(),
-            Some("numeric"),
-            "native {name}"
-        );
     }
 }

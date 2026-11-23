@@ -51,7 +51,7 @@ async fn invalid_records_and_edition_changes_do_not_modify_storage() {
         Err(mimik::AppError::Invalid(_))
     ));
     let mut unknown = input();
-    unknown.system_id = "invented".into();
+    unknown.system_id = "Not a slug!".into();
     assert!(matches!(
         store.create(unknown).await,
         Err(mimik::AppError::Invalid(_))
@@ -113,7 +113,7 @@ async fn web_flow_escapes_input_and_returns_htmx_fragment_with_fresh_revision() 
     )
     .unwrap();
     assert!(!html.contains("<script>bad</script>"));
-    assert!(html.contains("Edition adapter pending"));
+    assert!(html.contains("Legacy record"));
     assert!(html.contains("hx-post="));
     let response = router
         .clone()
@@ -172,9 +172,10 @@ async fn missing_characters_and_cross_site_writes_are_rejected() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    store.create(input()).await.unwrap();
     let mut request = post(
-        "/characters",
-        "name=Elara&system_id=dnd&edition=Example&notes=",
+        "/characters/1",
+        "name=Elara&system_id=dnd&edition=Example&notes=changed&revision=1",
         false,
     );
     request
@@ -185,7 +186,10 @@ async fn missing_characters_and_cross_site_writes_are_rejected() {
         .insert("host", "127.0.0.1:3000".parse().unwrap());
     let response = router.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(store.list().await.unwrap().is_empty());
+    assert_eq!(
+        store.get(1).await.unwrap().input.notes,
+        "A character record, not validated game stats."
+    );
 }
 
 #[tokio::test]

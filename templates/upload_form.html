@@ -5,7 +5,7 @@
 {% if !reason.is_empty() %}<section class="panel"><h2>Upload unavailable</h2><p>{{ reason }}</p><p>{{ remedy }}</p></section>{% else %}
 <form method="post" action="/admin/materials/uploads" enctype="multipart/form-data" data-form="upload">
 <input type="hidden" name="csrf" value="{{ csrf }}">
-<label>System id<input name="system" required maxlength="100" placeholder="mork-borg"></label>
+<label>System id<input name="system" required maxlength="100" placeholder="game-id"></label>
 <label>Edition<input name="edition" required maxlength="100"></label>
 <label>Language<input name="language" required maxlength="30" placeholder="en"></label>
 <label>PDF<input type="file" name="file" accept="application/pdf,.pdf" required></label>

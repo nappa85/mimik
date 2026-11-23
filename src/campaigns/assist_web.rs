@@ -183,7 +183,7 @@ fn plan(
     action: Action,
     earlier: Option<&PrivateSnapshot>,
 ) -> Result<(String, Vec<Stored>), Refusal> {
-    // Native and unsupported pins have no notes.
+    // Unsupported pins have no notes.
     let pin = view.immutable.as_ref().ok_or(Refusal::BadRequest)?;
     let definition = pin.definition();
     let live = view.snapshot.revision;

@@ -2,6 +2,7 @@
 
 import argparse
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,17 @@ from smoke_release import (
     stop,
     wait_until,
 )
+
+LEGACY_NAME = "LongCharacterName" * 5
+
+
+def seed_legacy_character(directory):
+    """The legacy record the prototype scenario opens: nothing creates one any more."""
+    with sqlite3.connect(directory / "smoke.sqlite3") as db:
+        db.execute(
+            "INSERT INTO characters(name,system_id,edition,notes) VALUES(?,?,?,?)",
+            (LEGACY_NAME, "dnd", "Example edition", ""),
+        )
 
 
 def prepare_browser_registry(binary, directory, fixture):
@@ -106,12 +118,8 @@ def run_scenario(browser, viewport):
             ),
             "Logo alpha or transparent CSS background lost",
         )
-        name = "LongCharacterName" * 5
-        page.locator("#name").fill(name)
-        page.locator("#adapter").select_option("mork-borg-it-2025")
-        page.get_by_role("button", name="Create character", exact=True).click()
-        page.wait_for_url("**/characters/*/mork-borg")
-        page.get_by_role("link", name="Identity and notes", exact=False).click()
+        # A legacy record seeded before the start (nothing creates one any more).
+        page.get_by_role("link", name=LEGACY_NAME, exact=True).click()
         character_url = page.url
         notes = "\n".join(["Synthetic long-text line: " + "words " * 20] * 120)
         require(len(notes) < 20_000, "Fixture exceeds valid note size")
@@ -148,148 +156,26 @@ def run_scenario(browser, viewport):
         require(page.locator("#notes").input_value() == notes, "Swap changed saved notes")
         page.reload()
         require(page.locator("#notes").input_value() == notes, "Notes did not persist")
-        page.get_by_role("link", name="Open MÖRK BORG stats and rules").click()
-        page.locator("#strength").fill("-3")
-        page.get_by_text("Original worn tier and carrying count", exact=True).click()
-        page.locator("#worn_armor").fill("3")
-        page.locator("#protection").fill("1")
-        page.locator("#standard_items").fill("6")
-        page.locator("#description").fill("Synthetic description\n" * 80)
-        page.locator("#class_notes").fill("Class notes are not implemented class rules")
-        page.locator("#powers").fill("Power notes")
-        page.locator("#weapon_one").fill("Sword notes")
-        page.locator("#weapon_two").fill("Bow notes")
-        page.locator("#campaign_miseries").fill("0")
-        page.get_by_role("button", name="Save stats and refresh rules").click()
-        expect(page.get_by_role("status")).to_contain_text("Sheet saved")
-        require(page.locator("#weapon_two").input_value() == "Bow notes", "Sheet weapon notes lost")
-        require(
-            page.locator("#campaign_miseries").input_value() == "0",
-            "Explicit zero miseries became unknown",
-        )
-        current_sheet_revision = page.locator('#mork-editor input[name="revision"]').input_value()
-        page.locator("#hp").fill("not-a-number")
-        page.locator("#weapon_one").fill("Uncommitted weapon draft")
-        with page.expect_response(
-            lambda response: response.request.method == "POST"
-            and response.url.endswith("/mork-borg")
-            and response.status == 422
-        ):
-            page.get_by_role("button", name="Save stats and refresh rules").click()
-        expect(page.get_by_role("status")).to_contain_text("Current HP must be an integer")
-        require(
-            page.locator("#hp").input_value() == "not-a-number",
-            "Numeric error draft was not swapped/preserved",
-        )
-        require(
-            page.locator("#weapon_one").input_value() == "Uncommitted weapon draft",
-            "Other draft values lost",
-        )
-        require(
-            page.locator('#mork-editor input[name="revision"]').input_value()
-            == current_sheet_revision,
-            "Error changed expected revision",
-        )
-        page.reload()
-        require(
-            page.locator("#hp").input_value() == "1"
-            and page.locator("#weapon_one").input_value() == "Sword notes",
-            "Invalid save mutated canonical values",
-        )
-        for extra_name in ["unexpected_field", "hp"]:
-            page.locator("#weapon_one").fill("Transport rejection draft")
-            page.locator("#mork-editor form").evaluate(
-                "(form,name)=>{const field=document.createElement('input');field.type='hidden';field.name=name;field.value='4';form.append(field)}",
-                extra_name,
-            )
-            with page.expect_response(
-                lambda response: response.request.method == "POST"
-                and response.url.endswith("/mork-borg")
-                and response.status == 422
-            ):
-                page.get_by_role("button", name="Save stats and refresh rules").click()
-            expect(page.get_by_role("status")).to_contain_text("Submission format invalid")
-            require(
-                page.locator("#mork-editor").count() == 1
-                and page.locator("#weapon_one").input_value() == "Transport rejection draft",
-                "Transport error replaced editor or lost draft",
-            )
-            require(
-                page.locator('#mork-editor input[name="revision"]').input_value()
-                == current_sheet_revision,
-                "Transport error changed revision",
-            )
-            page.reload()
-            require(
-                page.locator("#weapon_one").input_value() == "Sword notes",
-                "Transport rejection mutated data",
-            )
-        for headers, status, message in [
-            ({"origin": "https://example.com"}, 403, ""),
-            ({"sec-fetch-site": "cross-site"}, 403, ""),
-            ({"content-type": "application/json"}, 415, "Submission format invalid"),
-        ]:
-            page.locator("#weapon_one").fill("Rejected origin/content-type draft")
-
-            def change_headers(route, request, overrides=headers):
-                response = route.fetch(headers={**request.headers, **overrides})
-                route.fulfill(response=response)
-
-            page.route("**/mork-borg", change_headers)
-            with page.expect_response(
-                lambda response, expected=status: response.request.method == "POST"
-                and response.url.endswith("/mork-borg")
-                and response.status == expected
-            ):
-                page.get_by_role("button", name="Save stats and refresh rules").click()
-            expect(page.get_by_role("status")).not_to_be_empty()
-            if message:
-                expect(page.get_by_role("status")).to_contain_text(message)
-            require(
-                page.locator("#mork-editor").count() == 1
-                and page.locator("#weapon_one").input_value()
-                == "Rejected origin/content-type draft"
-                and page.locator('#mork-editor input[name="revision"]').input_value()
-                == current_sheet_revision,
-                "403/415 rejection replaced editor, draft, or revision",
-            )
-            page.unroute("**/mork-borg", change_headers)
-            page.reload()
-            require(
-                page.locator("#weapon_one").input_value() == "Sword notes",
-                "403/415 rejection mutated canonical data",
-            )
-        # A second tab changes identity; the original sheet draft must remain stale.
-        stale_revision = page.locator('#mork-editor input[name="revision"]').input_value()
+        # A second tab changes the identity; this tab's save is then stale and keeps its draft.
         other = context.new_page()
         other.goto(character_url)
         other.locator("#name").fill("Updated identity in another tab")
         other.get_by_role("button", name="Save changes", exact=True).click()
         expect(other.get_by_role("status")).to_contain_text("Saved on this device")
         other.close()
-        page.locator("#sheet-name").fill("Stale sheet name draft")
-        with page.expect_response(
-            lambda response: response.request.method == "POST"
-            and response.url.endswith("/mork-borg")
-            and response.status == 409
-        ):
-            page.get_by_role("button", name="Save stats and refresh rules").click()
+        page.locator("#name").fill("Stale identity draft")
+        page.get_by_role("button", name="Save changes", exact=True).click()
         expect(page.get_by_role("status")).to_contain_text("another tab")
         require(
-            page.locator("#sheet-name").input_value() == "Stale sheet name draft",
+            page.locator("#name").input_value() == "Stale identity draft",
             "Conflict name draft lost",
-        )
-        require(
-            page.locator('#mork-editor input[name="revision"]').input_value() == stale_revision,
-            "Conflict silently refreshed stale token",
         )
         page.reload()
         require(
-            page.locator("#sheet-name").input_value() == "Updated identity in another tab",
-            "Stale sheet overwrote name",
+            page.locator("#name").input_value() == "Updated identity in another tab",
+            "Stale identity overwrote name",
         )
-        expect(page.get_by_text("Defense: d20", exact=False)).to_contain_text("DR 16")
-        no_overflow(page, "stats with long name")
+        no_overflow(page, "identity with long name")
         page.goto("http://127.0.0.1:3000/sources")
         expect(page.get_by_text("synthetic-game / first", exact=True)).to_be_visible()
         no_overflow(page, "source list with hash")
@@ -1797,7 +1683,7 @@ def csp_clean(page, consoles, errors):
 def run_workspace_browser(
     browser, page, viewport, binary, directory, collaborator, passwords, versions
 ):
-    """Real campaign/native/runtime forms with an ordinary independent collaborator."""
+    """Real campaign/runtime forms with an ordinary independent collaborator."""
     version, formula_version, list_version, assist_version = versions
 
     def submit(tab, button, status=303):
@@ -1814,7 +1700,9 @@ def run_workspace_browser(
         submit(tab, tab.get_by_role("button", name="Create campaign", exact=True))
         return tab.url
 
-    owner_context = browser.new_context(viewport=viewport)
+    # The collaborator and the early custody flows run without JavaScript: their saves are
+    # the plain redirect-after-post forms (the JavaScript saves are exercised further down).
+    owner_context = browser.new_context(viewport=viewport, java_script_enabled=False)
     owner_context.set_default_timeout(15_000)
     owner_page = owner_context.new_page()
     stage = "ordinary collaborator login"
@@ -1823,18 +1711,24 @@ def run_workspace_browser(
         owner_page.locator('input[name="login"]').fill("table-helper")
         owner_page.locator('input[name="password"]').fill(passwords[0].decode())
         submit(owner_page, owner_page.get_by_role("button", name="Sign in", exact=True))
-        stage = "campaign and native creation"
-        campaign = create_campaign(page, "Browser table campaign", "mork-borg", "it-2025")
-        page.get_by_role("link", name="New native exploration sheet", exact=True).click()
+        early_context = browser.new_context(viewport=viewport, java_script_enabled=False)
+        early_context.set_default_timeout(15_000)
+        early_context.add_cookies(page.context.cookies())
+        main_page, page = page, early_context.new_page()
+        stage = "campaign and sheet creation"
+        campaign = create_campaign(page, "Browser table campaign", "synthetic-game", "first")
+        page.goto(campaign + f"/sheets/new?version={version}")
         page.locator('input[name="name"]').fill("Browser player private")
-        page.locator('textarea[name="description"]').fill("Long private description " * 500)
-        page.locator('input[name="strength"]').fill("-3")
-        page.get_by_text("Original worn tier and carrying count", exact=True).click()
-        page.locator('input[name="standard_items"]').fill("6")
+        page.locator('select[name="null-name"]').select_option("known")
+        page.locator('input[name="value-name"]').fill("Private pinned text")
         submit(page, page.get_by_role("button", name="Save full private sheet", exact=True))
         sheet = page.url
-        require("DR 14" in page.locator("main").inner_text(), "Native private calculations missing")
-        no_overflow(page, "private native sheet")
+        require(
+            "Private pinned text" in page.locator("main").inner_text()
+            or page.locator("#v0").input_value() == "Private pinned text",
+            "Private sheet value missing",
+        )
+        no_overflow(page, "private sheet")
         require(
             owner_page.goto(sheet).status == 403,
             "Collaborator implicitly read another player's sheet",
@@ -1866,18 +1760,17 @@ def run_workspace_browser(
             owner_page.goto(sheet).status == 200, "Explicit Master grant did not provide access"
         )
         stage = "Master edit and stale draft"
-        owner_page.locator('textarea[name="notes"]').fill("Master revision")
-        submit(
-            owner_page, owner_page.get_by_role("button", name="Save full private sheet", exact=True)
-        )
+        owner_page.locator("#meta-name").fill("Master renamed")
+        submit(owner_page, owner_page.locator("#save-meta-name"))
         page.goto(sheet)
-        page.locator('input[name="revision"]').evaluate('(field) => field.value = "1"')
-        page.locator('input[name="name"]').fill("Stale <script>draft</script>")
-        submit(page, page.get_by_role("button", name="Save full private sheet", exact=True), 409)
+        page.locator('form[action$="/meta/name"] input[name="base"]').evaluate(
+            '(field) => field.value = "1"'
+        )
+        page.locator("#meta-name").fill("Stale <script>draft</script>")
+        submit(page, page.locator("#save-meta-name"), 409)
         require(
-            page.locator('input[name="name"]').input_value() == "Stale <script>draft</script>"
-            and page.locator('input[name="revision"]').input_value() == "1",
-            "Browser conflict discarded raw draft or stale token",
+            page.locator("#meta-name").input_value() == "Stale <script>draft</script>",
+            "Browser conflict discarded raw draft",
         )
         no_overflow(page, "private conflict")
         page.goto(campaign)
@@ -1890,8 +1783,10 @@ def run_workspace_browser(
         require(owner_page.goto(sheet).status == 403, "Demotion retained private access")
         owner_page.goto(campaign)
         stage = "personal sheet and departure"
-        owner_page.get_by_role("link", name="New native exploration sheet", exact=True).click()
+        owner_page.goto(campaign + f"/sheets/new?version={version}")
         owner_page.locator('input[name="name"]').fill("Browser collaborator personal")
+        owner_page.locator('select[name="null-name"]').select_option("known")
+        owner_page.locator('input[name="value-name"]').fill("Collaborator text")
         submit(
             owner_page, owner_page.get_by_role("button", name="Save full private sheet", exact=True)
         )
@@ -1904,7 +1799,7 @@ def run_workspace_browser(
         for tab in (page, owner_page):
             require(
                 tab.goto(owned).status == 200
-                and tab.locator("fieldset[disabled]").count() == 1
+                and tab.locator('input[name="name"]:disabled').count() == 1
                 and tab.get_by_role("button", name="Save full private sheet", exact=True).count()
                 == 0,
                 "Frozen sheet is editable by player or Master",
@@ -1920,13 +1815,16 @@ def run_workspace_browser(
         )
         owner_page.goto(owned)
         require(
-            owner_page.locator("fieldset[disabled]").count() == 1, "Rejoin thawed private sheet"
+            owner_page.locator('input[name="name"]:disabled').count() == 1,
+            "Rejoin thawed private sheet",
         )
         owner_page.get_by_role("link", name="Full history", exact=True).click()
         require(
             "freeze" in owner_page.locator("main").inner_text(), "Browser freeze history missing"
         )
         stage = "runtime creation and history"
+        page = main_page
+        early_context.close()
         generic = create_campaign(page, "Runtime browser campaign", "synthetic-game", "first")
         # Step 2a: sheet pages load a module that saves without reloading. The PRG flows
         # (D-G) run in a context with JavaScript disabled, signed in with the same session.
@@ -2437,24 +2335,8 @@ def main():
             capture_output=True,
             timeout=30,
         )
-        subprocess.run(
-            [
-                str(binary),
-                "--database",
-                str(directory / "smoke.sqlite3"),
-                "import-source",
-                "--bundle",
-                str(fixture / "adapter-bundle"),
-                "--pdf",
-                str(fixture / "original.pdf"),
-            ],
-            cwd=directory,
-            env=smoke_environment(directory),
-            check=True,
-            capture_output=True,
-            timeout=30,
-        )
         prepare_browser_registry(binary, directory, fixture)
+        seed_legacy_character(directory)
         process, log = start(binary, directory)
         try:
             with sync_playwright() as playwright:
@@ -2482,24 +2364,8 @@ def main():
                                 capture_output=True,
                                 timeout=30,
                             )
-                            subprocess.run(
-                                [
-                                    str(binary),
-                                    "--database",
-                                    str(directory / "smoke.sqlite3"),
-                                    "import-source",
-                                    "--bundle",
-                                    str(fixture / "adapter-bundle"),
-                                    "--pdf",
-                                    str(fixture / "original.pdf"),
-                                ],
-                                cwd=directory,
-                                env=smoke_environment(directory),
-                                check=True,
-                                capture_output=True,
-                                timeout=30,
-                            )
                             prepare_browser_registry(binary, directory, fixture)
+                            seed_legacy_character(directory)
                             process, log = start(binary, directory)
                         run_scenario(browser, viewport)
                 finally:

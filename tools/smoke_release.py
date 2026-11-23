@@ -373,9 +373,7 @@ def prepare_unknown_registry_source(binary, directory, fixture):
     listing = json.loads(registry_cli(binary, directory, "list-rulesets"))
     unknown = next(entry for entry in listing if entry["game_id"] == "synthetic-game")
     require(
-        unknown["edition_id"] == "first"
-        and unknown["native_adapter"] is None
-        and not unknown["generic_sheet_available"],
+        unknown["edition_id"] == "first" and not unknown["generic_sheet_available"],
         "Registry falsely enables unknown-game character support",
     )
     registry_cli(
@@ -1230,7 +1228,7 @@ def prepare_workspace_materials(binary, directory, fixture):
         directory,
         "import-source",
         "--bundle",
-        str(fixture / "adapter-bundle"),
+        str(fixture / "material-bundle"),
         "--pdf",
         str(fixture / "original.pdf"),
     )
@@ -1279,7 +1277,6 @@ def auth_login(cookie, fields, login, password):
 AUTH_DENIED_PATHS = (
     "/characters",
     "/characters/1",
-    "/characters/1/mork-borg",
     "/sources",
     "/sources/setup",
     "/sources/search",
@@ -1320,27 +1317,31 @@ def workspace_submit(cookie, path, fields, **updates):
 
 
 def smoke_workspace(binary, directory, cookie, player, passwords):
-    """Real private native/runtime flows; no authorization bypass or fabricated evidence."""
+    """Real private runtime flows; no authorization bypass or fabricated evidence."""
     _, fields, _ = workspace_form("/campaigns", cookie, "/campaigns")
     campaign = workspace_submit(
         cookie,
         "/campaigns",
         fields,
         title="Table campaign",
-        game_id="mork-borg",
-        edition_id="it-2025",
+        game_id="synthetic-game",
+        edition_id="first",
     )
-    action, form, _ = workspace_form(campaign + "/sheets/new", cookie)
+    # The generic definition of the synthetic game is the only kind of sheet there is.
+    table_version = latest_version(directory, "sheet")
+    create_link = version_link(auth_request(campaign, cookie=cookie)[2], campaign, table_version)
+    action, form, _ = workspace_form(create_link, cookie)
     form.update(
         name="Player private sheet",
-        description="Private long text " * 700,
-        strength="-3",
-        standard_items="6",
         notes="Personal campaign notes",
+        **{"value-name": "Private long text " * 400, "null-name": "known"},
     )
     sheet = workspace_submit(cookie, action, form)
-    action, current, html = workspace_form(sheet, cookie)
-    require("DR 14" in html and current["revision"] == "1", "Private native calculations differ")
+    html = auth_request(sheet, cookie=cookie)[2]
+    require(
+        "Private long text" in html and "snapshot revision 1" in html,
+        "Private runtime sheet differs",
+    )
     response = auth_request("/auth/login")
     administrative = auth_login(
         auth_cookie(response), auth_fields(response, "/auth/login"), "smoke-owner", passwords[0]
@@ -1366,10 +1367,22 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
     member_path = campaign + "/members/" + str(owner["id"])
     _, member, _ = workspace_form(campaign, cookie, member_path)
     workspace_submit(cookie, member_path, member, action="promote")
-    _, master_form, _ = workspace_form(sheet, owner_cookie)
-    workspace_submit(owner_cookie, sheet, master_form, notes="Explicit Master edit")
+    notes_action = sheet + "/meta/notes"
+    _, master_form, _ = workspace_form(sheet, owner_cookie, notes_action)
+    workspace_submit(owner_cookie, notes_action, master_form, value="Explicit Master edit")
+    # A stale full-form save (revision 1 of a sheet now at revision 2) keeps its draft.
+    csrf = workspace_form(sheet, cookie, sheet + "/meta/name")[1]["csrf"]
     stale = auth_request(
-        sheet, cookie=cookie, form=dict(current, name="Stale <script>draft</script>")
+        sheet,
+        cookie=cookie,
+        form={
+            "csrf": csrf,
+            "revision": "1",
+            "name": "Stale <script>draft</script>",
+            "notes": "Personal campaign notes",
+            "value-name": "Player text",
+            "null-name": "known",
+        },
     )
     require(stale[0] == 409 and "set-cookie" not in stale[1], "Stale private save did not reject")
     parser = FormFields()
@@ -1380,11 +1393,33 @@ def smoke_workspace(binary, directory, cookie, player, passwords):
         and "<script>draft" not in stale[2],
         "Private conflict lost or executed the submitted draft",
     )
+    # An over-long value (past the 8,000-character text bound) is refused with 422 and writes
+    # nothing: the sheet stays at revision 2.
+    invalid = auth_request(
+        sheet,
+        cookie=cookie,
+        form={
+            "csrf": csrf,
+            "revision": "2",
+            "name": "Player private sheet",
+            "notes": "Explicit Master edit",
+            "value-name": "x" * 8001,
+            "null-name": "known",
+        },
+    )
+    require(invalid[0] == 422, "An over-long private value was not refused")
+    require("snapshot revision 2" in auth_request(sheet, cookie=cookie)[2], "A refused save wrote")
     _, member, _ = workspace_form(campaign, cookie, member_path)
     workspace_submit(cookie, member_path, member, action="demote")
     auth_error(auth_request(sheet, cookie=owner_cookie), 403, "Access denied.")
-    action, owned_form, _ = workspace_form(campaign + "/sheets/new", owner_cookie)
-    owned = workspace_submit(owner_cookie, action, owned_form, name="Collaborator personal sheet")
+    action, owned_form, _ = workspace_form(create_link, owner_cookie)
+    owned = workspace_submit(
+        owner_cookie,
+        action,
+        owned_form,
+        name="Collaborator personal sheet",
+        **{"value-name": "Collaborator text", "null-name": "known"},
+    )
     _, member, _ = workspace_form(campaign, owner_cookie, member_path)
     workspace_submit(owner_cookie, member_path, member, action="leave")
     _, frozen, html = workspace_form(owned, owner_cookie)
@@ -1708,8 +1743,8 @@ def smoke_material_administration(directory, owner_cookie):
     require(auth_request("/admin/materials", cookie=owner_cookie)[0] == 200, "Materials missing")
     with sqlite3.connect(directory / "smoke.sqlite3") as db:
         page, source = db.execute(
-            "SELECT p.id,p.source_id FROM source_pages p JOIN source_rulesets r "
-            "ON r.source_id=p.source_id WHERE r.game_id='mork-borg' AND r.edition_id='it-2025'"
+            "SELECT p.id,p.source_id FROM source_pages p JOIN sources s "
+            "ON s.id=p.source_id WHERE s.source_id='synthetic-material-review'"
         ).fetchone()
         units = db.execute(
             "SELECT id FROM source_units WHERE page_id=? ORDER BY id", (page,)
@@ -2023,7 +2058,7 @@ def main():
                     str(directory / "smoke.sqlite3"),
                     "import-source",
                     "--bundle",
-                    str(fixture / "adapter-bundle"),
+                    str(fixture / "material-bundle"),
                     "--pdf",
                     str(fixture / "original.pdf"),
                 ],
@@ -2035,6 +2070,11 @@ def main():
             )
         smoke_no_assistant(binary, directory)
         account_snapshot, account_passwords = smoke_accounts(binary, directory)
+        with sqlite3.connect(directory / "smoke.sqlite3") as db:
+            db.execute(
+                "INSERT INTO characters(name,system_id,edition,notes) "
+                "VALUES('Smoke character','dnd','Example edition','initial')"
+            )
         process, log = start(binary, directory)
         try:
             if args.source_fixture:
@@ -2061,18 +2101,14 @@ def main():
                 request("/", headers={"Host": "attacker.example:3000"})[0] == 400,
                 "Foreign authority accepted",
             )
+            # A legacy record as an earlier version stored it (seeded before the start): nothing
+            # creates one any more, and no sheet belongs to it.
+            path = "/characters/1"
+            require(request("/characters", {"name": "New"})[0] == 404, "A route creates characters")
             form = {
                 "name": "Smoke character",
-                "adapter_id": "mork-borg-it-2025",
-                "notes": "initial",
-            }
-            status, headers, _ = request("/characters", form)
-            require(status == 303, "Character creation failed")
-            path = headers["location"].removesuffix("/mork-borg")
-            form = {
-                "name": "Smoke character",
-                "system_id": "mork-borg",
-                "edition": "MÖRK BORG — IT 2025",
+                "system_id": "dnd",
+                "edition": "Example edition",
                 "notes": "initial",
             }
             initial = revision(request(path)[2])
@@ -2093,63 +2129,10 @@ def main():
             require("Name must contain" in request(path, invalid)[2], "Invalid identity accepted")
             assert_fields(request(path)[2], identity_state)
             require(revision(request(path)[2]) == current, "Rejected identity changed revision")
-            sheet_path = path + "/mork-borg"
-            sheet = {
-                "agility": 0,
-                "presence": 0,
-                "strength": -3,
-                "toughness": 0,
-                "hp": 0,
-                "max_hp": 5,
-                "worn_armor": 3,
-                "protection": 1,
-                "standard_items": 6,
-                "silver": 10,
-                "omens": 2,
-                "equipment": "persisted gear",
-                "revision": current,
-            }
-            html = request(sheet_path, sheet)[2]
             require(
-                "Sheet saved" in html and "against DR 16" in html and "Overburdened" in html,
-                "Sheet save/calculation failed",
+                request(path + "/mork-borg")[0] == 404,
+                "A native sheet route still answers",
             )
-            next_revision = revision(html)
-            require(next_revision == current + 1, "Sheet revision did not increment exactly once")
-            sheet_state = dict(sheet, revision=next_revision)
-            require(
-                "another tab" in request(path, dict(form, revision=current))[2],
-                "Sheet revision did not protect identity",
-            )
-            assert_fields(request(path)[2], dict(identity_state, revision=next_revision))
-            require(
-                "another tab"
-                in request(sheet_path, dict(sheet, equipment="stale gear", silver=999))[2],
-                "Stale sheet accepted",
-            )
-            assert_fields(request(sheet_path)[2], sheet_state)
-            require(
-                "Base ability modifiers"
-                in request(sheet_path, dict(sheet, strength=20, revision=next_revision))[2],
-                "Invalid stats accepted",
-            )
-            assert_fields(request(sheet_path)[2], sheet_state)
-            require(
-                revision(request(sheet_path)[2]) == next_revision, "Rejected stats changed revision"
-            )
-            # Identity -> sheet protection in the other direction.
-            form["revision"] = next_revision
-            html = request(path, form)[2]
-            final_revision = revision(html)
-            require(
-                final_revision == next_revision + 1,
-                "Shared revision did not increment exactly once",
-            )
-            require(
-                "another tab" in request(sheet_path, dict(sheet, revision=next_revision))[2],
-                "Identity revision did not protect sheet",
-            )
-            assert_fields(request(sheet_path)[2], dict(sheet_state, revision=final_revision))
             correction_query = (
                 smoke_sources(binary, directory, fixture) if args.source_fixture else None
             )
@@ -2196,24 +2179,14 @@ def main():
                     "synthetic-game / first" in request("/sources")[2],
                     "Unknown source association lost after restart",
                 )
-            sheet_html = request(sheet_path)[2]
-            assert_fields(identity_html, dict(identity_state, revision=final_revision))
-            assert_fields(sheet_html, dict(sheet_state, revision=final_revision))
+            assert_fields(identity_html, dict(identity_state, revision=current))
             require(
                 "Edited character" in identity_html
                 and "persisted identity" in identity_html
                 and "stale edit" not in identity_html,
                 "Identity persistence failed",
             )
-            require(
-                "persisted gear" in sheet_html and 'name="hp" value="0"' in sheet_html,
-                "Sheet persistence failed",
-            )
-            require(
-                revision(identity_html) == final_revision
-                and revision(sheet_html) == final_revision,
-                "Revision persistence failed",
-            )
+            require(revision(identity_html) == current, "Revision persistence failed")
             if correction_query:
                 require(
                     corrected_evidence(request(correction_query)[2]),

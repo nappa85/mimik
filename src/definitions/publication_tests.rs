@@ -1,7 +1,6 @@
 use super::*;
 /// The shared synthetic source fixture, also used by campaign route tests.
 pub(crate) mod fixture {
-    use crate as mimik;
     include!("../../tests/support/source_fixture.rs");
 }
 

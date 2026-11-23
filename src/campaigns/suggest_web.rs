@@ -16,7 +16,7 @@
 //!
 //! Every refusal after the shape checks is one uniform 403 `{"status": "unavailable"}`: a
 //! forged address, a property without a member, an unlinked catalogue, another game or
-//! edition, a native, unsupported or corrupt pin, or no sealed version look the same.
+//! edition, an unsupported or corrupt pin, or no sealed version look the same.
 use super::{SheetPage, SuggestAnswer, sheet_json};
 use crate::{
     AppError, Store,

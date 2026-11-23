@@ -81,8 +81,7 @@ process; a second answers busy).
 - `import-catalogue-draft --file F --expected-revision N`: admits a bounded regular file and
   saves it in one `BEGIN IMMEDIATE` transaction. Revision 0 creates only; a matching revision
   advances by exactly one (trigger `catalogue_draft_revision_advances`); else conflict.
-  References are checked at every save: a registered nonnative pair without a built-in
-  adapter; each source of exactly that pair, with that PDF hash, finalized; each unit on its
+  References are checked at every save: a registered pair (`registered-ruleset-required`); each source of exactly that pair, with that PDF hash, finalized; each unit on its
   page in its source. Review states are not checked in drafts.
 - `show-catalogue-draft --id D`: re-admits the draft and checks bytes, hash and identity.
 - `compare-catalogue --id D`: in one read transaction, counts only: draft counts, units by
@@ -194,7 +193,7 @@ busy server answers 503.
 | Status | When | Page |
 |---|---|---|
 | 400 | Malformed id, catalogue, key, `type` or `after`; unknown or repeated parameter; `q` > 100 scalars. Before any lookup or session check | "Invalid catalogue address" with the valid syntax |
-| 403 | Every refusal: unreadable or unknown sheet, production Owner, native or unsupported pin, unlinked, unknown, other pair's or unsealed catalogue, revocation mid-request | One uniform "Catalogue unavailable" page; only the sheet link varies |
+| 403 | Every refusal: unreadable or unknown sheet, production Owner, unsupported pin, unlinked, unknown, other pair's or unsealed catalogue, revocation mid-request | One uniform "Catalogue unavailable" page; only the sheet link varies |
 | 404 | All checks passed; key or `type` not in the latest sealed version | "No entry “key” in Title." / "No entry type …", links to browse and sheet |
 | 422 | The search cannot run | Browse form with a static message |
 

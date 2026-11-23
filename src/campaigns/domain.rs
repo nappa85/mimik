@@ -49,7 +49,6 @@ pub(crate) struct Detail {
     pub members: Vec<Member>,
     pub requests: Vec<JoinRequest>,
     pub versions: Vec<(i64, i64, String)>,
-    pub native_available: bool,
     pub members_next: Option<i64>,
     pub requests_next: Option<i64>,
     pub versions_next: Option<i64>,
@@ -119,12 +118,11 @@ impl Store {
             let versions=if role.is_empty(){Vec::new()}else{
                 let mut q=tx.prepare("SELECT v.id,v.version,v.definition_id FROM definition_versions v WHERE v.game_id=?1 AND v.edition_id=?2 AND v.id>?3 AND EXISTS(SELECT 1 FROM definition_approvals a WHERE a.version_id=v.id AND a.id=(SELECT max(id) FROM definition_approvals WHERE version_id=v.id) AND NOT EXISTS(SELECT 1 FROM definition_withdrawals w WHERE w.approval_id=a.id)) ORDER BY v.id LIMIT 51")?;
                 q.query_map(params![campaign.game_id,campaign.edition_id,page.versions],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<Result<Vec<_>,_>>()?};
-            let native_available=!role.is_empty() && crate::games::native_available(&tx,&crate::registry::RulesetKey{game_id:campaign.game_id.clone(),edition_id:campaign.edition_id.clone()})?;
             auth.recheck(&tx)?;tx.commit()?;
             let members=Listing::new(members,|row|row.account_id);
             let requests=Listing::new(requests,|row|row.account_id);
             let versions=Listing::new(versions,|row|row.0);
-            Ok(Detail{campaign,role,request_state,members:members.rows,requests:requests.rows,versions:versions.rows,native_available,members_next:members.next,requests_next:requests.next,versions_next:versions.next})
+            Ok(Detail{campaign,role,request_state,members:members.rows,requests:requests.rows,versions:versions.rows,members_next:members.next,requests_next:requests.next,versions_next:versions.next})
         }).await
     }
 
@@ -259,7 +257,7 @@ impl Store {
             if ids.len()>32{return Err(AppError::Invalid("Corrupt private sheet capacity."));}
             for sheet in ids {
                 let mut saved=snapshots::load(&tx,sheet)?;
-                let pin=if let snapshots::Pin::Runtime{version_id,..}=saved.pin{Some(pins.get(&version_id).ok_or(AppError::Conflict)?)}else{None};
+                let snapshots::Pin::Runtime{version_id,..}=saved.pin;let pin=Some(pins.get(&version_id).ok_or(AppError::Conflict)?);
                 saved.state="frozen".into();
                 snapshots::write(&tx,&auth,saved,"freeze",pin)?;
             }

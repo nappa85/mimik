@@ -9,11 +9,6 @@ pub(crate) const MAX_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Pin {
-    Native {
-        adapter: String,
-        schema: u32,
-        calculation_version: u32,
-    },
     Runtime {
         version_id: i64,
         version: i64,
@@ -103,56 +98,8 @@ fn host_item_ids(
 }
 
 pub(crate) fn supported(snapshot: &PrivateSnapshot) -> bool {
-    match &snapshot.pin {
-        Pin::Native {
-            adapter,
-            schema,
-            calculation_version,
-        } => {
-            snapshot.kind == "native"
-                && adapter == "mork-borg-it-2025"
-                && *schema == 1
-                && *calculation_version == 1
-        }
-        Pin::Runtime { schema, .. } => snapshot.kind == "runtime" && *schema == 1,
-    }
-}
-
-fn native(snapshot: &PrivateSnapshot) -> Result<(), AppError> {
-    if snapshot.kind != "native" {
-        return Ok(());
-    }
-    if native_data_v1(snapshot) && snapshot.data["revision"].as_i64() != Some(snapshot.revision) {
-        return Err(AppError::Invalid(
-            "Native schema1 mirrored revision mismatch.",
-        ));
-    }
-    match &snapshot.pin {
-        Pin::Native {
-            adapter,
-            schema,
-            calculation_version,
-        } if adapter == "mork-borg-it-2025" && *schema == 1 && *calculation_version == 1 => {
-            if snapshot.game_id != "mork-borg" || snapshot.edition_id != "it-2025" {
-                return Err(AppError::Invalid("Native pin identity mismatch."));
-            }
-            let sheet: crate::mork_borg::Sheet = serde_json::from_value(snapshot.data.clone())?;
-            sheet.validate()?;
-            if sheet.revision != snapshot.revision || serde_json::to_value(sheet)? != snapshot.data
-            {
-                return Err(AppError::Invalid("Native canonical data mismatch."));
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn native_data_v1(snapshot: &PrivateSnapshot) -> bool {
-    matches!(&snapshot.pin,Pin::Native{adapter,schema:1,..} if adapter=="mork-borg-it-2025")
-        && snapshot.kind == "native"
-        && snapshot.game_id == "mork-borg"
-        && snapshot.edition_id == "it-2025"
+    let Pin::Runtime { schema, .. } = &snapshot.pin;
+    snapshot.kind == "runtime" && *schema == 1
 }
 
 pub(crate) fn decode(content: &str, expected: &str) -> Result<PrivateSnapshot, AppError> {
@@ -160,10 +107,7 @@ pub(crate) fn decode(content: &str, expected: &str) -> Result<PrivateSnapshot, A
         .map_err(|_| AppError::Invalid("Corrupt bounded private snapshot."))?;
     let snapshot: PrivateSnapshot = serde_json::from_value(value)?;
     if snapshot.encoding != 1
-        || !matches!(
-            (snapshot.kind.as_str(), &snapshot.pin),
-            ("native", Pin::Native { .. }) | ("runtime", Pin::Runtime { .. })
-        )
+        || snapshot.kind != "runtime"
         || snapshot.sheet_id <= 0
         || snapshot.campaign_id <= 0
         || snapshot.custodian_id <= 0
@@ -176,7 +120,6 @@ pub(crate) fn decode(content: &str, expected: &str) -> Result<PrivateSnapshot, A
     {
         return Err(AppError::Invalid("Private snapshot integrity error."));
     }
-    native(&snapshot)?;
     Ok(snapshot)
 }
 
@@ -380,17 +323,10 @@ pub(crate) fn write(
         return Err(AppError::Conflict);
     }
     resulting.name = name_notes(&resulting.name, &resulting.notes)?;
-    if native_data_v1(&resulting) {
-        resulting.data["revision"] = resulting.revision.into();
-    }
-    native(&resulting)?;
     if resulting.state == "active" {
         let mut reserve = resulting.clone();
         reserve.revision = i64::MAX;
         reserve.state = "frozen".into();
-        if native_data_v1(&reserve) {
-            reserve.data["revision"] = i64::MAX.into();
-        }
         encode(&reserve)?;
     }
     let content = encode(&resulting)?;

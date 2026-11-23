@@ -9,8 +9,8 @@
 //!
 //! Precedence as for sheet saves: parse, CSRF and request auth, then (D-X3) a bounded wait for
 //! the `JOBS` permit, the read and edit rights (403; an unsupported pin is read-only, so it
-//! is 403 too), then key admission and the route checks (400: a malformed or zero `base`, a
-//! native pin, an ID outside the slug grammar, not in the pin, derived or a list; for list
+//! is 403 too), then key admission and the route checks (400: a malformed or zero `base`, an
+//! ID outside the slug grammar, not in the pin, derived or a list; for list
 //! routes an index outside the canonical grammar, not a list of the pin or not its
 //! property, a row missing at `base`). The value is read against the live revision L: a
 //! `base` above L is a conflict (409); then a submission equal to the saved value is "No
@@ -220,8 +220,7 @@ async fn save(
     if !view.editable {
         return Err(StatusCode::FORBIDDEN);
     }
-    // Native pins keep the full form (Sonnet m1); an unsupported pin never gets here, it is
-    // read-only (403 above).
+    // An unsupported pin never gets here, it is read-only (403 above).
     let pin = view.immutable.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
     let unit = route
         .unit(pin.definition())

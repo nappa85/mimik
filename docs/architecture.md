@@ -44,7 +44,7 @@ process, never a container
 | Unauthenticated prototype | `--no-auth` | `web::app` | `127.0.0.1:3000` only |
 
 Authenticated startup refuses to serve until an Owner exists (`bootstrap-owner`). The
-prototype keeps the legacy identity/notes records and the native MÖRK BORG editor, isolated
+prototype keeps the legacy identity/notes records (no new ones are created), isolated
 from the private campaign tables. `--assistant` turns the interpretation assistant on, with its
 `--assistant-model*`, `--models-dir`, `--assistant-runtime`, `--assistant-threads` and `--assistant-device` options
 ([model-runtime.md](model-runtime.md)); builds with the `dev-endpoint` feature (never a
@@ -70,7 +70,7 @@ Rebuilt refusals and the unauthenticated navigation's login redirect keep only
 | `main.rs`, `account_cli.rs` | Argument parsing, serving modes, operator subcommands |
 | `lib.rs` | Module wiring, `AppError`, legacy prototype character input |
 | `store.rs` | `Store`: one rusqlite connection behind a mutex, run on `spawn_blocking`; migrations; `busy_timeout` 5 s, `foreign_keys = ON` |
-| `web.rs` | Unauthenticated prototype router: legacy characters, native MÖRK BORG sheet, source routes, bundled assets |
+| `web.rs` | Unauthenticated prototype router: legacy characters (view and notes), source routes, bundled assets |
 | `network.rs` | LAN/loopback selection, peer admission, canonical external URL |
 | `auth/` | Sign-in, sessions, request admission, security headers, error pages; Owner pages `/admin` (accounts), `/admin/materials` (source review), `/admin/rulesets` (registry), `/admin/assistant` (model runtime) |
 | `accounts/` | Accounts, Owner binding, invitations, resets, disable, epochs; Argon2 hashing; protected credential files; browser transport |
@@ -80,7 +80,6 @@ Rebuilt refusals and the unauthenticated navigation's login redirect keep only
 | `catalogues/` | Read-only game catalogues: decode, admission, drafts, sealed publication with projections and name index, read-only lookups |
 | `sources/` | Prepared-source import, page/unit review evidence, FTS5 lexical search, region previews, Owner material operations, prototype source routes |
 | `registry.rs`, `registry_admin.rs` | Immutable game/edition identities and legacy aliases; Owner browser registration |
-| `games.rs`, `mork_borg.rs`, `mork_form.rs` | Native Italian-2025 MÖRK BORG adapter (`mork-borg-it-2025`), an exploration fixture |
 | `form_text.rs`, `local_file.rs`, `pagination.rs`, `presentation.rs` | CR LF → LF form text, bounded descriptor-based local reads, 50+1 keyset pages, date presentation |
 
 ## Storage
@@ -93,9 +92,9 @@ migrations.
 
 | Migration | Holds |
 |---|---|
-| 001–002 | Prototype characters and native MÖRK BORG sheets |
+| 001–002 | Prototype characters (002's native sheet table is dropped by 038) |
 | 003–004, 007, 009 | Sources, pages, units, review events, coverage; source finalization and page hashes; integrity retrofit |
-| 005 | Registry: games, editions, legacy aliases, character/source ruleset links |
+| 005 | Registry: games, editions, legacy aliases, character/source ruleset links (038 deletes the seeded game when nothing refers to it) |
 | 006, 008 | Definition drafts; definition versions, approvals, withdrawals |
 | 010–011 | Accounts, Owner, credentials, account events; auth sessions |
 | 012 | Campaigns, members, requests, private sheets, private sheet history, campaign events (largest schema migration) |
@@ -111,6 +110,7 @@ migrations.
 | 028 | Owner units may be `Text` or `Table` |
 | 029 | Append-only `source_page_words`: the word boxes of a page, written at import for the table shapes |
 | 032 | `assistant_reply_lengths`: the owner's reply length per model file, apart from the model rows and the choice ([model-runtime.md](model-runtime.md), "Reply length") |
+| 038 | Removes the native MÖRK BORG sheet: drops `mork_borg_sheets` and the registry `native` column, narrows the private-sheet insert trigger to runtime pins and deletes the seeded MÖRK BORG pair unless something refers to it; `migrate()` first refuses a database holding native sheet data |
 
 ## Areas
 

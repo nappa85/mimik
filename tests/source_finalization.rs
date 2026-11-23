@@ -241,6 +241,16 @@ async fn reimport_seals_legacy_artifacts_without_changing_reviews_and_first_alia
         store.source_page(page.id).await.unwrap().events.len(),
         before.events.len()
     );
+    // A registered pair the finalized source does not belong to.
+    store
+        .register_ruleset(mimik::registry::RegisterRuleset {
+            game_id: "mork-borg".into(),
+            game_label: "MÖRK BORG".into(),
+            edition_id: "it-2025".into(),
+            edition_label: "MÖRK BORG — IT 2025".into(),
+        })
+        .await
+        .unwrap();
     assert!(
         db.execute(
             "INSERT INTO source_rulesets VALUES (?1,'mork-borg','it-2025')",

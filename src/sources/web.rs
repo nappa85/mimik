@@ -34,7 +34,7 @@ struct PageTemplate {
 
 #[derive(Deserialize)]
 pub(crate) struct SearchQuery {
-    #[serde(default = "system")]
+    #[serde(default)]
     system: String,
     #[serde(default)]
     edition: String,
@@ -42,10 +42,6 @@ pub(crate) struct SearchQuery {
     edition_id: String,
     #[serde(default)]
     query: String,
-}
-
-fn system() -> String {
-    "mork-borg".into()
 }
 
 #[derive(Template)]
