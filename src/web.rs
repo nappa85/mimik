@@ -55,16 +55,6 @@ struct MorkEditorTemplate<'a> {
     saved: bool,
 }
 
-#[derive(Template)]
-#[template(path = "mork_context.html")]
-struct ContextTemplate {
-    character: Character,
-    context: crate::mork_advice::Context,
-    fields: Vec<crate::mork_advice::FactField>,
-    advice: Option<crate::mork_advice::Advice>,
-    message: String,
-}
-
 pub(crate) fn render(template: &impl Template) -> Result<Html<String>, AppError> {
     template.render().map(Html).map_err(|_| AppError::Template)
 }
@@ -78,10 +68,6 @@ pub fn app(store: Store) -> Router {
         .route(
             "/characters/{id}/mork-borg",
             get(mork_character).post(mork_save),
-        )
-        .route(
-            "/characters/{id}/context",
-            get(context_page).post(context_advice),
         )
         .route("/assets/app.css", get(css_asset))
         .route(
@@ -185,55 +171,6 @@ async fn mork_character(
         message: "",
         saved,
     })
-}
-
-async fn context_page(
-    State(store): State<Store>,
-    Path(id): Path<i64>,
-) -> Result<Html<String>, AppError> {
-    let (character, sheet, _) = store.mork_borg_sheet(id).await?;
-    let context = crate::mork_advice::Context {
-        revision: sheet.revision,
-        ..crate::mork_advice::Context::default()
-    };
-    render(&ContextTemplate {
-        character,
-        fields: context.fields(),
-        context,
-        advice: None,
-        message: String::new(),
-    })
-}
-
-async fn context_advice(
-    State(store): State<Store>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    Form(context): Form<crate::mork_advice::Context>,
-) -> Result<Response, AppError> {
-    check_origin(&headers)?;
-    match store.mork_advice(id, &context).await {
-        Ok((character, advice)) => Ok(render(&ContextTemplate {
-            character,
-            fields: context.fields(),
-            context,
-            advice: Some(advice),
-            message: String::new(),
-        })?
-        .into_response()),
-        Err(error @ (AppError::Invalid(_) | AppError::Conflict)) => Ok((
-            error.status(),
-            render(&ContextTemplate {
-                character: store.get(id).await?,
-                fields: context.fields(),
-                context,
-                advice: None,
-                message: error.to_string(),
-            })?,
-        )
-            .into_response()),
-        Err(error) => Err(error),
-    }
 }
 
 async fn mork_save(

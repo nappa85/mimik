@@ -176,6 +176,5 @@ async fn htmx_sheet_save_refreshes_stats_and_preserves_invalid_edits() {
     .unwrap();
     assert!(html.contains("Base ability modifiers"));
     assert!(html.contains("name=\"strength\" value=\"20\""));
-    assert!(!html.contains("Context from your sheet"));
     assert_eq!(store.mork_borg_sheet(1).await.unwrap().1.strength, -3);
 }

@@ -141,6 +141,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 4. 2c-2b-1 review leftovers (Minor): `tools/assist_runtime_measure.py` stop-reason race
    between the watchdog and `wait_healthy` (set the reason before killing), and `poll()`
    reaping the leader before `killpg`.
+5. Flaky under a full-load gate (2026-11-23, passes alone 5/5):
+   `assistant::download::task::tests::cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range`.
+   Suspected: the cancel lands after the 800 ms slow body finished; make the reply stall until
+   cancelled instead of relying on timing.
 
 ## Blockers
 
@@ -148,7 +152,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- When that work starts: print/export priorities, acceptable latency, situation input,
+- When that work starts: print/export priorities, acceptable latency,
   first-release features, games after the POC; the language model (PROD-24: one language per
   table chosen by the owner, or per user).
 
