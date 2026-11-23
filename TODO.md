@@ -113,13 +113,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   disk; if so, sync a batch's files once and commit once a batch. Cost: pages publish eight at
   a time, and a cancel or crash loses up to a batch.
 
-- **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` on branch `master-view`
-  (4d465f1; two review rounds, final verdicts approve with changes, applied). Owner decisions
-  2026-11-05: GET + `/seen` (auto with JS, one click without); existing sheets are player sheets;
-  one shared NPC section; try the htmx SSE extension first under the unchanged strict CSP
-  (native EventSource only if that is impossible); 1 live stream per Master (newest tab wins);
-  own save on the latest revision counts as seen; departure keeps freezing NPCs in v1; NPCs
-  share the 32/2048 sheet limits. Next: record these in the plan, then slice (a).
+- **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` (two review rounds,
+  owner decisions 2026-11-05 recorded; refreshed 2026-11-23 for the native removal and
+  migration 039). Next: slice (a), schema, NPC classification and seen/open with plain HTML.
 0. llama.cpp built without OpenSSL (`LLAMA_OPENSSL=OFF`) so the runtime starts on hosts with only
    OpenSSL 4; the official b12110 build needs `libssl.so.3` (this host: `openssl-compat:3`).
    llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release
