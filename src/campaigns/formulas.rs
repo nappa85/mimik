@@ -171,7 +171,7 @@ pub(super) enum Doubt {
     Unavailable,
     /// A supported runtime definition that declares no checks.
     NoChecks,
-    /// A native or unsupported pin: no definition checks apply to it.
+    /// An unsupported pin: no definition checks apply to it.
     NoCoverage,
 }
 
@@ -778,10 +778,10 @@ mod tests {
         assert_eq!(formula_free.doubts, [Doubt::NoChecks]);
         assert_eq!(formula_free.links()[0].1, None);
         assert_eq!(Validity::of(None, false).links()[0].1, None);
-        let native = Validity::of(None, false);
-        assert_eq!(native.doubts, [Doubt::NoCoverage]);
+        let unsupported = Validity::of(None, false);
+        assert_eq!(unsupported.doubts, [Doubt::NoCoverage]);
         assert_eq!(
-            native.summary(),
+            unsupported.summary(),
             "no rule checks cover its interpretation pin"
         );
         assert_eq!(Doubt::Violated(2).text(), "2 checks violated");

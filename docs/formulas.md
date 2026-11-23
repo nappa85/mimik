@@ -178,7 +178,7 @@ never values.
 - **Fail closed:** a declared derived field or check with no entry in an evaluation (a broken
   engine or pin invariant) is presented as `internal_error`, so it is counted and flagged,
   never dropped.
-- **Native MÖRK BORG sheets** and unsupported pins never call the formula layer.
+- Unsupported pins never call the formula layer.
 - `examples/formula_eval.rs` is a JSON-lines development CLI over the same engine (used by the
   Python tool-loop benchmark).
 

@@ -254,7 +254,7 @@ async fn units_must_be_on_their_page_in_a_listed_finalized_source_of_the_pair() 
         pair["edition_id"] = edition.into();
         assert_eq!(
             code(&fixture.save(&pair, 0).await.unwrap_err()),
-            "registered-nonnative-ruleset-required"
+            "registered-ruleset-required"
         );
     }
     assert_eq!(fixture.drafts(), 0);
@@ -509,7 +509,7 @@ async fn populated_schema18_database_upgrades_to_19_atomically() {
     );
     // Schema 19 added the catalogues; schemas 20 (change notes), 21 (row notes), 22 (the
     // assistant's model setting) and 23 (the downloads) apply on the same upgrade.
-    assert_eq!(mimik::SCHEMA_VERSION, 37);
+    assert_eq!(mimik::SCHEMA_VERSION, 38);
     assert_eq!(counts(&db), before);
     let saved = reopened
         .save_catalogue_draft(serde_json::to_vec(&fixture.catalogue()).unwrap(), 0)
@@ -620,32 +620,4 @@ async fn identical_content_with_the_current_revision_still_advances_it() {
     assert_eq!((first.revision, second.revision), (1, 2));
     assert_eq!(first.content_hash, second.content_hash);
     assert_eq!(first.id, second.id);
-}
-
-#[tokio::test]
-async fn a_nonnative_pair_with_a_built_in_adapter_is_refused() {
-    let _guard = TEST_LOCK.lock().await;
-    let fixture = fixture().await;
-    // The only adapter pair ships registered as native and registry editions are immutable,
-    // so no product path builds this state. This test database drops the immutability
-    // trigger and flips the flag, to reach the adapter predicate on its own.
-    let db = rusqlite::Connection::open(&fixture.database).unwrap();
-    db.execute_batch("DROP TRIGGER registry_editions_immutable_update")
-        .unwrap();
-    let changed = db
-        .execute(
-            "UPDATE registry_editions SET native=0 WHERE game_id='mork-borg' AND edition_id='it-2025'",
-            [],
-        )
-        .unwrap();
-    assert_eq!(changed, 1);
-    let mut value = fixture.catalogue();
-    value["game_id"] = "mork-borg".into();
-    value["edition_id"] = "it-2025".into();
-    value["sources"] = json!([]);
-    value["entries"][0]["description"] = json!({"owner_text": "Synthetic."});
-    assert_eq!(
-        code(&fixture.save(&value, 0).await.unwrap_err()),
-        "registered-nonnative-ruleset-required"
-    );
 }

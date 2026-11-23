@@ -453,7 +453,7 @@ Only the operator imports prepared sources, through the CLI. Browser PDF uploads
 **File access.** The directory is opened `O_DIRECTORY|O_NOFOLLOW`. Its children are opened with `openat` under fixed names: `bundle.json`, `source.json`, `page-<pdf index>.png`. `local_file::read` rejects final symlinks and special files and reads with a byte bound. Symlinks in ancestor directories are allowed. Each file is hashed and parsed from the same bytes.
 
 **Bundle schema** (`deny_unknown_fields`): `contract_version`, `source_id` (≤100 B), `title` (≤200 B), `system_id` (a valid registry slug), `edition`, `language` (≤30 B), `source_sha256`, `extraction_sha256`, `extractor` and `renderer` provenance (name ≤100 B, version ≤200 B, `settings` an object), and `pages[]` (`pdf_page`, `width_points`, `height_points`, `image_sha256`, `units[]` with `id`, `kind`, `polygon`, `html`).
-- **v1**: no `edition_id` (not even null); label ≤100 bytes; a known family (`crate::SYSTEMS`) may stay unresolved, an unknown one needs a registered alias.
+- **v1**: no `edition_id` (not even null); label ≤100 bytes; `system_id` is a registry slug; the source stays unresolved until a registered alias attaches it.
 - **v2**: `edition_id` slug of a registered pair; label equal to its registered label or an exact same-pair alias, ≤100 scalars (`registry::source_identity`). Identity and any existing association are checked before the duplicate-hash path.
 
 **Checks** (all fail closed with one generic "inconsistent bundle" error):
@@ -873,8 +873,6 @@ mork-borg-core-en-2019   3d2873f68f4cc83598724c28ab820353566c23728d0f34550417c70
 ```
 
 Known hazards: Pathfinder reference-sheet Markdown loses action-cost glyphs and interleaves sidebars; the D&D text layer has OCR defects; IT and EN MÖRK BORG differ (e.g. occult treasure 9) and are never merged or corrected against each other.
-
-**MÖRK BORG native adapter.** It is pinned to `MÖRK BORG — IT 2025`. Its citations come from a manual visual audit of original PDF pages 28, 30, 31, 32, 33, 34 and 38 (printed 24, 26–29 and 34), recorded in `src/mork_borg.rs`. These pages were checked by eye. They are not reviewed source units.
 
 ## Licensing of sources and assets
 

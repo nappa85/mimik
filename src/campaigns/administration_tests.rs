@@ -447,12 +447,13 @@ async fn owner_disable_revokes_player_session_without_altering_private_custody_h
     let _lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Retain custody".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -461,7 +462,7 @@ async fn owner_disable_revokes_player_session_without_altering_private_custody_h
         .decide_join(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    let saved = insert_native(&store, auth[2].clone(), native(campaign, 3)).await;
+    let saved = insert_sheet(&store, auth[2].clone(), sheet(campaign, 3)).await;
     let accounts = Accounts::new(store.clone());
     accounts
         .browser_disable(auth[0].clone(), 3, 1)

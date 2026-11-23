@@ -1536,8 +1536,6 @@ struct PrivateTemplate<'a> {
     view: &'a SheetView,
     csrf: &'a str,
     action: String,
-    draft: &'a crate::mork_form::SheetDraft,
-    sheet: &'a crate::mork_borg::Sheet,
     groups: &'a [GroupView],
     message: &'a str,
     /// A `role="alert"` notice (an oversized draft that was not kept); empty otherwise.
@@ -1548,7 +1546,6 @@ struct PrivateTemplate<'a> {
     /// The submitted revision as shown in visible text: an excerpt, so the hidden control
     /// is its only full echo (RE3-1).
     revision_excerpt: String,
-    native: bool,
     create: bool,
     pin: String,
     /// The definition declares a list field: the page gets a top Save button (plan D6).
@@ -1569,7 +1566,7 @@ struct PrivateTemplate<'a> {
 
 /// A saved runtime page the reader may edit has a form per unit (slice 1.5a): Name, General
 /// notes and each scalar field save on their own, each list from its list form. Create,
-/// native, read-only and history pages, and a refused full-form draft, keep the one full
+/// read-only and history pages, and a refused full-form draft, keep the one full
 /// form.
 struct UnitForms {
     shown: bool,
@@ -1589,7 +1586,7 @@ impl UnitForms {
 /// How a runtime sheet shows its derived values.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FormulaMode {
-    /// Native, unsupported or formula-free pin: no formula section.
+    /// Unsupported or formula-free pin: no formula section.
     Absent,
     /// Create page: nothing saved yet, so nothing is evaluated.
     Create,
@@ -1622,32 +1619,6 @@ impl FormulaMode {
     }
 }
 
-fn native_draft(form: &BTreeMap<String, String>) -> crate::mork_form::SheetDraft {
-    let get = |key: &str| form.get(key).cloned().unwrap_or_default();
-    crate::mork_form::SheetDraft {
-        name: get("name"),
-        revision: get("revision"),
-        agility: get("agility"),
-        presence: get("presence"),
-        strength: get("strength"),
-        toughness: get("toughness"),
-        hp: get("hp"),
-        max_hp: get("max_hp"),
-        worn_armor: get("worn_armor"),
-        protection: get("protection"),
-        standard_items: get("standard_items"),
-        silver: get("silver"),
-        omens: get("omens"),
-        equipment: get("equipment"),
-        description: get("description"),
-        class_notes: get("class_notes"),
-        powers: get("powers"),
-        weapon_one: get("weapon_one"),
-        weapon_two: get("weapon_two"),
-        campaign_miseries: get("campaign_miseries"),
-    }
-}
-
 fn render_private(
     nav: crate::auth::nav::Nav,
     view: &SheetView,
@@ -1655,23 +1626,11 @@ fn render_private(
     raw: Option<&BTreeMap<String, String>>,
     notice: &Notice,
 ) -> Result<String, AppError> {
-    let native = matches!(view.snapshot.pin, Pin::Native { .. })
-        && super::snapshots::supported(&view.snapshot);
-    let sheet = if native {
-        serde_json::from_value(view.snapshot.data.clone())?
-    } else {
-        crate::mork_borg::Sheet::default()
-    };
-    let draft = if let Some(raw) = raw {
-        native_draft(raw)
-    } else {
-        crate::mork_form::SheetDraft::from_sheet(&view.snapshot.name, &sheet)
-    };
     let create = view.snapshot.sheet_id == 0;
     let formulas = evaluated(view);
     // A full-form draft (a refused full-form POST, or a slice-1.5a list form's from a page
     // loaded before slice 1.5b) is re-rendered in the full form, which can save it.
-    let units = !create && !native && view.editable && view.immutable.is_some() && raw.is_none();
+    let units = !create && view.editable && view.immutable.is_some() && raw.is_none();
     let mut assist_forms = AssistForms::default();
     let unit_draft = notice.draft.as_ref();
     let groups = groups(
@@ -1688,10 +1647,10 @@ fn render_private(
         .cloned()
         .unwrap_or_else(|| view.snapshot.revision.to_string());
     let action = if create {
-        let version = match view.snapshot.pin {
-            Pin::Runtime { version_id, .. } => version_id,
-            Pin::Native { .. } => 0,
-        };
+        let Pin::Runtime {
+            version_id: version,
+            ..
+        } = view.snapshot.pin;
         format!(
             "/campaigns/{}/sheets/new?version={version}",
             view.snapshot.campaign_id
@@ -1704,8 +1663,6 @@ fn render_private(
         view,
         csrf,
         action,
-        draft: &draft,
-        sheet: &sheet,
         groups: &groups,
         message: &notice.message,
         alert: &notice.alert,
@@ -1713,7 +1670,6 @@ fn render_private(
         notes,
         revision_excerpt: excerpt(&revision),
         revision,
-        native,
         create,
         pin: serde_json::to_string(&view.snapshot.pin)?,
         lists: view.immutable.as_ref().is_some_and(|pin| {
@@ -2055,31 +2011,6 @@ async fn read_private(
     rendered(view, permit, csrf, None, StatusCode::OK, notice).await
 }
 
-const NATIVE_KEYS: &[&str] = &[
-    "csrf",
-    "revision",
-    "name",
-    "notes",
-    "agility",
-    "presence",
-    "strength",
-    "toughness",
-    "hp",
-    "max_hp",
-    "worn_armor",
-    "protection",
-    "standard_items",
-    "silver",
-    "omens",
-    "equipment",
-    "description",
-    "class_notes",
-    "powers",
-    "weapon_one",
-    "weapon_two",
-    "campaign_miseries",
-];
-
 async fn create_sheet(
     State(state): State<AuthState>,
     session: Session,
@@ -2127,30 +2058,23 @@ async fn parse_sheet_form(body: axum::body::Bytes) -> Result<super::transport::P
 /// Closed-key admission of a sheet POST (plan D2). It is O(pairs) but may generate up to
 /// 65,536 keys, so it is its own blocking step, whose only failure is 400 (never a
 /// re-render).
-async fn admit_form(
+pub(super) async fn admit_form(
     view: SheetView,
     pairs: super::transport::Pairs,
     permit: OwnedSemaphorePermit,
 ) -> Result<(BTreeMap<String, String>, SheetView, OwnedSemaphorePermit), StatusCode> {
     tokio::task::spawn_blocking(move || {
-        let keys = if let Some(pin) = &view.immutable {
-            match pairs.value("list") {
-                // A list form (slice 1.5a): one list's rows; every other value stays saved.
-                // The create page has only the full form.
-                Some(list) => values::index(list)
-                    .filter(|_| view.snapshot.sheet_id != 0)
-                    .and_then(|f| values::list_keys(pin.definition(), f, pairs.keys())),
-                None => values::sheet_keys(pin.definition(), pairs.keys()),
-            }
-            .ok_or(StatusCode::BAD_REQUEST)?
-        } else {
-            let mut keys: std::collections::HashSet<String> =
-                NATIVE_KEYS.iter().map(|s| (*s).into()).collect();
-            if pairs.keys().any(|key| key == "op") {
-                keys.insert("op".into());
-            }
-            keys
-        };
+        // A sheet without an admitted immutable pin (an unsupported one) admits no form at all.
+        let pin = view.immutable.as_ref().ok_or(StatusCode::BAD_REQUEST)?;
+        let keys = match pairs.value("list") {
+            // A list form (slice 1.5a): one list's rows; every other value stays saved.
+            // The create page has only the full form.
+            Some(list) => values::index(list)
+                .filter(|_| view.snapshot.sheet_id != 0)
+                .and_then(|f| values::list_keys(pin.definition(), f, pairs.keys())),
+            None => values::sheet_keys(pin.definition(), pairs.keys()),
+        }
+        .ok_or(StatusCode::BAD_REQUEST)?;
         Ok::<_, StatusCode>((pairs.admit(&keys)?, view, permit))
     })
     .await
@@ -2256,28 +2180,23 @@ fn apply_save(view: &mut SheetView, form: &BTreeMap<String, String>) -> Result<b
             form["notes"].clone(),
         ),
     };
-    let (data, notes) = if let Some(pin) = &view.immutable {
-        let (data, notes) = values::form(
-            pin.definition(),
-            form,
-            (
-                (!create).then_some(&view.snapshot.data),
-                view.snapshot.revision,
-            ),
-            &view.notes.current,
-            scope,
-        )?;
-        pin.validate_values(&data)?;
-        if notes.len() > super::notes::MAX_NOTES {
-            return Err(super::notes::too_many());
-        }
-        (data, notes)
-    } else {
+    let pin = view.immutable.as_ref().ok_or(AppError::Invalid(
+        "Unsupported interpretation pin is read-only.",
+    ))?;
+    let (data, notes) = values::form(
+        pin.definition(),
+        form,
         (
-            serde_json::to_value(native_draft(form).validate()?)?,
-            Vec::new(),
-        )
-    };
+            (!create).then_some(&view.snapshot.data),
+            view.snapshot.revision,
+        ),
+        &view.notes.current,
+        scope,
+    )?;
+    pin.validate_values(&data)?;
+    if notes.len() > super::notes::MAX_NOTES {
+        return Err(super::notes::too_many());
+    }
     let changed = create
         || name != view.snapshot.name
         || notes_text != view.snapshot.notes

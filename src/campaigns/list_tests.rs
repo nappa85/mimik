@@ -664,7 +664,7 @@ async fn raw_post(setup: &Setup, path: &str, body: String) -> axum::response::Re
 }
 
 /// A stale draft answers 409 even when its values are invalid (plan D4): the revision check
-/// now precedes value validation on scalar runtime and private native sheets.
+/// now precedes value validation on scalar runtime sheets.
 #[tokio::test]
 async fn stale_invalid_draft_conflicts() {
     use axum::http::StatusCode;
@@ -691,42 +691,6 @@ async fn stale_invalid_draft_conflicts() {
     assert!(
         html.contains("name=\"revision\" value=\"1\""),
         "submitted revision kept"
-    );
-    // Private native sheet.
-    let store = &setup.store;
-    let campaign = store
-        .create_campaign(
-            setup.auth[1].clone(),
-            "Native".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    let mut native = super::native(campaign, 2);
-    native.sheet_id = 2;
-    super::insert_native(store, setup.auth[1].clone(), native).await;
-    let mut form = super::native_form();
-    for (key, value) in &mut form {
-        match key.as_str() {
-            "revision" => *value = "1".into(),
-            "notes" => *value = "Edited".into(),
-            _ => {}
-        }
-    }
-    assert_eq!(
-        setup.post("/private-sheets/2", form.clone()).await.0,
-        StatusCode::SEE_OTHER
-    );
-    for (key, value) in &mut form {
-        if key == "agility" {
-            *value = "x".into();
-        }
-    }
-    assert_eq!(
-        setup.post("/private-sheets/2", form).await.0,
-        StatusCode::CONFLICT,
-        "private native"
     );
 }
 
@@ -2003,7 +1967,7 @@ async fn tamper_history(
 }
 
 #[tokio::test]
-async fn change_summary_unavailable_for_native_unsupported_and_invalid_previous() {
+async fn change_summary_unavailable_for_invalid_previous() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let unavailable_revision = ["Change summary unavailable for this revision."];
@@ -2050,28 +2014,6 @@ async fn change_summary_unavailable_for_native_unsupported_and_invalid_previous(
             .contains("No stored values changed."),
         "no changes, but available"
     );
-    // A native sheet.
-    let campaign = fresh
-        .store
-        .create_campaign(
-            fresh.auth[1].clone(),
-            "Native".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    let mut native = super::native(campaign, 2);
-    native.sheet_id = 2;
-    super::insert_native(&fresh.store, fresh.auth[1].clone(), native).await;
-    let (status, html) = fresh.get("/private-sheets/2/history/1").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        summary_section(&html)
-            .unwrap()
-            .contains("Change summary unavailable for this sheet."),
-        "native"
-    );
 }
 
 #[tokio::test]
@@ -2090,13 +2032,11 @@ async fn change_summary_unavailable_for_an_unsupported_runtime_pin() {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let mut snapshot: PrivateSnapshot = serde_json::from_str(&content)?;
-            if let snapshots::Pin::Runtime { schema, .. } = &mut snapshot.pin {
-                *schema = 2;
-            }
+            let snapshots::Pin::Runtime { schema, .. } = &mut snapshot.pin;
+            *schema = 2;
             let mut pin: snapshots::Pin = serde_json::from_str(&pin)?;
-            if let snapshots::Pin::Runtime { schema, .. } = &mut pin {
-                *schema = 2;
-            }
+            let snapshots::Pin::Runtime { schema, .. } = &mut pin;
+            *schema = 2;
             let content = serde_json::to_string(&snapshot)?;
             let hash = snapshots::hash(content.as_bytes());
             let triggers = ["private_sheets_update", "private_sheet_history_update"].map(|name| {
@@ -4286,60 +4226,7 @@ async fn all_optional_worst_label_page_is_within_the_unit_bound() {
     assert!(html.len() <= FIXED_PAGE_BYTES + units * UNIT_MARKUP_BYTES);
 }
 
-/// Re-review (Sonnet minor 1, Space Bunny N1): private NATIVE sheets keep leading newlines in
-/// their textareas through a rejected save, a reload and an unchanged save (native sheets have
-/// no draft operations).
-#[tokio::test]
-async fn native_sheet_textareas_keep_leading_newlines() {
-    let _auth_lock = crate::auth::test_resource_lock().await;
-    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
-    let setup = list_setup(&list_definition()).await;
-    let campaign = setup
-        .store
-        .create_campaign(
-            setup.auth[1].clone(),
-            "Native".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
-        )
-        .await
-        .unwrap();
-    let mut native = super::native(campaign, 2);
-    native.data["description"] = "\ndescription".into();
-    native.data["weapon_one"] = "\n\nweapon".into();
-    native.data["equipment"] = "\nequipment".into();
-    let created = super::insert_native(&setup.store, setup.auth[1].clone(), native).await;
-    let expect = |html: &str, context: &str| {
-        let form = submitted_by(html, None);
-        for (key, want) in [
-            ("description", "\ndescription"),
-            ("weapon_one", "\n\nweapon"),
-            ("equipment", "\nequipment"),
-        ] {
-            assert_eq!(get(&form, key), want, "{context}: {key}");
-        }
-    };
-    let view = sheet_page(&setup).await;
-    expect(&view, "saved reload");
-    let mut rejected = submitted(&view);
-    set(&mut rejected, "agility", "x");
-    let (status, page) = setup.post("/private-sheets/1", rejected).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    expect(&page, "rejected save");
-    // The unchanged page is a no-op: leading newlines compare equal (D-U).
-    assert_eq!(
-        setup.post("/private-sheets/1", submitted(&view)).await.0,
-        StatusCode::OK
-    );
-    let saved = reopen(&setup, 1).await;
-    assert_eq!(saved.revision, 1);
-    for key in ["description", "weapon_one", "equipment"] {
-        assert_eq!(saved.data[key], created.data[key], "unchanged save: {key}");
-    }
-    expect(&sheet_page(&setup).await, "second reload");
-}
-
-/// Final review (Sol): native form submission serialises textarea line breaks as CR LF. The
+/// Final review (Sol): a browser form submission serialises textarea line breaks as CR LF. The
 /// transport normalises CR LF and CR to LF, so an unchanged browser Save stores the same
 /// bytes and a `%0D%0A` body is stored with LF.
 #[tokio::test]

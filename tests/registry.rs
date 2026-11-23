@@ -1,8 +1,6 @@
 use mimik::Store;
 use mimik::{
     CharacterInput,
-    games::CreateRequest,
-    mork_borg::EDITION,
     registry::{RegisterAlias, RegisterRuleset},
 };
 use std::process::Command;
@@ -54,7 +52,6 @@ fn cli_registers_unknown_ruleset_and_lists_it_without_claiming_a_sheet() {
         .unwrap();
     assert_eq!(entry["edition_id"], "first");
     assert_eq!(entry["generic_sheet_available"], false);
-    assert_eq!(entry["native_adapter"], serde_json::Value::Null);
     Store::open(&database).unwrap();
 }
 
@@ -70,6 +67,10 @@ fn registration(game: &str, edition: &str, label: &str) -> RegisterRuleset {
         edition_label: label.into(),
     }
 }
+
+/// The label the removed seed (migration 005) gave the Italian 2025 edition: a legacy record or
+/// version-1 source carrying it is attached by the replayed migration when it is applied again.
+const SEEDED_LABEL: &str = "MÖRK BORG — IT 2025";
 
 fn legacy_character(edition: &str) -> CharacterInput {
     CharacterInput {
@@ -424,7 +425,7 @@ async fn fresh_source_and_alias_constraints_reject_partial_or_unknown_target_pai
 }
 
 #[tokio::test]
-async fn registry_is_exact_idempotent_and_cannot_shadow_native_or_alias_labels() {
+async fn registry_is_exact_idempotent_and_cannot_shadow_alias_labels() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("registry.sqlite3")).unwrap();
     store
@@ -447,8 +448,6 @@ async fn registry_is_exact_idempotent_and_cannot_shadow_native_or_alias_labels()
     for input in [
         registration("synthetic-game", "first", "Changed"),
         registration("synthetic-game", "second", "First edition"),
-        registration("mork-borg", "it-2025", "Changed"),
-        registration("mork-borg", "other", EDITION),
     ] {
         assert!(store.register_ruleset(input).await.is_err());
     }
@@ -477,7 +476,6 @@ async fn registry_is_exact_idempotent_and_cannot_shadow_native_or_alias_labels()
     for (game, target, old) in [
         ("synthetic-game", "first", "Second edition"),
         ("synthetic-game", "second", "Alias label"),
-        ("mork-borg", "it-2025", "Invented native alias"),
     ] {
         assert!(
             store
@@ -490,7 +488,7 @@ async fn registry_is_exact_idempotent_and_cannot_shadow_native_or_alias_labels()
                 .is_err()
         );
     }
-    assert_eq!(store.rulesets().await.unwrap().len(), 3);
+    assert_eq!(store.rulesets().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -514,7 +512,6 @@ async fn unknown_v2_sources_require_exact_registered_ids_and_keep_unreviewed_sta
     assert!(!page.complete);
     assert_eq!(page.units[0].state, "unreviewed");
     assert!(page.events.is_empty());
-    assert!(store.creation_catalog().await.unwrap().options.is_empty());
     let original: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("bundle.json")).unwrap()).unwrap();
     for (property, value) in [
@@ -598,19 +595,16 @@ async fn exact_alias_backfill_preserves_values_reviews_and_duplicate_import_iden
     assert_eq!(attached.ruleset.unwrap().edition_id, "fixture");
     assert_eq!(attached.input.revision, character.input.revision);
     assert_eq!(attached.input.notes, character.input.notes);
-    assert!(
-        !store
-            .get(character.id)
-            .await
-            .unwrap()
-            .has_mork_borg_adapter()
-    );
     assert_eq!(store.import_source(&bundle, &pdf).await.unwrap(), id);
     let after = store.source_page(page.id).await.unwrap();
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.units[0].correction, before.units[0].correction);
     assert_eq!(after.events.len(), before.events.len());
     let db = rusqlite::Connection::open(&path).unwrap();
+    store
+        .register_ruleset(registration("mork-borg", "it-2025", SEEDED_LABEL))
+        .await
+        .unwrap();
     schema_fixture::pre_finalization(&db, true);
     db.execute("DELETE FROM source_rulesets WHERE source_id=?1", [id])
         .unwrap();
@@ -642,87 +636,24 @@ async fn exact_alias_backfill_preserves_values_reviews_and_duplicate_import_iden
 }
 
 #[tokio::test]
-async fn raw_native_labels_without_correct_canonical_pair_never_enable_native_behavior() {
-    let dir = tempfile::tempdir().unwrap();
-    fixture::fixture_pair(dir.path()).unwrap();
-    let path = dir.path().join("registry.sqlite3");
-    let store = Store::open(&path).unwrap();
-    store
-        .import_source(
-            &dir.path().join("adapter-bundle"),
-            &dir.path().join("original.pdf"),
-        )
-        .await
-        .unwrap();
-    let character = store.create(legacy_character(EDITION)).await.unwrap();
-    assert!(character.has_mork_borg_adapter());
-    store.mork_borg_sheet(character.id).await.unwrap();
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute(
-        "DELETE FROM character_rulesets WHERE character_id=?1",
-        [character.id],
-    )
-    .unwrap();
-    assert!(
-        !store
-            .get(character.id)
-            .await
-            .unwrap()
-            .has_mork_borg_adapter()
-    );
-    assert!(store.mork_borg_sheet(character.id).await.is_err());
-    store
-        .register_ruleset(registration("mork-borg", "other", "Other edition"))
-        .await
-        .unwrap();
-    db.execute(
-        "INSERT INTO character_rulesets VALUES (?1,'mork-borg','other')",
-        [character.id],
-    )
-    .unwrap();
-    assert!(
-        !store
-            .get(character.id)
-            .await
-            .unwrap()
-            .has_mork_borg_adapter()
-    );
-    assert!(store.mork_borg_sheet(character.id).await.is_err());
-    schema_fixture::pre_finalization(&db, true);
-    db.execute("DELETE FROM source_rulesets", []).unwrap();
-    assert!(store.creation_catalog().await.unwrap().options.is_empty());
-    assert!(
-        store
-            .create_available_character(CreateRequest {
-                adapter_id: "mork-borg-it-2025".into(),
-                name: "Rejected".into(),
-                notes: String::new()
-            })
-            .await
-            .is_err()
-    );
-    assert_eq!(store.list().await.unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn populated_v4_migration_preserves_native_sheet_and_source_review_artifacts() {
+async fn populated_v4_replay_preserves_the_legacy_record_and_source_review_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     fixture::fixture_pair(dir.path()).unwrap();
     let path = dir.path().join("migration.sqlite3");
     let store = Store::open(&path).unwrap();
-    let character = store.create(legacy_character(EDITION)).await.unwrap();
-    let (_, mut sheet, _) = store.mork_borg_sheet(character.id).await.unwrap();
-    sheet.hp = 1;
-    sheet.equipment = "Preserved equipment".into();
+    let character = store.create(legacy_character(SEEDED_LABEL)).await.unwrap();
+    // A version-1 source carrying the label the replayed seed resolves.
+    let bundle = dir.path().join("bundle");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle.join("bundle.json")).unwrap()).unwrap();
+    manifest["edition"] = SEEDED_LABEL.into();
+    std::fs::write(
+        bundle.join("bundle.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     store
-        .save_mork_borg_sheet(character.id, sheet)
-        .await
-        .unwrap();
-    store
-        .import_source(
-            &dir.path().join("adapter-bundle"),
-            &dir.path().join("original.pdf"),
-        )
+        .import_source(&bundle, &dir.path().join("original.pdf"))
         .await
         .unwrap();
     let source = store.sources().await.unwrap().remove(0);
@@ -754,7 +685,7 @@ async fn populated_v4_migration_preserves_native_sheet_and_source_review_artifac
         .await
         .unwrap();
     let before = store.source_page(page.id).await.unwrap();
-    let before_sheet = store.mork_borg_sheet(character.id).await.unwrap();
+    let before_character = store.get(character.id).await.unwrap();
     let image = store.source_image(page.id).await.unwrap();
     drop(store);
     let db = rusqlite::Connection::open(&path).unwrap();
@@ -762,15 +693,15 @@ async fn populated_v4_migration_preserves_native_sheet_and_source_review_artifac
     db.execute_batch("PRAGMA foreign_keys=ON; DROP TABLE definition_drafts; DROP TABLE character_rulesets; DROP TABLE source_rulesets; DROP TABLE legacy_ruleset_aliases; DROP TABLE registry_editions; DROP TABLE registry_games; PRAGMA user_version=4;").unwrap();
     drop(db);
     let migrated = Store::open(&path).unwrap();
-    let after_sheet = migrated.mork_borg_sheet(character.id).await.unwrap();
+    // The replayed seed (005) attaches the legacy record and the source; the database is
+    // already at 038's shape, so the replay leaves the pair alone.
+    let after_character = migrated.get(character.id).await.unwrap();
     assert_eq!(
-        serde_json::to_value(after_sheet.1).unwrap(),
-        serde_json::to_value(before_sheet.1).unwrap()
+        after_character.input.revision,
+        before_character.input.revision
     );
-    assert_eq!(after_sheet.0.input.revision, before_sheet.0.input.revision);
-    assert_eq!(after_sheet.0.input.notes, before_sheet.0.input.notes);
-    assert!(after_sheet.0.has_mork_borg_adapter());
-    assert!(after_sheet.2);
+    assert_eq!(after_character.input.notes, before_character.input.notes);
+    assert_eq!(after_character.ruleset.unwrap().edition_id, "it-2025");
     let after = migrated.source_page(page.id).await.unwrap();
     assert_eq!(after.revision, before.revision);
     assert_eq!(after.complete, before.complete);
@@ -820,9 +751,8 @@ fn assert_registry_constraints(db: &rusqlite::Connection) {
         );
     }
     for sql in [
-        "INSERT INTO registry_editions VALUES ('missing','first','First',0)",
-        "INSERT INTO registry_editions VALUES ('mork-borg','invalid','Invalid',2)",
-        "UPDATE registry_editions SET native=0",
+        "INSERT INTO registry_editions(game_id,edition_id,label) VALUES ('missing','first','First')",
+        "UPDATE registry_editions SET label='Changed'",
         "DELETE FROM legacy_ruleset_aliases",
     ] {
         assert!(db.execute(sql, []).is_err(), "Constraint accepted {sql}");

@@ -1,6 +1,3 @@
-use crate::games::{CreateRequest, CreationCatalog};
-use crate::mork_borg::Sheet;
-use crate::mork_form::{SheetDraft, SheetForm};
 use crate::{AppError, Character, CharacterInput, Store};
 use askama::Template;
 use axum::{
@@ -9,16 +6,13 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::get,
 };
 
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
     characters: Vec<Character>,
-    catalog: CreationCatalog,
-    draft: CreateRequest,
-    message: String,
 }
 
 #[derive(Template)]
@@ -35,26 +29,6 @@ struct CharacterTemplate<'a> {
     message: &'a str,
 }
 
-#[derive(Template)]
-#[template(path = "mork_borg.html")]
-struct MorkTemplate<'a> {
-    character: &'a Character,
-    sheet: &'a Sheet,
-    draft: &'a SheetDraft,
-    message: &'a str,
-    saved: bool,
-}
-
-#[derive(Template)]
-#[template(path = "mork_editor.html")]
-struct MorkEditorTemplate<'a> {
-    character: &'a Character,
-    sheet: &'a Sheet,
-    draft: &'a SheetDraft,
-    message: &'a str,
-    saved: bool,
-}
-
 pub(crate) fn render(template: &impl Template) -> Result<Html<String>, AppError> {
     template.render().map(Html).map_err(|_| AppError::Template)
 }
@@ -63,12 +37,7 @@ pub fn app(store: Store) -> Router {
     Router::new()
         .merge(crate::sources::web::routes())
         .route("/", get(index))
-        .route("/characters", post(create))
         .route("/characters/{id}", get(character).post(save))
-        .route(
-            "/characters/{id}/mork-borg",
-            get(mork_character).post(mork_save),
-        )
         .route("/assets/app.css", get(css_asset))
         .route(
             "/assets/htmx.min.js",
@@ -152,116 +121,7 @@ pub(crate) async fn check_authority(request: Request, next: Next) -> Response {
 async fn index(State(store): State<Store>) -> Result<Html<String>, AppError> {
     render(&IndexTemplate {
         characters: store.list().await?,
-        catalog: store.creation_catalog().await?,
-        draft: CreateRequest::default(),
-        message: String::new(),
     })
-}
-
-async fn mork_character(
-    State(store): State<Store>,
-    Path(id): Path<i64>,
-) -> Result<Html<String>, AppError> {
-    let (character, sheet, saved) = store.mork_borg_sheet(id).await?;
-    let draft = SheetDraft::saved(&character, &sheet);
-    render(&MorkTemplate {
-        character: &character,
-        sheet: &sheet,
-        draft: &draft,
-        message: "",
-        saved,
-    })
-}
-
-async fn mork_save(
-    State(store): State<Store>,
-    Path(id): Path<i64>,
-    headers: HeaderMap,
-    submission: Result<Form<SheetForm>, axum::extract::rejection::FormRejection>,
-) -> Result<Response, AppError> {
-    let htmx = headers.get("hx-request").is_some_and(|v| v == "true");
-    if check_origin(&headers).is_err() {
-        return Ok(sheet_transport_error(
-            StatusCode::FORBIDDEN,
-            if htmx {
-                "Form origin rejected. Your displayed draft was kept; use the local application address."
-            } else {
-                "Form origin rejected. No changes were saved; use the local application address."
-            },
-        ));
-    }
-    let form = match submission {
-        Ok(Form(form)) => form,
-        Err(error) => {
-            return Ok(sheet_transport_error(
-                error.status(),
-                if htmx {
-                    "Submission format invalid: remove unsupported or repeated fields and retry. Your displayed draft was kept."
-                } else {
-                    "Submission format invalid: remove unsupported or repeated fields and retry. No changes were saved."
-                },
-            ));
-        }
-    };
-    let (current_character, current_sheet, _) = store.mork_borg_sheet(id).await?;
-    let draft = SheetDraft::submitted(&form, &current_character, &current_sheet);
-    let result = match draft.validate() {
-        Ok(sheet) => {
-            store
-                .save_mork_borg_sheet_named(id, sheet, form.name.clone())
-                .await
-        }
-        Err(error) => Err(error),
-    };
-    match result {
-        Ok((character, sheet)) if htmx => Ok(render(&MorkEditorTemplate {
-            character: &character,
-            sheet: &sheet,
-            draft: &SheetDraft::saved(&character, &sheet),
-            message: "Sheet saved. Derived values updated.",
-            saved: true,
-        })?
-        .into_response()),
-        Ok(_) => Ok(Redirect::to(&format!("/characters/{id}/mork-borg")).into_response()),
-        Err(error @ (AppError::Invalid(_) | AppError::Conflict)) => {
-            let message = error.to_string();
-            if htmx {
-                Ok((
-                    error.status(),
-                    render(&MorkEditorTemplate {
-                        character: &current_character,
-                        sheet: &current_sheet,
-                        draft: &draft,
-                        message: &message,
-                        saved: false,
-                    })?,
-                )
-                    .into_response())
-            } else {
-                Ok((
-                    error.status(),
-                    render(&MorkTemplate {
-                        character: &current_character,
-                        sheet: &current_sheet,
-                        draft: &draft,
-                        message: &message,
-                        saved: false,
-                    })?,
-                )
-                    .into_response())
-            }
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn sheet_transport_error(status: StatusCode, message: &'static str) -> Response {
-    (
-        status,
-        [("HX-Retarget", "#mork-message"), ("HX-Reswap", "innerHTML")],
-        Html(message),
-    )
-        .into_response()
 }
 
 // Local forms must originate from this host; normal non-browser clients may omit Origin.
@@ -286,30 +146,6 @@ pub(crate) fn check_origin(headers: &HeaderMap) -> Result<(), AppError> {
         }
     }
     Ok(())
-}
-
-async fn create(
-    State(store): State<Store>,
-    headers: HeaderMap,
-    Form(input): Form<CreateRequest>,
-) -> Result<Response, AppError> {
-    check_origin(&headers)?;
-    match store.create_available_character(input.clone()).await {
-        Ok(result) => {
-            Ok(Redirect::to(&format!("/characters/{}/mork-borg", result.id)).into_response())
-        }
-        Err(error @ AppError::Invalid(_)) => Ok((
-            error.status(),
-            render(&IndexTemplate {
-                characters: store.list().await?,
-                catalog: store.creation_catalog().await?,
-                draft: input,
-                message: error.to_string(),
-            })?,
-        )
-            .into_response()),
-        Err(error) => Err(error),
-    }
 }
 
 async fn character(

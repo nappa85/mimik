@@ -12,14 +12,14 @@
 <p>IDs start with a letter and contain only a–z, 0–9 and hyphens (at most 64). Repeating an exact registration changes nothing. Your signed-in Owner account is recorded.</p>
 <button>Register edition</button></form></section>
 <section class="panel"><h2>Add an exact legacy alias</h2>
-<p>Map an old exact edition label (from a version-1 source or legacy record) to a registered edition of the same game. Matching unresolved records are attached in the same transaction; existing associations are never changed. The native MÖRK BORG edition accepts only its seeded alias.</p>
+<p>Map an old exact edition label (from a version-1 source or legacy record) to a registered edition of the same game. Matching unresolved records are attached in the same transaction; existing associations are never changed.</p>
 <form method="post" action="/admin/rulesets/aliases"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>Game ID <input name="game_id" required maxlength="64" autocomplete="off" spellcheck="false" value="{% if let Some(form) = alias %}{{ form.game_id }}{% endif %}"></label>
 <label>Edition ID <input name="edition_id" required maxlength="64" autocomplete="off" spellcheck="false" value="{% if let Some(form) = alias %}{{ form.edition_id }}{% endif %}"></label>
 <label>Legacy exact edition label <input name="legacy_edition" required autocomplete="off" value="{% if let Some(form) = alias %}{{ form.legacy_edition }}{% endif %}"></label>
 <button>Register alias</button></form></section>
 <section class="panel"><h2>Registered editions</h2>
-{% for row in rows %}<article><h3>{{ row.game_label }} — {{ row.edition_label }}</h3><p><code>{{ row.game_id }}</code> / <code>{{ row.edition_id }}</code> · {% if let Some(adapter) = row.native_adapter %}native adapter {{ adapter }}{% else %}no native adapter{% endif %} · {% if row.generic_sheet_available %}generic sheet available{% else %}no generic sheet{% endif %}</p></article>{% endfor %}
+{% for row in rows %}<article><h3>{{ row.game_label }} — {{ row.edition_label }}</h3><p><code>{{ row.game_id }}</code> / <code>{{ row.edition_id }}</code> · {% if row.generic_sheet_available %}generic sheet available{% else %}no generic sheet{% endif %}</p></article>{% endfor %}
 {% if rows.is_empty() %}<p>No registered editions on this page.</p>{% endif %}
 {% if let Some(next) = next %}<a href="/admin/rulesets?after_game={{ next.game_id }}&amp;after_edition={{ next.edition_id }}">Next editions</a> · {% endif %}<a href="/admin/rulesets">First editions</a></section>
 {% endblock %}

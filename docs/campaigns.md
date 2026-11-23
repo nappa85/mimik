@@ -54,19 +54,19 @@ and, for a catalogue-backed name, `suggest/{f}/{p}` and `cells/{f}/{r}/{p}/which
 
 - A sheet's custodian is its creator; custody never changes. There is no transfer,
   delete, restore, rollback or purge.
-- Two kinds: **native**, the built-in MÖRK BORG Italian 2025 adapter (pin: adapter
-  `mork-borg-it-2025`, schema 1, calculation version 1), available only for that exact
-  ruleset; **runtime**, from a published definition version of the campaign's exact
-  ruleset with current wiring approval. Creating a runtime sheet needs current approval;
-  existing sheets stay readable and editable with a warning when the approval is stale
-  or withdrawn. The adapter is not an official sheet or a legality engine.
+- One kind: **runtime**, from a published definition version of the campaign's exact
+  ruleset with current wiring approval. Creating a sheet needs current approval and an
+  admitted immutable pin (a create without one is refused: `?version=` names no version
+  otherwise); existing sheets stay readable and editable with a warning when the approval is
+  stale or withdrawn. A sheet is not an official sheet or a legality engine.
 - **Read** (`authorize_read`): the custodian (also after leaving) or a current active
   Master of the campaign.
 - **Edit** (`authorize_edit`): the sheet is active, its pin is supported, the campaign
   has an enabled non-Owner Master to supervise, and the editor is a current Master or the
   custodian with active membership.
-- An unknown or future interpretation pin makes the sheet read-only; corrupt immutable
-  content is an error.
+- An unknown or future interpretation pin (a runtime pin of another schema) makes the sheet
+  read-only: its page shows the retained name, notes and data without any form, and no save
+  route admits it. Corrupt immutable content is an error.
 - Account disablement blocks access but does not transfer custody or freeze sheets.
 
 ## Departure and freeze
@@ -88,7 +88,7 @@ freezes.
   deleted.
 - Snapshots are host-canonical JSON with a versioned, domain-separated hash used to
   detect corruption (not protection against a database owner).
-- Native pins and runtime definition ID/version/hash/schema are immutable per sheet.
+- The runtime definition ID/version/hash/schema are immutable per sheet.
 - Every write rechecks session, deadline, account epoch, grants and expected revision in
   one IMMEDIATE transaction. A stale full-form save returns 409, an invalid one 422;
   both re-render the escaped draft with its submitted revision.
@@ -97,6 +97,9 @@ freezes.
   previous one. History is never evicted.
 
 ## Legacy records
+
+Legacy records keep their identity and notes at `/characters/{id}`; no new ones are created and
+none carries a sheet. A pre-release database that still holds native sheet data is refused at upgrade, not converted.
 
 The `--no-auth` prototype's character tables are separate from `private_sheets`. They
 are never assigned to campaigns or shown in authenticated mode, and the prototype cannot

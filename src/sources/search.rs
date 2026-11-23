@@ -697,7 +697,7 @@ mod tests {
             .build()
             .unwrap();
         let result = rt.block_on(store.run(|db| {
-            db.execute_batch("INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','00','{}','{}',1); INSERT INTO source_rulesets VALUES (1,'mork-borg','it-2025'); INSERT INTO source_pages (id,source_id,pdf_page,png,complete) VALUES (1,1,1,x'00',1);")?;
+            db.execute_batch("INSERT INTO registry_games VALUES ('mork-borg','MÖRK BORG'); INSERT INTO registry_editions(game_id,edition_id,label) VALUES ('mork-borg','it-2025','MÖRK BORG — IT 2025'); INSERT INTO sources (id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES (1,'b','s','t','mork-borg','e','it','00','{}','{}',1); INSERT INTO source_rulesets VALUES (1,'mork-borg','it-2025'); INSERT INTO source_pages (id,source_id,pdf_page,png,complete) VALUES (1,1,1,x'00',1);")?;
             // Seeds an unfinalized legacy-style reading; new selections otherwise need
             // finalization, so the guard is lifted for the registration only and restored.
             let guard: String = db.query_row("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='source_primary_events_insert'", [], |r| r.get(0))?;

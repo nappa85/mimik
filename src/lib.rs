@@ -5,10 +5,7 @@ pub mod campaigns;
 pub mod catalogues;
 pub mod definitions;
 mod form_text;
-pub mod games;
 mod local_file;
-pub mod mork_borg;
-mod mork_form;
 pub mod network;
 mod presentation;
 pub mod registry;
@@ -23,31 +20,6 @@ pub use store::{SCHEMA_VERSION, Store};
 pub use web::app;
 
 use serde::Deserialize;
-
-/// Family identifiers only: these do not claim implemented edition rules.
-pub struct System {
-    pub id: &'static str,
-    pub name: &'static str,
-}
-
-pub const SYSTEMS: &[System] = &[
-    System {
-        id: "dnd",
-        name: "D&D",
-    },
-    System {
-        id: "pathfinder",
-        name: "Pathfinder",
-    },
-    System {
-        id: "vampire",
-        name: "Vampire",
-    },
-    System {
-        id: "mork-borg",
-        name: "MÖRK BORG",
-    },
-];
 
 #[derive(Clone, Default, Deserialize)]
 pub struct CharacterInput {
@@ -71,8 +43,10 @@ impl CharacterInput {
         if self.name.is_empty() || self.name.chars().count() > 100 {
             return Err(AppError::Invalid("Name must contain 1–100 characters."));
         }
-        if !SYSTEMS.iter().any(|s| s.id == self.system_id) {
-            return Err(AppError::Invalid("Select a known game family."));
+        if !registry::valid_id(&self.system_id) {
+            return Err(AppError::Invalid(
+                "The game identifier must be a lowercase slug of at most 64 characters.",
+            ));
         }
         if self.edition.is_empty() || self.edition.chars().count() > 100 {
             return Err(AppError::Invalid(
@@ -93,24 +67,6 @@ pub struct Character {
     pub id: i64,
     pub input: CharacterInput,
     pub ruleset: Option<registry::RulesetKey>,
-}
-
-impl Character {
-    #[must_use]
-    pub fn has_mork_borg_adapter(&self) -> bool {
-        self.ruleset
-            .as_ref()
-            .and_then(games::adapter_for_ruleset)
-            .is_some_and(|adapter| adapter.id == "mork-borg-it-2025")
-    }
-
-    #[must_use]
-    pub fn system_name(&self) -> &str {
-        SYSTEMS
-            .iter()
-            .find(|s| s.id == self.input.system_id)
-            .map_or("Unknown system", |s| s.name)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

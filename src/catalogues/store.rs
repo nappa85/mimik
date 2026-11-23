@@ -51,16 +51,13 @@ pub(super) fn references(db: &Connection, data: &Admitted) -> Result<(), Catalog
         game_id: catalogue.game_id.clone(),
         edition_id: catalogue.edition_id.clone(),
     };
-    let native: Option<bool> = db
-        .query_row(
-            "SELECT native FROM registry_editions WHERE game_id=?1 AND edition_id=?2",
-            params![key.game_id, key.edition_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if native.is_none() || native == Some(true) || crate::games::adapter_for_ruleset(&key).is_some()
-    {
-        return Err(invalid("/", "registered-nonnative-ruleset-required"));
+    let registered: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM registry_editions WHERE game_id=?1 AND edition_id=?2)",
+        params![key.game_id, key.edition_id],
+        |row| row.get(0),
+    )?;
+    if !registered {
+        return Err(invalid("/", "registered-ruleset-required"));
     }
     for (index, source) in catalogue.sources.iter().enumerate() {
         let path = format!("/sources/{index}");

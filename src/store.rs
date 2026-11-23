@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 37;
+pub const SCHEMA_VERSION: i64 = 38;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 37] = [
+const MIGRATIONS: [&str; 38] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -48,6 +48,7 @@ const MIGRATIONS: [&str; 37] = [
     include_str!("../migrations/035_assistant_reminders.sql"),
     include_str!("../migrations/036_upload_limits.sql"),
     include_str!("../migrations/037_pdf_store.sql"),
+    include_str!("../migrations/038_remove_native_game.sql"),
 ];
 
 #[derive(Clone)]
@@ -152,6 +153,20 @@ impl Store {
                 {
                     tx.execute_batch("PRAGMA user_version=37;")?;
                     continue;
+                }
+                // 038 drops `mork_borg_sheets`. A database whose version was set back below 038
+                // after that (a restore, or a test fixture rewinding the schema) has nothing
+                // left to drop or refuse: only its version is set again.
+                if number == 38 {
+                    if tx.query_row(
+                        "SELECT count(*)=0 FROM sqlite_schema WHERE type='table' AND name='mork_borg_sheets'",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )? {
+                        tx.execute_batch("PRAGMA user_version=38;")?;
+                        continue;
+                    }
+                    refuse_native_data(&tx)?;
                 }
                 tx.execute_batch(migration)?;
             }
@@ -404,6 +419,23 @@ pub(crate) fn load(db: &Connection, id: i64) -> Result<Character, AppError> {
     .ok_or(AppError::NotFound)
 }
 
+/// Migration 038 drops the native MÖRK BORG sheet. Pre-release data is disposable, so it is
+/// never converted: a database holding native sheet data is refused with an operator
+/// message. (`RAISE` only exists inside triggers, so plain SQL could not say why.)
+fn refuse_native_data(tx: &Connection) -> Result<(), AppError> {
+    let native: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mork_borg_sheets) OR EXISTS(SELECT 1 FROM private_sheets WHERE kind='native')",
+        [],
+        |r| r.get(0),
+    )?;
+    if native {
+        return Err(AppError::Invalid(
+            "This database holds native MÖRK BORG sheet data, which this version no longer supports. Pre-release data is not converted: move the database file and its `sources/` folder (or the whole data folder) aside and start a new one.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod migration_tests {
     use super::*;
@@ -512,6 +544,10 @@ mod migration_tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "store_native_tests.rs"]
+mod native_removal_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 #[path = "store_upload_tests.rs"]

@@ -58,10 +58,10 @@ def run_admin_ruleset_browser(page, origin):
         "Rejected registration lost the submitted input",
     )
     alias = page.locator('form[action="/admin/rulesets/aliases"]')
-    _fill(alias, {"game_id": "mork-borg", "edition_id": "it-2025", "legacy_edition": "Shadow"})
+    _fill(alias, {"game_id": "browser-game", "edition_id": "missing", "legacy_edition": "Shadow"})
     require(
         _submit(page, alias, "/admin/rulesets/aliases") == 422,
-        "Native ruleset accepted an extra alias",
+        "An alias to an unregistered edition was accepted",
     )
     page.get_by_role("alert").wait_for()
     alias = page.locator('form[action="/admin/rulesets/aliases"]')

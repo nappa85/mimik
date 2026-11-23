@@ -32,7 +32,7 @@ async fn cli_imports_strict_definition_as_nonactivating_revision_one_draft() {
     let _guard = TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("draft.sqlite3");
-    let store = store(&database).await;
+    store(&database).await;
     let file = dir.path().join("definition.json");
     std::fs::write(&file, serde_json::to_vec(&draft()).unwrap()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_mimik"))
@@ -52,7 +52,6 @@ async fn cli_imports_strict_definition_as_nonactivating_revision_one_draft() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["status"], "draft");
     assert_eq!(result["revision"], 1);
-    assert!(store.creation_catalog().await.unwrap().options.is_empty());
 }
 
 #[tokio::test]
@@ -207,14 +206,6 @@ async fn revisions_full_content_identity_and_hash_persist_without_activating_cap
             .unwrap()
             .content_hash,
         other.content_hash
-    );
-    assert!(
-        reopened
-            .creation_catalog()
-            .await
-            .unwrap()
-            .options
-            .is_empty()
     );
     assert!(
         reopened
@@ -699,7 +690,7 @@ async fn database_rejects_nul_game_and_edition_slugs_even_with_valid_foreign_key
             .unwrap();
         }
         db.execute(
-            "INSERT INTO registry_editions VALUES (?1,?2,'Invalid fixture',0)",
+            "INSERT INTO registry_editions(game_id,edition_id,label) VALUES (?1,?2,'Invalid fixture')",
             rusqlite::params![game, edition],
         )
         .unwrap();

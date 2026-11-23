@@ -1,7 +1,7 @@
 //! The home page (`docs/auth-and-sessions.md`, Home page): each section for the Owner and for a
 //! player and Master on seeded databases, the row bound, the mark, and what a role never reads.
 use super::formula_tests::body;
-use super::{fixture, insert_native, native, router_request};
+use super::{fixture, insert_sheet, published_fixture, router_request, sheet};
 use crate::{Store, auth::RequestAuth};
 use axum::http::StatusCode;
 use rusqlite::params;
@@ -129,6 +129,8 @@ const CAMPAIGN_TABLES: [&str; 5] = [
 ];
 
 async fn seed_source(store: &Store, id: i64, title: &str, complete: &[bool]) {
+    // Clear of the published fixture's own source and pages.
+    let id = id + 1000;
     let title = title.to_owned();
     let complete = complete.to_vec();
     store
@@ -163,7 +165,7 @@ async fn seed_owner(store: &Store) {
             db.execute("INSERT INTO account_credentials VALUES(zeroblob(32),6,'enroll',1,90,86490,'active')", [])?;
             db.execute("INSERT INTO account_events(account_id,epoch,occurred_at,actor,action) VALUES(3,1,70,'credential_redemption','enroll')", [])?;
             // A suggestion report imported at 80, an open suggestion and a download in progress.
-            db.execute("INSERT INTO source_suggestion_reports(source_id,report_sha256,origin,schema_version,binding,created_at,imported_at,correction,reject,merge,missing_text,note,failed_pages) VALUES(1,?1,'tool:x',1,'bundle','t','1970-01-01 00:01:20',2,0,1,0,0,0)", ["e".repeat(64)])?;
+            db.execute("INSERT INTO source_suggestion_reports(source_id,report_sha256,origin,schema_version,binding,created_at,imported_at,correction,reject,merge,missing_text,note,failed_pages) VALUES(1001,?1,'tool:x',1,'bundle','t','1970-01-01 00:01:20',2,0,1,0,0,0)", ["e".repeat(64)])?;
             db.execute("INSERT INTO assistant_downloads(spec,file_name,sha256,size,confirmed_by,confirmed_at,state) VALUES(?1,'model-q4.gguf',?2,100,1,60,'confirmed')",
                 params![format!("hf:org/repo/model-q4.gguf@{}", "f".repeat(40)), "9".repeat(64)])?;
             Ok(())
@@ -173,7 +175,7 @@ async fn seed_owner(store: &Store) {
     // Two suggestions on source 1; the second is dismissed, so only the first is open.
     store
         .run(|db| {
-            db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1,101,'u1','Text','[]','<p>x</p>','x')", [])?;
+            db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(1001,100101,'u1','Text','[]','<p>x</p>','x')", [])?;
             Ok(())
         })
         .await
@@ -183,13 +185,13 @@ async fn seed_owner(store: &Store) {
         ids.push(
             store
                 .insert_source_suggestion(crate::sources::SourceSuggestion {
-                    source: 1,
-                    bundle_hash: format!("{:064}", 1),
+                    source: 1001,
+                    bundle_hash: format!("{:064}", 1001),
                     origin: "tool:fixture".into(),
                     kind: "reject".into(),
                     target: crate::sources::SuggestionTarget::Unit {
                         target: crate::sources::SuggestionUnit {
-                            unit: 1,
+                            unit: 1001,
                             revision: 1,
                         },
                     },
@@ -244,7 +246,7 @@ async fn owner_home_sections_and_mark() {
     // Pending: page-level counts, the first page needing attention, no finished source.
     assert!(html.contains("Open &#60;book&#62;") || html.contains("Open &lt;book&gt;"));
     assert!(html.contains("2 of 3 imported pages not complete"));
-    assert!(html.contains("href=\"/admin/materials/pages/101\""));
+    assert!(html.contains("href=\"/admin/materials/pages/100101\""));
     assert!(!html.contains("Finished book"));
     assert!(html.contains("failed (timeout)"));
     assert!(html.contains("open reject suggestion"));
@@ -399,10 +401,11 @@ async fn owner_home_runs_no_campaign_query_and_a_player_home_no_owner_query() {
 }
 
 async fn seed_rulesets(store: &Store) {
+    published_fixture(store).await;
     store
         .run(|db| {
-            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(900,'native-fixture','fixture','OWNER-ONLY-TITLE','mork-borg','Italian fixture','it','fixture',x'',x'',1)", [])?;
-            db.execute("INSERT INTO source_rulesets VALUES(900,'mork-borg','it-2025')", [])?;
+            db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(900,'owner-only-fixture','fixture','OWNER-ONLY-TITLE','synthetic-game','Owner-only edition','en','fixture',x'',x'',1)", [])?;
+            db.execute("INSERT INTO source_rulesets VALUES(900,'synthetic-game','first')", [])?;
             Ok(())
         })
         .await
@@ -434,8 +437,8 @@ async fn campaign_with_players(store: &Store, auth: &[RequestAuth], clock: &Arc<
         .create_campaign(
             auth[1].clone(),
             "Alpha <campaign>".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -527,13 +530,13 @@ async fn player_and_master_home_sections() {
     assert!(!html.contains("Mark as seen"));
 
     let campaign = campaign_with_players(&store, &auth, &clock).await;
-    let mut three = native(campaign, 3);
+    let mut three = sheet(campaign, 3);
     three.name = "Sheet of three".into();
-    insert_native(&store, auth[2].clone(), three).await;
-    let mut four = native(campaign, 4);
+    insert_sheet(&store, auth[2].clone(), three).await;
+    let mut four = sheet(campaign, 4);
     four.name = "Sheet of <four>".into();
     four.sheet_id = 2;
-    let four = insert_native(&store, auth[3].clone(), four).await;
+    let four = insert_sheet(&store, auth[3].clone(), four).await;
     // A pending request of account 5 for the Master to answer.
     at(&clock, 150);
     store.request_join(auth[4].clone(), campaign).await.unwrap();
@@ -623,8 +626,8 @@ async fn player_home_shows_ten_campaigns_with_a_link_to_the_list() {
             .create_campaign(
                 auth[1].clone(),
                 format!("Campaign {index:02}"),
-                "mork-borg".into(),
-                "it-2025".into(),
+                "synthetic-game".into(),
+                "first".into(),
             )
             .await
             .unwrap();

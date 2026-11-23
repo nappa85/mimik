@@ -43,25 +43,7 @@ footer { color: #555e57; font-size: .85rem; }
 .catalogue-text bdi, .catalogue-results bdi, .catalogue-nav bdi, .citations bdi, .catalogue-properties bdi, .catalogue-type bdi { unicode-bidi: isolate; }
 .catalogue-properties dd { white-space: pre-wrap; overflow-wrap: anywhere; }
 article.panel { margin-bottom: 1rem; }
-.mork-sheet { background: #141414; color: #fff; border: 4px solid #151515; }
-.mork-sheet-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, 1.4fr); gap: 1.3rem; }
-.mork-sheet-grid > section { min-width: 0; }
-.mork-sheet h2 { color: #f8e900; font-family: Georgia, serif; margin: 1.2rem 0 .5rem; }
-.mork-sheet label { color: #fff; }
-.mork-sheet input, .mork-sheet textarea { color: #111; background: #fffef4; border: 2px solid #ddd; }
-.mork-sheet small { color: #ddd; }
-.mork-sheet button { background: #f8e900; color: #111; font-weight: 700; }
-.mork-sheet .badge { color: #111; }
-.mork-hp { border: 3px solid #f8e900; border-radius: 35% 35% 12% 12%; padding: 1rem; margin: 1rem 0; }
-.mork-hp legend { color: #f8e900; font-weight: 800; text-align: center; }
-.hp-values, .mork-resource-row { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
-.mork-ability { margin: 1.5rem 0; border-bottom: 2px solid #f8e900; padding-bottom: .6rem; }
-.mork-ability label { font-family: Georgia, serif; font-size: 1.25rem; }
-.mork-ability input { font-size: 1.5rem; font-weight: 700; text-align: center; }
-.mork-calculations { border-top: 2px solid #f8e900; padding-top: 1rem; margin-top: 1rem; }
 .sr-label { font-size: .9rem; }
-@media (max-width: 800px) { .mork-sheet-grid { grid-template-columns: 1fr; } .mork-sheet-abilities { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; } .mork-hp { grid-column: 1 / -1; } }
-@media print { .mork-sheet { background: white; color: black; } .mork-sheet label, .mork-sheet small, .mork-sheet h2 { color: black; } .mork-sheet-grid { display: block; } .mork-sheet textarea { white-space: pre-wrap; } }
 .invitation-qr { max-width: 280px; background: white; padding: 8px; }
 .invitation-qr svg { display: block; width: 100%; height: auto; }
 .form-error { padding: .9rem 1rem; border-left: 4px solid #a6382e; background: #fff1ee; color: #6c241d; border-radius: 4px; }
@@ -240,4 +222,4 @@ body.app::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-
 .home-block li { margin: .3rem 0; }
 .home-empty, .home-more, .home-mark { color: #555e57; margin: .2rem 0; }
 /* A disabled button must look disabled: the buttons' colours above would hide that a press does nothing. */
-button:disabled, .mork-sheet button:disabled, .menu .items button:disabled { background: #b9bdb9; color: #3f4441; cursor: not-allowed; }
+button:disabled, .menu .items button:disabled { background: #b9bdb9; color: #3f4441; cursor: not-allowed; }

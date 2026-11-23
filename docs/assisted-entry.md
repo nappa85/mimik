@@ -2,8 +2,6 @@
 
 How runtime (definition-driven) private sheets accept, record and present what the player
 types. Decision IDs are in `docs/decisions.md`; remaining work in `docs/assisted-sheet-plan.md`.
-None of this applies to native MÖRK BORG sheets: authenticated native private sheets are plain
-full-form POST pages without scripts; only the `--no-auth` prototype's native editor uses htmx.
 
 | Concern | Code |
 |---|---|
@@ -24,8 +22,8 @@ full-form POST pages without scripts; only the `--no-auth` prototype's native ed
 ## Number entry
 
 Integer cells (scalar fields and list properties, on create and edit) read input with
-`entry::read`. Protocol integers (revisions, `base`, note keys) and native sheets keep the
-strict `values::integer`.
+`entry::read`. Protocol integers (revisions, `base`, note keys) keep the strict
+`values::integer`.
 
 ```text
 int   = DIGIT+                 ; ASCII digits only; leading zeros allowed ("007" = 7)
@@ -212,7 +210,7 @@ Equipment"), replaced by "This list holds 256 rows" when full.
 Unit routes (`UNIT_POST_BYTES` 256 KiB body for metadata, fields and cells; 5 MiB like the
 full form for a new row; 8 KiB for a row action and a quick-add line; a principal required
 before the body is read): parse (400), CSRF and request auth (403), the bounded permit wait, read and edit rights
-(403; an unsupported pin is read-only, so 403), then 400 for a native pin, an ID outside the
+(403; an unsupported pin is read-only, so 403), then 400 for an ID outside the
 slug grammar, not in the pin, derived or a list, a list index outside the grammar or not a
 list of the pin, a row missing at `base`, a forged edge move, a quick-add on a list without
 the line, or a key set that is not exact.
@@ -240,8 +238,8 @@ direction, or the other one at an edge. A quick-add redirects to `?focus=quick-<
 sheet view reads `focus` from the raw query: a repeated `focus`, an unknown value or any
 other parameter is ignored, never refused.
 
-Create, native, read-only, frozen and history pages and the re-render of a refused full-form
-POST keep the one full form (`value-<id>`, `row-<f>-<r>-<p>` names, with draft Add, Remove and
+Create, read-only, frozen and history pages and the re-render of a refused full-form
+POST keep the one full form (a sheet with an unsupported pin has no form: it shows its retained data) (`value-<id>`, `row-<f>-<r>-<p>` names, with draft Add, Remove and
 Move); the full-form edit POST is still accepted, with whole-sheet 409, and so is a slice-1.5a
 list form (`csrf`, `revision`, `list`, `op`, that list's rows) from a page loaded before
 per-cell save; its draft operations re-render in the full form.
@@ -265,7 +263,7 @@ saved page the reader may edit, between its rows and its new-row form: a form wi
 `csrf` and `base`, the input `quick-<f>` named `text` ("Quick add Equipment" through
 `aria-labelledby`, described by the hint `quick-hint-<f>`: "A count and a name, like “3
 torches” or “healing potion x2”", or "A name, added as one new row" when no quantity is
-mapped) and one Add button ("Add Equipment"). A full list (256 rows) shows no line; create, native, read-only, frozen and
+mapped) and one Add button ("Add Equipment"). A full list (256 rows) shows no line; create, read-only, frozen and
 history pages have none.
 
 **Reading** (`quick::read`, fixed rules, no model): over `MAX_CHARS` (200) characters or a
@@ -364,7 +362,7 @@ the sheet's identity and pin columns, the definition row, the member's latest se
 and, on a name-cache miss, that version's names (`docs/catalogues.md`). A hit of the pin-facts
 cache needs no runtime permit; a miss takes it once (try only: 503 when busy) to validate the
 pin. Every refusal after the shape checks (a forged address, a property without a member,
-another pair, a native, unsupported, corrupt or overlong pin, no sealed version, a reader who
+another pair, an unsupported, corrupt or overlong pin, no sealed version, a reader who
 may not read the sheet, the production Owner) is one uniform 403 `{"status": "unavailable"}`;
 answers carry the strict sheet CSP.
 
@@ -418,7 +416,7 @@ and links to the first one, whose own block gives its reason. Reasons, in this o
 - "N checks not evaluated": an unknown input (D-Z) or an evaluation error;
 - "N derived values not computed";
 - "derived values and checks unavailable": the engine refused the saved values as input;
-- "no rule checks cover its interpretation pin": native MÖRK BORG and unsupported pins.
+- "no rule checks cover its interpretation pin": unsupported pins.
 
 It is computed on view from the evaluation the page already does of the saved revision
 (`Validity::of`), never stored and never computed from a draft: the create page shows none,
@@ -432,7 +430,7 @@ revision it describes and the module replaces the paragraph from it (ASSIST-21).
 
 Step 2a, D-G, D-AA, ASSIST-21 to ASSIST-25. A saved runtime page the reader may edit loads one
 module, `<script type="module" src="/assets/sheet-assist.js">` (served by the auth router,
-embedded in the binary); create, native, read-only, frozen and history pages and full-form
+embedded in the binary); create, read-only, frozen and history pages and full-form
 re-renders load none. Without it every save, Undo, switch, quick-add and row action works
 through PRG as above.
 
@@ -825,10 +823,8 @@ pixel-identical pages. Data is canonical and versioned, never mapped to PDF coor
   Equipment") and "Add Equipment row" (disabled at 256 rows) re-render the draft until Save.
   Targets are at least 24 × 24 CSS px; rows stack without tables at 390 px. History shows
   rows read-only.
-- The native MÖRK BORG layout follows the owner-supplied blank sheet (htmx only in the
-  `--no-auth` prototype's editor)
-  (kept locally; exact edition and fidelity unverified). Logos, art and fonts keep their rights.
-- Print styling exists only for the native sheet; exporting the publisher's PDF is not a goal.
+- Runtime sheets are generic editors, not the publisher's layout; there is no print styling, and
+  exporting the publisher's PDF is not a goal. Logos, art and fonts keep their rights.
 - Automated Chromium runs at 1280 × 720 and 390 × 844 cover editing, long text, reflow and
   kept drafts. No approved official layout, print or cross-browser result is claimed.
 

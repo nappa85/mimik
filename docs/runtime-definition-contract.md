@@ -23,7 +23,7 @@ false`, `deny_unknown_fields`). Members, in canonical order:
 | Member | Required | Content |
 |---|---|---|
 | `contract_version` | yes | `1` |
-| `game_id`, `edition_id` | yes | A registered, non-native ruleset pair |
+| `game_id`, `edition_id` | yes | A registered ruleset pair |
 | `definition_id` | yes | Slug, unique within the pair |
 | `title` | yes | Label |
 | `sources` | yes | 0–32 `{source_id, pdf_sha256, roles}` |
@@ -173,7 +173,7 @@ pin loads.
    it (`admission.rs` tests).
 
 **Database references** (`store::references`, inside the write transaction): the pair must be
-registered, not native and without a compiled adapter (`registered-nonnative-ruleset-required`);
+registered (`registered-ruleset-required`);
 each source must exist with that PDF hash and be associated with the same pair; each region's
 unit must belong to that page and source; each linked catalogue must have a sealed version.
 
@@ -225,10 +225,10 @@ not approve evidence, enable rules or make a sheet available.
   insert-only: SQL triggers forbid update and delete (`migrations/005_registry.sql`).
   Registering exactly the same identity again succeeds and changes nothing; a different label
   for an existing ID, or an existing label for a different ID, fails.
-- **Native pair.** `mork-borg / it-2025` (label `MÖRK BORG — IT 2025`) is seeded with its exact
-  legacy alias and marked native. Compiled adapters activate only on the canonical pair
-  (`games::adapter_for_ruleset`), never on labels. Definitions cannot target a native pair,
-  and the native edition accepts no further aliases.
+- **No built-in game.** No game or edition lives in code (PROD-25). Migration 005 once seeded
+  `mork-borg / it-2025`; migration 038 deletes that pair unless a campaign, record, source,
+  draft, definition, catalogue, registry event or further alias refers to it, in which case it
+  stays as an ordinary registered game.
 - **Legacy aliases.** `(game_id, exact old edition label) → edition_id`, same game only,
   insert-only. Matching is exact, without case folding or filename inference. An alias may not
   point a registered label of another edition elsewhere. Creating an alias backfills the
@@ -253,8 +253,8 @@ mimik register-ruleset-alias --game-id my-game --edition-id first --legacy-editi
 mimik list-rulesets
 ```
 
-`list-rulesets` prints every edition as JSON ordered by `(game_id, edition_id)`, with labels,
-`native`, `native_adapter` and `generic_sheet_available` (always `false`; see limitations).
+`list-rulesets` prints every edition as JSON ordered by `(game_id, edition_id)`, with labels
+and `generic_sheet_available` (always `false`; see limitations).
 All subcommands accept the global `--database PATH` (default `data/mimik.sqlite3`, or
 `MIMIK_DATABASE`). The CLI trusts local OS and database access.
 
@@ -275,8 +275,8 @@ A version-2 prepared bundle must carry `system_id` (the registered game ID), `ed
 registered edition of that game) and `edition` (its registered label, or an exact alias of
 the same pair). The pair must be registered before import; missing, null, malformed or
 contradictory IDs fail, and an alias never overrides explicit IDs (`registry::source_identity`,
-`sources/import.rs`). Version 1 rejects any `edition_id` member; v1 imports for the built-in
-legacy systems may remain unresolved, and other v1 systems need an exact alias. Import never
+`sources/import.rs`). Version 1 rejects any `edition_id` member; a v1 import names its
+game only by a slug and stays unresolved until an exact alias attaches it. Import never
 approves evidence. The rest of the bundle contract is in
 [sources-and-retrieval.md](sources-and-retrieval.md).
 

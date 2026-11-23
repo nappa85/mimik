@@ -55,6 +55,12 @@ fn open_seeded(dir: &Path, seeder: impl FnOnce(&Connection)) -> Store {
     let path = dir.join("search.sqlite3");
     drop(Store::open(&path).unwrap());
     let db = Connection::open(&path).unwrap();
+    // The pair these tests search is an ordinary registered game, with the label alias a
+    // legacy source carries (the migrations seed no game).
+    db.execute_batch(
+        "INSERT INTO registry_games VALUES ('mork-borg','MÖRK BORG'); INSERT INTO registry_editions(game_id,edition_id,label) VALUES ('mork-borg','it-2025','MÖRK BORG — IT 2025'); INSERT INTO legacy_ruleset_aliases VALUES ('mork-borg','MÖRK BORG — IT 2025','mork-borg','it-2025');",
+    )
+    .unwrap();
     // Seed as a pre-search-schema database so reopening exercises the upgrade backfill.
     schema_fixture::drop_search_schema(&db);
     db.execute_batch(&format!(
@@ -400,7 +406,7 @@ async fn truncation_flag_reports_more_than_fifty() {
 async fn edition_and_source_set_filters_apply_before_ranking() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_seeded(dir.path(), |db| {
-        db.execute("INSERT INTO registry_editions VALUES ('mork-borg','alt-2026','MÖRK BORG — ALT 2026',0)", []).unwrap();
+        db.execute("INSERT INTO registry_editions(game_id,edition_id,label) VALUES ('mork-borg','alt-2026','MÖRK BORG — ALT 2026')", []).unwrap();
         // The other edition has 60 stronger matches; none may displace or join our hits.
         let strong: Vec<Unit> = (100..160)
             .map(|id| unit(id, 10, "<p>veleno veleno veleno</p>"))

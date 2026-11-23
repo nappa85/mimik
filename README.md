@@ -29,8 +29,6 @@ licensed under AGPL-3.0-only; see `LICENSE` and the licensing section of the
   operation manuals never leave the machine; the optional extraction reviewer
   (`tools/review_extraction.py`), when explicitly invoked, sends page blocks and page images to
   the HTTPS endpoint the owner selects.
-- **Native MÖRK BORG sheet** for the Italian 2025 core rules, once that exact source is
-  registered.
 - **Optional local model assistant** (`--assistant`, off by default): a pinned llama.cpp
   server run as a confined child proposes readings and reminders that the player confirms;
   proof-of-concept quality, not certified ([model runtime](docs/model-runtime.md),

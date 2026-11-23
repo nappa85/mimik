@@ -227,7 +227,7 @@ pub(super) async fn which(
         .await
     {
         Ok(read) => read,
-        // A sheet that cannot be read as a runtime sheet (a corrupt, unsupported or native
+        // A sheet that cannot be read as a runtime sheet (a corrupt or unsupported
         // pin, or damaged stored data) is the same uniform refusal as an unreadable one.
         Err(AppError::NotFound | AppError::Invalid(_) | AppError::SheetData(_)) => {
             return refused(id);

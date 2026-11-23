@@ -114,7 +114,7 @@ pub(super) fn match_pin(snapshot: &PrivateSnapshot, pin: &ImmutablePin) -> Resul
         {
             Ok(())
         }
-        _ => Err(AppError::Invalid("Runtime interpretation pin mismatch.")),
+        Pin::Runtime { .. } => Err(AppError::Invalid("Runtime interpretation pin mismatch.")),
     }
 }
 
@@ -289,26 +289,51 @@ impl Store {
         permit: OwnedSemaphorePermit,
     ) -> Result<(SheetView, OwnedSemaphorePermit), AppError> {
         let admitted_auth = auth.clone();
-        let (snapshot,raw,permit)=self.run_bounded_auth(move |db|{
-            let tx=db.transaction()?;auth.recheck(&tx)?;
-            let campaign=campaign(&tx,id)?;
-            if role(&tx,id,auth.account_id())?.is_none(){return Err(AppError::NotFound);}
-            let (pin,kind,data,raw)=if version==0{
-                let key=crate::registry::RulesetKey{game_id:campaign.game_id.clone(),edition_id:campaign.edition_id.clone()};
-                let adapter=crate::games::adapter_for_ruleset(&key).ok_or(AppError::Invalid("Capability unavailable: select an approved runtime definition."))?;
-                let loaded=crate::games::native_available(&tx,&key)?;
-                if !loaded{return Err(AppError::Invalid("Capability unavailable: load the exact implemented Italian source pair."));}
-                (Pin::Native{adapter:adapter.id.into(),schema:1,calculation_version:1},"native".into(),serde_json::to_value(crate::mork_borg::Sheet::default())?,None)
-            }else{
-                let raw=private_pin::load(&tx,version)?;
-                if raw.game!=campaign.game_id || raw.edition!=campaign.edition_id{return Err(AppError::NotFound);}
-                (Pin::Runtime{version_id:version,version:raw.version,content_hash:raw.hash.clone(),schema:1},"runtime".into(),serde_json::json!({}),Some(raw))
-            };
-            let snapshot=PrivateSnapshot{encoding:1,sheet_id:0,campaign_id:id,game_id:campaign.game_id,edition_id:campaign.edition_id,custodian_id:auth.account_id(),kind,pin,revision:0,state:"active".into(),name:String::new(),notes:String::new(),data};
-            snapshots::authorize_edit(&tx,&auth,&snapshot)?;auth.recheck(&tx)?;tx.commit()?;Ok((snapshot,raw,permit))
-        }).await?;
+        let (snapshot, raw, permit) = self
+            .run_bounded_auth(move |db| {
+                let tx = db.transaction()?;
+                auth.recheck(&tx)?;
+                let campaign = campaign(&tx, id)?;
+                if role(&tx, id, auth.account_id())?.is_none() {
+                    return Err(AppError::NotFound);
+                }
+                // A sheet is created only on an immutable runtime pin; there is no pin-less create.
+                if version <= 0 {
+                    return Err(AppError::NotFound);
+                }
+                let raw = private_pin::load(&tx, version)?;
+                if raw.game != campaign.game_id || raw.edition != campaign.edition_id {
+                    return Err(AppError::NotFound);
+                }
+                let pin = Pin::Runtime {
+                    version_id: version,
+                    version: raw.version,
+                    content_hash: raw.hash.clone(),
+                    schema: 1,
+                };
+                let snapshot = PrivateSnapshot {
+                    encoding: 1,
+                    sheet_id: 0,
+                    campaign_id: id,
+                    game_id: campaign.game_id,
+                    edition_id: campaign.edition_id,
+                    custodian_id: auth.account_id(),
+                    kind: "runtime".into(),
+                    pin,
+                    revision: 0,
+                    state: "active".into(),
+                    name: String::new(),
+                    notes: String::new(),
+                    data: serde_json::json!({}),
+                };
+                snapshots::authorize_edit(&tx, &auth, &snapshot)?;
+                auth.recheck(&tx)?;
+                tx.commit()?;
+                Ok((snapshot, raw, permit))
+            })
+            .await?;
         let (view, permit) = tokio::task::spawn_blocking(move || {
-            let immutable = raw.map(private_pin::validate).transpose()?;
+            let immutable = Some(private_pin::validate(raw)?);
             Ok::<_, AppError>((
                 SheetView {
                     snapshot,
@@ -373,8 +398,7 @@ impl Store {
                 match_pin(&view.snapshot,pin)?;pin.unchanged(&tx)?;
                 if create && pin.readiness(&tx)?!=WiringStatus::Current{return Err(AppError::Invalid("Capability unavailable: wiring approval is stale, withdrawn, or evidence is unavailable."));}
             }else if create {
-                let loaded:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM source_rulesets WHERE game_id=?1 AND edition_id=?2)",params![view.snapshot.game_id,view.snapshot.edition_id],|r|r.get(0))?;
-                if !loaded{return Err(AppError::Invalid("Capability unavailable: exact native source is not loaded."));}
+                return Err(AppError::Invalid("Capability unavailable: a sheet is created only on an approved runtime definition."));
             }
             if create {
                 let total:i64=tx.query_row("SELECT count(*) FROM private_sheets",[],|r|r.get(0))?;
@@ -479,11 +503,8 @@ impl Store {
                     return Err(AppError::NotFound);
                 }
                 snapshots::authorize_edit(&tx, &auth, &view.snapshot)?;
-                if view.immutable.is_none() && !crate::games::native_available(&tx, &crate::registry::RulesetKey {
-                    game_id: current.game_id,
-                    edition_id: current.edition_id,
-                })? {
-                    return Err(AppError::Invalid("Capability unavailable: exact native source is not loaded."));
+                if view.immutable.is_none() {
+                    return Err(AppError::Invalid("Capability unavailable: a sheet is created only on an approved runtime definition."));
                 }
             } else {
                 snapshots::authorize_read(&tx, &auth, view.snapshot.sheet_id)?;

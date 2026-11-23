@@ -41,20 +41,15 @@ pub(super) fn references(db: &Connection, data: &Admitted) -> Result<(), Definit
         game_id: definition.game_id.clone(),
         edition_id: definition.edition_id.clone(),
     };
-    let native: Option<bool> = db
+    let registered: bool = db
         .query_row(
-            "SELECT native FROM registry_editions WHERE game_id=?1 AND edition_id=?2",
+            "SELECT EXISTS(SELECT 1 FROM registry_editions WHERE game_id=?1 AND edition_id=?2)",
             params![key.game_id, key.edition_id],
             |row| row.get(0),
         )
-        .optional()
         .map_err(AppError::from)?;
-    if native.is_none() || native == Some(true) || crate::games::adapter_for_ruleset(&key).is_some()
-    {
-        return Err(ValidationReport::one(
-            "/",
-            "registered-nonnative-ruleset-required",
-        ));
+    if !registered {
+        return Err(ValidationReport::one("/", "registered-ruleset-required"));
     }
     for source in &definition.sources {
         let matched: i64 = db.query_row("SELECT count(*) FROM sources s JOIN source_rulesets r ON r.source_id=s.id WHERE s.id=?1 AND s.pdf_hash=?2 AND r.game_id=?3 AND r.edition_id=?4", params![source.source_id,source.pdf_sha256,key.game_id,key.edition_id], |row| row.get(0)).map_err(AppError::from)?;

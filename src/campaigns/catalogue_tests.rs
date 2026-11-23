@@ -1,7 +1,7 @@
 //! Catalogue plan §3 step 3: the `catalogues` link checked at its three sites (D8, R10, R27),
 //! and the read-only catalogue routes reached through a sheet (D4, D11, R6, R7, R12, R21,
 //! R25), through the real router. Synthetic original text only.
-use super::{fixture, insert_native, native, router_request};
+use super::{fixture, insert_sheet, make_unsupported, router_request, sheet};
 use crate::{
     AppError, Store,
     auth::RequestAuth,
@@ -40,7 +40,7 @@ pub(super) async fn catalogue_source(store: &Store) {
     store.run(|db| {
         for game in ["synthetic-game", "other-game"] {
             db.execute("INSERT INTO registry_games VALUES(?1,'Synthetic')", [game])?;
-            db.execute("INSERT INTO registry_editions VALUES(?1,'first','First',0)", [game])?;
+            db.execute("INSERT INTO registry_editions(game_id,edition_id,label) VALUES(?1,'first','First')", [game])?;
         }
         let prepared = json!({"contract_version":1,"extraction_sha256":ZEROS}).to_string();
         db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(?1,'fixture','Synthetic <b>manual</b>','synthetic-game','First','en',?1,x'',?2,4)", params![ZEROS, prepared.as_bytes()])?;
@@ -535,20 +535,22 @@ async fn refusals_are_uniform_and_explain_themselves() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let world = world().await;
-    // A native sheet (id 2) of the Master in a native campaign.
-    let native_campaign = world
+    // A sheet (id 2) of the Master whose pin this build does not support.
+    let unsupported_campaign = world
         .store
         .create_campaign(
             world.auth[1].clone(),
-            "Native".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "Unsupported".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    let mut snapshot = native(native_campaign, 2);
+    let mut snapshot = sheet(unsupported_campaign, 2);
     snapshot.sheet_id = 2;
-    insert_native(&world.store, world.auth[1].clone(), snapshot).await;
+    snapshot.data = json!({"label": "Text"});
+    insert_sheet(&world.store, world.auth[1].clone(), snapshot).await;
+    make_unsupported(&world.store, 2).await;
     assert_eq!(
         get(&world.app, &world.auth[1], "/private-sheets/2").await.0,
         StatusCode::OK
@@ -576,7 +578,7 @@ async fn refusals_are_uniform_and_explain_themselves() {
         (0, "/private-sheets/1/catalogue/items/lantern-flare"),
         (0, "/private-sheets/1/catalogue/spells/nothing"),
     ];
-    // An unknown sheet and a native pin.
+    // An unknown sheet and an unsupported pin.
     let other_sheets = [
         (1, "/private-sheets/99/catalogue/spells"),
         (1, "/private-sheets/99/catalogue/spells/nothing"),
@@ -1435,7 +1437,7 @@ async fn catalogues_are_confined_to_the_pair_the_seal_and_the_catalogue() {
         .store
         .run(|db| {
             db.execute(
-                "INSERT INTO registry_editions VALUES('synthetic-game','second','Second',0)",
+                "INSERT INTO registry_editions(game_id,edition_id,label) VALUES('synthetic-game','second','Second')",
                 [],
             )?;
             Ok(())

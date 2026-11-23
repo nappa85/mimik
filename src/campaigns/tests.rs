@@ -54,6 +54,8 @@ pub(super) mod list_tests;
 mod list_values_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
+#[path = "native_removal_tests.rs"]
+mod native_removal_tests;
 #[path = "nav_tests.rs"]
 mod nav_tests;
 #[path = "notes_tests.rs"]
@@ -115,37 +117,66 @@ async fn fixture_with_owner(
     (dir, store, auths, clock)
 }
 
-fn native(campaign: i64, owner: i64) -> PrivateSnapshot {
+/// A generic private sheet on the published runtime fixture (`published_fixture`), for the many
+/// tests that need some sheet of a campaign and nothing game-specific. The pin is a
+/// placeholder: [`insert_sheet`] and [`admitted`] complete it from the campaign's published
+/// version, so the snapshot always goes through the runtime writer.
+fn sheet(campaign: i64, owner: i64) -> PrivateSnapshot {
     PrivateSnapshot {
         encoding: 1,
         sheet_id: 1,
         campaign_id: campaign,
-        game_id: "mork-borg".into(),
-        edition_id: "it-2025".into(),
+        game_id: "synthetic-game".into(),
+        edition_id: "first".into(),
         custodian_id: owner,
-        kind: "native".into(),
-        pin: Pin::Native {
-            adapter: "mork-borg-it-2025".into(),
+        kind: "runtime".into(),
+        pin: Pin::Runtime {
+            version_id: 0,
+            version: 0,
+            content_hash: String::new(),
             schema: 1,
-            calculation_version: 1,
         },
         revision: 0,
         state: "active".into(),
         name: "Private <name>".into(),
         notes: "Retain exact notes".into(),
-        data: serde_json::to_value(crate::mork_borg::Sheet::default()).unwrap(),
+        data: serde_json::json!({"label": "Generic <label>", "large": 7, "flag": false, "story": null}),
     }
 }
 
-async fn insert_native(
+/// Points `snapshot` at the published fixture version and returns the admitted pin to write it
+/// with. Runs inside the caller's transaction.
+fn admitted(
+    db: &rusqlite::Connection,
+    snapshot: &mut PrivateSnapshot,
+) -> crate::definitions::private_pin::ImmutablePin {
+    let version_id: i64 = db
+        .query_row(
+            "SELECT id FROM definition_versions WHERE game_id=?1 AND edition_id=?2 ORDER BY id LIMIT 1",
+            params![snapshot.game_id, snapshot.edition_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let raw = crate::definitions::private_pin::load(db, version_id).unwrap();
+    snapshot.pin = Pin::Runtime {
+        version_id,
+        version: raw.version,
+        content_hash: raw.hash.clone(),
+        schema: 1,
+    };
+    crate::definitions::private_pin::validate_for_write(raw).unwrap()
+}
+
+async fn insert_sheet(
     store: &Store,
     auth: RequestAuth,
-    snapshot: PrivateSnapshot,
+    mut snapshot: PrivateSnapshot,
 ) -> PrivateSnapshot {
     store
         .run_campaign(auth.clone(), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let result = snapshots::write(&tx, &auth, snapshot, "create", None)?;
+            let pin = admitted(&tx, &mut snapshot);
+            let result = snapshots::write(&tx, &auth, snapshot, "create", Some(&pin))?;
             tx.commit()?;
             Ok(result)
         })
@@ -153,17 +184,58 @@ async fn insert_native(
         .unwrap()
 }
 
+/// Rewrites a stored sheet to an interpretation this build does not support (a runtime pin of a
+/// future schema), keeping its history valid: the retained data stays readable and never
+/// editable, and a departure still freezes it.
+async fn make_unsupported(store: &Store, sheet_id: i64) {
+    store
+        .run(move |db| {
+            let tx = db.transaction()?;
+            let mut future = snapshots::load(&tx, sheet_id)?;
+            let Pin::Runtime { schema, .. } = &mut future.pin;
+            *schema = 2;
+            let snapshot = serde_json::to_string(&future)?;
+            let hash = snapshots::hash(snapshot.as_bytes());
+            let pin = serde_json::to_string(&future.pin)?;
+            let triggers = ["private_sheets_update", "private_sheet_history_update"].map(|name| {
+                tx.query_row("SELECT sql FROM sqlite_schema WHERE name=?1", [name], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap()
+            });
+            tx.execute_batch(
+                "DROP TRIGGER private_sheets_update; DROP TRIGGER private_sheet_history_update;",
+            )?;
+            tx.execute(
+                "UPDATE private_sheets SET pin=?1,snapshot=?2,hash=?3 WHERE id=?4",
+                params![pin, snapshot, hash, sheet_id],
+            )?;
+            tx.execute(
+                "UPDATE private_sheet_history SET snapshot=?1,hash=?2 WHERE sheet_id=?3",
+                params![snapshot, hash, sheet_id],
+            )?;
+            for sql in triggers {
+                tx.execute_batch(&sql)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn privacy_roles_noop_history_freeze_and_sticky_rejoin() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let id = store
         .create_campaign(
             auth[1].clone(),
             "Campaign".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -172,7 +244,7 @@ async fn privacy_roles_noop_history_freeze_and_sticky_rejoin() {
         .decide_join(auth[1].clone(), id, 3, 1, true)
         .await
         .unwrap();
-    let saved = insert_native(&store, auth[2].clone(), native(id, 3)).await;
+    let saved = insert_sheet(&store, auth[2].clone(), sheet(id, 3)).await;
     assert_eq!(saved.revision, 1);
     assert!(store.list().await.unwrap().is_empty());
     assert_outsiders_denied(&store, &[auth[0].clone(), auth[3].clone(), auth[4].clone()]).await;
@@ -258,12 +330,13 @@ async fn regression_private_read_rechecks_grants_after_validation_gap() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Read boundary".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -284,7 +357,7 @@ async fn regression_private_read_rechecks_grants_after_validation_gap() {
         .change_role(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    insert_native(&store, auth[3].clone(), native(campaign, 4)).await;
+    insert_sheet(&store, auth[3].clone(), sheet(campaign, 4)).await;
     let (entered, waiting) = tokio::sync::oneshot::channel();
     let (release, released) = std::sync::mpsc::channel();
     let entered = std::sync::Mutex::new(Some(entered));
@@ -326,16 +399,17 @@ async fn regression_private_predecessor_is_bounded_before_json_processing() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "History bounds".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    let saved = insert_native(&store, auth[1].clone(), native(campaign, 2)).await;
+    let saved = insert_sheet(&store, auth[1].clone(), sheet(campaign, 2)).await;
     let (view, permit) = store
         .private_read(
             auth[1].clone(),
@@ -400,12 +474,13 @@ async fn missing_history_commit_fails_and_last_freeze_failure_rolls_back() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let id = store
         .create_campaign(
             auth[1].clone(),
             "Campaign".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -414,7 +489,7 @@ async fn missing_history_commit_fails_and_last_freeze_failure_rolls_back() {
         .decide_join(auth[1].clone(), id, 3, 1, true)
         .await
         .unwrap();
-    insert_native(&store, auth[2].clone(), native(id, 3)).await;
+    insert_sheet(&store, auth[2].clone(), sheet(id, 3)).await;
     let a = auth[2].clone();
     assert!(
         store
@@ -428,9 +503,9 @@ async fn missing_history_commit_fails_and_last_freeze_failure_rolls_back() {
             .await
             .is_err()
     );
-    let mut second = native(id, 3);
+    let mut second = sheet(id, 3);
     second.sheet_id = 2;
-    insert_native(&store, auth[2].clone(), second).await;
+    insert_sheet(&store, auth[2].clone(), second).await;
     store.run(|db|{db.execute_batch("CREATE TRIGGER fail_last_history BEFORE INSERT ON private_sheet_history WHEN NEW.sheet_id=2 AND NEW.operation='freeze' BEGIN SELECT RAISE(ABORT,'synthetic disk failure'); END;")?;Ok(())}).await.unwrap();
     assert!(store.depart(auth[2].clone(), id, 3, 1).await.is_err());
     assert_eq!(
@@ -461,11 +536,12 @@ async fn missing_history_commit_fails_and_last_freeze_failure_rolls_back() {
 async fn domain_clock_epoch_and_default_sql_guard_are_fail_closed() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, clock) = fixture().await;
+    published_fixture(&store).await;
     assert!(
         store
             .run(|db| {
                 db.execute(
-                    "INSERT INTO campaigns VALUES(1,1,'mork-borg','it-2025','Unauthorized',1)",
+                    "INSERT INTO campaigns VALUES(1,1,'synthetic-game','first','Unauthorized',1)",
                     [],
                 )?;
                 Ok(())
@@ -479,8 +555,8 @@ async fn domain_clock_epoch_and_default_sql_guard_are_fail_closed() {
             .create_campaign(
                 auth[1].clone(),
                 "Expired".into(),
-                "mork-borg".into(),
-                "it-2025".into()
+                "synthetic-game".into(),
+                "first".into()
             )
             .await
             .is_err()
@@ -499,8 +575,8 @@ async fn domain_clock_epoch_and_default_sql_guard_are_fail_closed() {
             .create_campaign(
                 auth[1].clone(),
                 "Old epoch".into(),
-                "mork-borg".into(),
-                "it-2025".into()
+                "synthetic-game".into(),
+                "first".into()
             )
             .await
             .is_err()
@@ -539,16 +615,17 @@ async fn regression_current_history_operation_corruption_is_rejected() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let id = store
         .create_campaign(
             auth[1].clone(),
             "Campaign".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    insert_native(&store, auth[1].clone(), native(id, 2)).await;
+    insert_sheet(&store, auth[1].clone(), sheet(id, 2)).await;
     store
         .run(|db| {
             let sql: String = db.query_row(
@@ -609,19 +686,37 @@ async fn router_request(
         .unwrap()
 }
 
+/// The full runtime form of the published fixture, as the browser posts it.
+fn runtime_form(name: &str, notes: &str, label: &str) -> Vec<(String, String)> {
+    [
+        ("csrf", "a".repeat(64)),
+        ("revision", "0".into()),
+        ("name", name.into()),
+        ("notes", notes.into()),
+        ("value-label", label.into()),
+        ("value-large", "7".into()),
+        ("value-flag", "false".into()),
+        ("null-flag", "known".into()),
+        ("value-story", String::new()),
+        ("null-story", "unknown".into()),
+    ]
+    .map(|(key, value)| (key.into(), value))
+    .to_vec()
+}
+
 #[tokio::test]
-async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legacy_denials() {
+async fn actual_router_campaign_runtime_full_replace_escaped_drafts_private_legacy_denials() {
     use axum::http::StatusCode;
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
-    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
+    let version = published_fixture(&store).await;
     let app = crate::auth::app(store.clone()).await.unwrap();
     let create = vec![
         ("csrf".into(), "a".repeat(64)),
         ("title".into(), "Router campaign".into()),
-        ("game_id".into(), "mork-borg".into()),
-        ("edition_id".into(), "it-2025".into()),
+        ("game_id".into(), "synthetic-game".into()),
+        ("edition_id".into(), "first".into()),
     ];
     assert_eq!(
         router_request(&app, &auth[1], "/campaigns", Some(create))
@@ -655,21 +750,20 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
         .status(),
         StatusCode::SEE_OTHER
     );
-    let response = router_request(&app, &auth[2], "/campaigns/1/sheets/new", None).await;
+    let path = format!("/campaigns/1/sheets/new?version={version}");
+    let response = router_request(&app, &auth[2], &path, None).await;
     assert_eq!(response.status(), StatusCode::OK);
-    let mut form = native_form();
+    let mut form = runtime_form(
+        "Private <script>name</script>",
+        "Exact private notes",
+        &"Long runtime text ".repeat(100),
+    );
     assert_eq!(
-        router_request(
-            &app,
-            &auth[2],
-            "/campaigns/1/sheets/new",
-            Some(form.clone())
-        )
-        .await
-        .status(),
+        router_request(&app, &auth[2], &path, Some(form.clone()))
+            .await
+            .status(),
         StatusCode::SEE_OTHER
     );
-    assert_native_page_has_no_formula_markers(&app, &auth[2]).await;
     // An edit that changes something (an unchanged save writes nothing, D-U), so the
     // re-post below is stale.
     for pair in &mut form {
@@ -700,7 +794,7 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
     assert!(html.contains("name=\"revision\" value=\"1\""));
     assert!(!html.contains("/sources"));
     assert_owner_router_denials(&app, &auth[0]).await;
-    form.retain(|(key, _)| key != "description");
+    form.retain(|(key, _)| key != "value-label");
     assert_eq!(
         router_request(&app, &auth[2], "/private-sheets/1", Some(form))
             .await
@@ -710,33 +804,41 @@ async fn actual_router_campaign_native_full_replace_escaped_drafts_private_legac
     assert!(store.list().await.unwrap().is_empty());
 }
 
-/// Slice 1.5a (Sonnet m1): the per-field routes refuse native sheets (400, nothing written);
-/// the native editor keeps its one full form.
+/// The per-field routes refuse a sheet whose pin this build does not support (nothing written):
+/// it shows its retained data read-only, without any form.
 #[tokio::test]
-async fn native_sheets_refuse_unit_routes() {
+async fn unsupported_pin_sheets_refuse_unit_routes_and_show_retained_data_read_only() {
     use axum::http::StatusCode;
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
-    store.run(|db|{db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES('native-fixture','fixture','Fixture','mork-borg','Italian fixture','it','fixture',x'',x'',1)",[])?;db.execute("INSERT INTO source_rulesets VALUES(1,'mork-borg','it-2025')",[])?;Ok(())}).await.unwrap();
+    let version = published_fixture(&store).await;
     let app = crate::auth::app(store.clone()).await.unwrap();
-    let campaign = vec![
-        ("csrf".into(), "a".repeat(64)),
-        ("title".into(), "Native campaign".into()),
-        ("game_id".into(), "mork-borg".into()),
-        ("edition_id".into(), "it-2025".into()),
-    ];
-    let response = router_request(&app, &auth[1], "/campaigns", Some(campaign)).await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let campaign = store
+        .create_campaign(
+            auth[1].clone(),
+            "Unsupported".into(),
+            "synthetic-game".into(),
+            "first".into(),
+        )
+        .await
+        .unwrap();
+    let path = format!("/campaigns/{campaign}/sheets/new?version={version}");
     let response = router_request(
         &app,
         &auth[1],
-        "/campaigns/1/sheets/new",
-        Some(native_form()),
+        &path,
+        Some(runtime_form(
+            "Retained <name>",
+            "Retained notes",
+            "Retained label",
+        )),
     )
     .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    make_unsupported(&store, 1).await;
     let page = router_request(&app, &auth[1], "/private-sheets/1", None).await;
+    assert_eq!(page.status(), StatusCode::OK);
     let html = String::from_utf8(
         axum::body::to_bytes(page.into_body(), 1024 * 1024)
             .await
@@ -744,17 +846,28 @@ async fn native_sheets_refuse_unit_routes() {
             .to_vec(),
     )
     .unwrap();
+    assert!(html.contains("Retained sheet (unsupported pin, read-only)"));
+    assert!(html.contains("Retained notes") && html.contains("Retained label"));
+    // No sheet form: the page's only form is the header's Sign out.
+    assert!(!html.contains("Save full private sheet") && !html.contains("name=\"revision\""));
+    assert!(!html.contains("/meta/") && !html.contains("/fields/"));
+    // Never shown as validated, and nothing is evaluated.
     assert!(
-        html.contains("Save full private sheet"),
-        "the full form stays"
+        html.contains("Not validated")
+            && html.contains("no rule checks cover its interpretation pin")
     );
-    assert!(!html.contains("/meta/name") && !html.contains("/fields/"));
-    assert!(!html.contains("/cells/") && !html.contains("/lists/"));
+    for marker in [
+        "Derived values",
+        "Advisory checks",
+        "formula-results",
+        "advisory-checks",
+    ] {
+        assert!(!html.contains(marker), "unsupported page shows {marker}");
+    }
     for path in [
         "/private-sheets/1/meta/name",
         "/private-sheets/1/meta/notes",
-        "/private-sheets/1/fields/hp",
-        // Slice 1.5b: a native sheet has no runtime lists either.
+        "/private-sheets/1/fields/label",
         "/private-sheets/1/cells/0/0/0",
     ] {
         let unit = vec![
@@ -763,7 +876,7 @@ async fn native_sheets_refuse_unit_routes() {
             ("value".into(), "7".into()),
         ];
         let response = router_request(&app, &auth[1], path, Some(unit)).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
     }
     let revision: i64 = store
         .run(|db| {
@@ -778,37 +891,28 @@ async fn native_sheets_refuse_unit_routes() {
     assert_eq!(revision, 1, "nothing written");
 }
 
-/// Native sheets have no immutable pin, so nothing is evaluated or shown as advisory.
-async fn assert_native_page_has_no_formula_markers(app: &axum::Router, auth: &RequestAuth) {
-    use axum::http::StatusCode;
-    let native_page = router_request(app, auth, "/private-sheets/1", None).await;
-    assert_eq!(native_page.status(), StatusCode::OK);
-    let native_html = String::from_utf8(
-        axum::body::to_bytes(native_page.into_body(), 1024 * 1024)
-            .await
-            .unwrap()
-            .to_vec(),
-    )
-    .unwrap();
-    for marker in [
-        "dvisory",
-        "Computed",
-        "formula-results",
-        "How this is computed",
-    ] {
-        assert!(!native_html.contains(marker), "native page shows {marker}");
-    }
-    assert!(native_html.contains("<fieldset class=\"sheet-fieldset\">"));
-    // No definition checks cover a native pin: never shown as validated (RR-3, ASSIST-4).
-    assert!(native_html.contains(
-        "<p id=\"validity\" class=\"validity\"><strong>Not validated</strong> (saved revision 1): no rule checks cover its interpretation pin. This flag never blocks saving.</p>"
-    ));
-}
-
+/// Registers and publishes the synthetic runtime game every generic sheet test uses. A second
+/// call on the same store returns the version already published.
 async fn published_fixture(store: &Store) -> i64 {
+    use rusqlite::OptionalExtension;
     use serde_json::json;
+    let existing: Option<i64> = store
+        .run(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT id FROM definition_versions WHERE game_id='synthetic-game' ORDER BY id LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+        .await
+        .unwrap();
+    if let Some(version) = existing {
+        return version;
+    }
     store.run(|db|{
-        db.execute("INSERT INTO registry_games VALUES('synthetic-game','Synthetic')",[])?;db.execute("INSERT INTO registry_editions VALUES('synthetic-game','first','First',0)",[])?;
+        db.execute("INSERT INTO registry_games VALUES('synthetic-game','Synthetic')",[])?;db.execute("INSERT INTO registry_editions(game_id,edition_id,label) VALUES('synthetic-game','first','First')",[])?;
         let zeros="0".repeat(64);let prepared=json!({"contract_version":1,"extraction_sha256":zeros}).to_string();
         db.execute("INSERT INTO sources(bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(?1,'fixture','Fixture','synthetic-game','First','en',?1,x'',?2,1)",params![zeros,prepared.as_bytes()])?;
         db.execute("INSERT INTO source_rulesets VALUES(1,'synthetic-game','first')",[])?;
@@ -846,43 +950,12 @@ async fn published_fixture(store: &Store) -> i64 {
         .id
 }
 
-fn native_form() -> Vec<(String, String)> {
-    let mut form = serde_json::to_value(crate::mork_borg::Sheet::default())
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(key, value)| {
-            (
-                key.clone(),
-                match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Null => String::new(),
-                    v => v.to_string(),
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    form.extend([
-        ("csrf".into(), "a".repeat(64)),
-        ("name".into(), "Private <script>name</script>".into()),
-        ("notes".into(), "Exact private notes".into()),
-    ]);
-    for (key, value) in &mut form {
-        if key == "description" {
-            *value = "Long native text ".repeat(600);
-        }
-    }
-    form
-}
-
 async fn assert_owner_router_denials(app: &axum::Router, owner: &RequestAuth) {
     for path in [
         "/private-sheets/1",
         "/private-sheets/1/history",
         "/private-sheets/1/history/1",
         "/characters/1",
-        "/characters/1/mork-borg",
         "/sources",
         "/sources/search",
     ] {
@@ -1187,12 +1260,13 @@ async fn captured_editor_loses_demoted_master_and_reset_account_authority() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Race".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -1201,7 +1275,7 @@ async fn captured_editor_loses_demoted_master_and_reset_account_authority() {
         .decide_join(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    insert_native(&store, auth[1].clone(), native(campaign, 2)).await;
+    insert_sheet(&store, auth[1].clone(), sheet(campaign, 2)).await;
     store
         .change_role(auth[1].clone(), campaign, 3, 1, true)
         .await
@@ -1264,16 +1338,17 @@ async fn cancellation_does_not_release_private_read_runtime_before_sql_worker_fi
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Cancel".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    insert_native(&store, auth[1].clone(), native(campaign, 2)).await;
+    insert_sheet(&store, auth[1].clone(), sheet(campaign, 2)).await;
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = store.clone();
@@ -1340,12 +1415,13 @@ mod schema_fixture;
 async fn populated_campaign_fixture_rejects_before_any_drop() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     store
         .create_campaign(
             auth[1].clone(),
             "Retained".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -1387,12 +1463,13 @@ async fn regression_disabled_additional_master_can_be_demoted_then_removed_and_f
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Departure".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -1401,7 +1478,7 @@ async fn regression_disabled_additional_master_can_be_demoted_then_removed_and_f
         .decide_join(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    insert_native(&store, auth[2].clone(), native(campaign, 3)).await;
+    insert_sheet(&store, auth[2].clone(), sheet(campaign, 3)).await;
     store
         .change_role(auth[1].clone(), campaign, 3, 1, true)
         .await
@@ -1557,17 +1634,17 @@ async fn regression_invalid_boolean_and_nullable_state_survive_the_complete_priv
 }
 
 #[tokio::test]
-async fn regression_future_calculation_pin_is_readonly_and_freeze_mirrors_known_native_schema_revision()
- {
+async fn regression_unsupported_schema_pin_is_readonly_and_still_freezes_with_its_data_intact() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Future".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -1576,44 +1653,8 @@ async fn regression_future_calculation_pin_is_readonly_and_freeze_mirrors_known_
         .decide_join(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    insert_native(&store, auth[2].clone(), native(campaign, 3)).await;
-    store
-        .run(|db| {
-            let tx = db.transaction()?;
-            let mut future = snapshots::load(&tx, 1)?;
-            future.pin = Pin::Native {
-                adapter: "mork-borg-it-2025".into(),
-                schema: 1,
-                calculation_version: 2,
-            };
-            let snapshot = serde_json::to_string(&future)?;
-            let hash = snapshots::hash(snapshot.as_bytes());
-            let pin = serde_json::to_string(&future.pin)?;
-            let triggers = ["private_sheets_update", "private_sheet_history_update"].map(|name| {
-                tx.query_row("SELECT sql FROM sqlite_schema WHERE name=?1", [name], |r| {
-                    r.get::<_, String>(0)
-                })
-                .unwrap()
-            });
-            tx.execute_batch(
-                "DROP TRIGGER private_sheets_update; DROP TRIGGER private_sheet_history_update;",
-            )?;
-            tx.execute(
-                "UPDATE private_sheets SET pin=?1,snapshot=?2,hash=?3",
-                params![pin, snapshot, hash],
-            )?;
-            tx.execute(
-                "UPDATE private_sheet_history SET snapshot=?1,hash=?2",
-                params![snapshot, hash],
-            )?;
-            for sql in triggers {
-                tx.execute_batch(&sql)?;
-            }
-            tx.commit()?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+    insert_sheet(&store, auth[2].clone(), sheet(campaign, 3)).await;
+    make_unsupported(&store, 1).await;
     let (view, permit) = store
         .private_read(
             auth[2].clone(),
@@ -1638,7 +1679,7 @@ async fn regression_future_calculation_pin_is_readonly_and_freeze_mirrors_known_
         .unwrap();
     drop(permit);
     assert_eq!(view.snapshot.revision, 2);
-    assert_eq!(view.snapshot.data["revision"], 2);
+    assert_eq!(view.snapshot.data, sheet(campaign, 3).data);
     assert_eq!(view.snapshot.state, "frozen");
 }
 
@@ -1910,16 +1951,17 @@ async fn captured_campaign_authority_rejects_logout_rotation_and_expiry() {
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     for revocation in ["logout", "rotation", "expiry"] {
         let (_dir, store, auth, clock) = fixture().await;
+        published_fixture(&store).await;
         let campaign = store
             .create_campaign(
                 auth[1].clone(),
                 "Boundary".into(),
-                "mork-borg".into(),
-                "it-2025".into(),
+                "synthetic-game".into(),
+                "first".into(),
             )
             .await
             .unwrap();
-        insert_native(&store, auth[1].clone(), native(campaign, 2)).await;
+        insert_sheet(&store, auth[1].clone(), sheet(campaign, 2)).await;
         let (mut view, permit) = store
             .private_read(
                 auth[1].clone(),
@@ -2000,16 +2042,17 @@ async fn private_mutation_rechecks_expiry_after_waiting_for_database_worker() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Queued expiry".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    insert_native(&store, auth[1].clone(), native(campaign, 2)).await;
+    insert_sheet(&store, auth[1].clone(), sheet(campaign, 2)).await;
     let (view, permit) = store
         .private_read(
             auth[1].clone(),
@@ -2142,12 +2185,13 @@ async fn final_representable_revision_remains_available_for_mandatory_freeze() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Revision boundary".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2156,7 +2200,7 @@ async fn final_representable_revision_remains_available_for_mandatory_freeze() {
         .decide_join(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    insert_native(&store, auth[2].clone(), native(campaign, 3)).await;
+    insert_sheet(&store, auth[2].clone(), sheet(campaign, 3)).await;
     let actor = auth[2].clone();
     store.run_campaign(actor.clone(),move|db|{
         // Seed an unreachable counter boundary in a synthetic fixture; the
@@ -2167,7 +2211,6 @@ async fn final_representable_revision_remains_available_for_mandatory_freeze() {
         tx.execute_batch("DROP TRIGGER private_sheets_update; DROP TRIGGER private_sheet_history_insert;")?;
         for revision in [i64::MAX-2,i64::MAX-1] {
             snapshot.revision=revision;
-            snapshot.data["revision"]=revision.into();
             let content=serde_json::to_string(&snapshot)?;
             let hash=snapshots::hash(content.as_bytes());
             tx.execute("INSERT INTO private_sheet_history(sheet_id,revision,hash,snapshot,operation,previous_revision,actor_id,actor_epoch,session_digest,occurred_at) VALUES(1,?1,?2,?3,'edit',?4,3,1,?5,100)",params![revision,hash,content,revision-1,actor.digest()])?;
@@ -2203,7 +2246,6 @@ async fn final_representable_revision_remains_available_for_mandatory_freeze() {
         .await
         .unwrap();
     assert_eq!(view.snapshot.revision, i64::MAX);
-    assert_eq!(view.snapshot.data["revision"], i64::MAX);
     assert_eq!(view.snapshot.state, "frozen");
     drop(permit);
 }
@@ -2240,13 +2282,14 @@ async fn distinct_64_reservations_and_global_private_sheet_cap_are_enforced() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let extra = capacity_accounts(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Capacity".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2287,10 +2330,12 @@ async fn distinct_64_reservations_and_global_private_sheet_cap_are_enforced() {
         store
             .run_campaign(account.clone(), move |db| {
                 let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let mut template = sheet(campaign, account.account_id());
+                let pin = admitted(&tx, &mut template);
                 for local in 0..32 {
-                    let mut snapshot = native(campaign, account.account_id());
+                    let mut snapshot = template.clone();
                     snapshot.sheet_id = i64::try_from(offset * 32 + local + 1).unwrap();
-                    snapshots::write(&tx, &account, snapshot, "create", None)?;
+                    snapshots::write(&tx, &account, snapshot, "create", Some(&pin))?;
                 }
                 tx.commit()?;
                 Ok(())
@@ -2302,8 +2347,8 @@ async fn distinct_64_reservations_and_global_private_sheet_cap_are_enforced() {
         .create_campaign(
             auth[1].clone(),
             "Global limit".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2312,9 +2357,10 @@ async fn distinct_64_reservations_and_global_private_sheet_cap_are_enforced() {
         store
             .run_campaign(account.clone(), move |db| {
                 let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let mut snapshot = native(second, account.account_id());
+                let mut snapshot = sheet(second, account.account_id());
                 snapshot.sheet_id = 2049;
-                snapshots::write(&tx, &account, snapshot, "create", None)?;
+                let pin = admitted(&tx, &mut snapshot);
+                snapshots::write(&tx, &account, snapshot, "create", Some(&pin))?;
                 tx.commit()?;
                 Ok(())
             })
@@ -2330,13 +2376,14 @@ async fn regression_roster_next_link_requires_more_rows_and_preserves_sheet_sect
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     for count in [0, 48, 49, 50] {
         let (_dir, store, auth, _clock) = fixture().await;
+        published_fixture(&store).await;
         let accounts = capacity_accounts(&store).await;
         let campaign = store
             .create_campaign(
                 auth[1].clone(),
                 "Pagination".into(),
-                "mork-borg".into(),
-                "it-2025".into(),
+                "synthetic-game".into(),
+                "first".into(),
             )
             .await
             .unwrap();
@@ -2347,9 +2394,9 @@ async fn regression_roster_next_link_requires_more_rows_and_preserves_sheet_sect
                 .await
                 .unwrap();
         }
-        let mut sheet = native(campaign, 2);
+        let mut sheet = sheet(campaign, 2);
         sheet.name = "Preserved private section".into();
-        insert_native(&store, auth[1].clone(), sheet).await;
+        insert_sheet(&store, auth[1].clone(), sheet).await;
         let app = crate::auth::app(store).await.unwrap();
         let response = router_request(
             &app,
@@ -2409,13 +2456,14 @@ fn shared_listing_next_cursor_uses_last_rendered_row_not_lookahead() {
 async fn regression_production_owner_is_administration_only() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     assert!(
         store
             .create_campaign(
                 auth[0].clone(),
                 "Owner must not play".into(),
-                "mork-borg".into(),
-                "it-2025".into()
+                "synthetic-game".into(),
+                "first".into()
             )
             .await
             .is_err()
@@ -2425,8 +2473,8 @@ async fn regression_production_owner_is_administration_only() {
         .create_campaign(
             auth[1].clone(),
             "Player positive".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2443,12 +2491,13 @@ async fn regression_production_owner_is_administration_only() {
 async fn owner_is_administration_only_and_players_cannot_open_administration() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Players only".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2487,17 +2536,18 @@ async fn populated_schema12_upgrade_preserves_private_records_and_sessions() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (directory, store, auth, clock) = fixture().await;
+    published_fixture(&store).await;
     let development = auth[1].clone();
     let campaign = store
         .create_campaign(
             development.clone(),
             "Retained schema12".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    let original = insert_native(&store, development.clone(), native(campaign, 2)).await;
+    let original = insert_sheet(&store, development.clone(), sheet(campaign, 2)).await;
     store
         .run(|db| {
             assert_eq!(
@@ -2582,12 +2632,13 @@ async fn schema13_guards_reject_owner_membership_and_requests() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Normal campaign".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2605,7 +2656,7 @@ async fn schema13_guards_reject_owner_membership_and_requests() {
         store
             .run_campaign(owner, |db| {
                 db.execute(
-                    "INSERT INTO campaigns VALUES(99,1,'mork-borg','it-2025','Owner campaign',1)",
+                    "INSERT INTO campaigns VALUES(99,1,'synthetic-game','first','Owner campaign',1)",
                     [],
                 )?;
                 Ok(())
@@ -2652,12 +2703,13 @@ async fn promote_to_owner(store: &Store, id: i64) {
 /// requests to join a campaign of account 4, and holds a sheet of its own; then it becomes the
 /// Owner. Returns `(campaign, other_campaign)`.
 async fn legacy_owner_world(store: &Store, auth: &[RequestAuth]) -> (i64, i64) {
+    published_fixture(store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Legacy".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2666,16 +2718,16 @@ async fn legacy_owner_world(store: &Store, auth: &[RequestAuth]) -> (i64, i64) {
         .decide_join(auth[1].clone(), campaign, 3, 1, true)
         .await
         .unwrap();
-    insert_native(store, auth[1].clone(), native(campaign, 2)).await;
-    let mut player_sheet = native(campaign, 3);
+    insert_sheet(store, auth[1].clone(), sheet(campaign, 2)).await;
+    let mut player_sheet = sheet(campaign, 3);
     player_sheet.sheet_id = 2;
-    insert_native(store, auth[2].clone(), player_sheet).await;
+    insert_sheet(store, auth[2].clone(), player_sheet).await;
     let other = store
         .create_campaign(
             auth[3].clone(),
             "Other".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2736,6 +2788,7 @@ async fn legacy_owner_custody_and_mastership_give_no_access() {
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let (campaign, _) = legacy_owner_world(&store, &auth).await;
     assert!(
         store
@@ -2753,7 +2806,7 @@ async fn legacy_owner_custody_and_mastership_give_no_access() {
     let player = auth[2].clone();
     store
         .run_campaign(player.clone(), move |db| {
-            let mut sheet = native(campaign, 3);
+            let mut sheet = sheet(campaign, 3);
             sheet.sheet_id = 2;
             assert!(super::snapshots::authorize_edit(db, &player, &sheet).is_err());
             Ok(())
@@ -2781,13 +2834,14 @@ async fn directory_requests_sheets_and_history_paginate_authorized_rows_at_bound
     let _auth_lock = crate::auth::test_resource_lock().await;
     let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
     let (_dir, store, auth, _clock) = fixture().await;
+    published_fixture(&store).await;
     let accounts = capacity_accounts(&store).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Pagination".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
@@ -2801,8 +2855,8 @@ async fn directory_requests_sheets_and_history_paginate_authorized_rows_at_bound
                 .create_campaign(
                     accounts[index].clone(),
                     format!("Directory {index}"),
-                    "mork-borg".into(),
-                    "it-2025".into(),
+                    "synthetic-game".into(),
+                    "first".into(),
                 )
                 .await
                 .unwrap();
@@ -2888,9 +2942,9 @@ async fn verify_sheet_and_history_pagination(
             .decide_join(master.clone(), campaign, account.account_id(), 1, true)
             .await
             .unwrap();
-        let mut sheet = native(campaign, account.account_id());
+        let mut sheet = sheet(campaign, account.account_id());
         sheet.sheet_id = i64::try_from(index + 1).unwrap();
-        insert_native(store, account.clone(), sheet).await;
+        insert_sheet(store, account.clone(), sheet).await;
         let count = index + 1;
         if [1, 49, 50, 51].contains(&count) {
             let page = store
@@ -2937,8 +2991,10 @@ async fn verify_sheet_and_history_pagination(
         .run_campaign(actor.clone(), move |db| {
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let mut sheet = snapshots::load(&tx, 1)?;
+            let mut template = sheet.clone();
+            let pin = admitted(&tx, &mut template);
             for revision in 2..=51 {
-                sheet = snapshots::write(&tx, &actor, sheet, "edit", None)?;
+                sheet = snapshots::write(&tx, &actor, sheet, "edit", Some(&pin))?;
                 if [49, 50, 51].contains(&revision) {
                     assert_eq!(sheet.revision, revision);
                 }

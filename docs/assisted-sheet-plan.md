@@ -35,7 +35,7 @@ never enlarges the budget.
 **POC cuts** (no security or integrity risk): player `*` and `/`; interpreting text, enum or
 boolean cells; notes and Undo for text cells; seals and note verification (D-T); dismissal
 records; Undo of creation, row add and moves; forced Undo; live preview; a keyed rate
-limiter; Gemma; changes to the native MÖRK BORG editor. Non-goals: legality rulings,
+limiter; Gemma. Non-goals: legality rulings,
 automatic application of model output, chat, manual RAG, `catalogue_ref` membership checks,
 hosted providers, suggesting models other than the two pinned defaults, gated or private Hugging Face
 repositories, split (multi-file) GGUF models.

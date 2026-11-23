@@ -1265,7 +1265,9 @@ fn selection_limits_and_metadata_import_rules() {
         Err(AppError::Conflict)
     ));
     let mut invalid = metadata();
-    invalid.system_id = "not-registered".into();
+    // No game list lives in code: any slug is accepted as an unresolved system, so the refusal
+    // is for an identifier that is no slug.
+    invalid.system_id = "Not a slug".into();
     assert!(m.set(&o, &id, 1, &invalid, &[1]).is_err());
     invalid = metadata();
     invalid.language = "x".repeat(31);

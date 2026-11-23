@@ -2125,10 +2125,16 @@ async fn material_large_page_omits_unit_overlay_but_keeps_missing_regions_and_dr
 }
 
 async fn seed(store: &Store) {
-    store.run(|db|{
-        db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(1,'fixture','fixture','Material <title>','mork-borg','Fixture edition','en',?1,x'',x'',2)",["a".repeat(64)])?;
-        db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(1,1,1,x'89504e47')",[])?;
-        for id in 1..=51 {db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,1,?2,'Text','[]','<p>Fixture</p><script>bad()</script>','Fixture')",params![id,format!("unit-{id}")])?;}
+    seed_from(store, 0).await;
+}
+
+/// The material fixture with every ID moved up by `offset`, for a test that also needs the
+/// published runtime fixture (whose own source, page and unit are ID 1).
+async fn seed_from(store: &Store, offset: i64) {
+    store.run(move |db|{
+        db.execute("INSERT INTO sources(id,bundle_hash,source_id,title,system_id,edition,language,pdf_hash,raw_json,prepared_json,total_pages) VALUES(?2,'fixture','fixture','Material <title>','mork-borg','Fixture edition','en',?1,x'',x'',2)",params!["a".repeat(64),1+offset])?;
+        db.execute("INSERT INTO source_pages(id,source_id,pdf_page,png) VALUES(?1,?1,1,x'89504e47')",[1+offset])?;
+        for id in 1..=51 {db.execute("INSERT INTO source_units(id,page_id,block_id,kind,polygon,raw_html,raw_text) VALUES(?1,?3,?2,'Text','[]','<p>Fixture</p><script>bad()</script>','Fixture')",params![id+offset,format!("unit-{id}"),1+offset])?;}
         // Raw fixture rows get derived search text exactly as a legacy upgrade would.
         crate::sources::search::ensure(db)?;
         Ok(())
@@ -2604,17 +2610,18 @@ async fn material_crop_uses_fresh_authority_after_cpu_work() {
 async fn material_schema14_upgrade_preserves_source_account_and_private_history() {
     let _lock = crate::auth::test_resource_lock().await;
     let (dir, store, auth, _clock) = fixture().await;
-    seed(&store).await;
+    published_fixture(&store).await;
+    seed_from(&store, 1000).await;
     let campaign = store
         .create_campaign(
             auth[1].clone(),
             "Retained campaign".into(),
-            "mork-borg".into(),
-            "it-2025".into(),
+            "synthetic-game".into(),
+            "first".into(),
         )
         .await
         .unwrap();
-    let saved = insert_native(&store, auth[1].clone(), native(campaign, 2)).await;
+    let saved = insert_sheet(&store, auth[1].clone(), sheet(campaign, 2)).await;
     crate::accounts::Accounts::new(store.clone())
         .browser_invite(
             auth[0].clone(),
@@ -2626,8 +2633,8 @@ async fn material_schema14_upgrade_preserves_source_account_and_private_history(
         .unwrap();
     store
         .review_source_unit(
-            1,
-            1,
+            1001,
+            1001,
             crate::sources::UnitReview {
                 revision: 1,
                 state: "corrected".into(),
@@ -2662,7 +2669,7 @@ async fn material_schema14_upgrade_preserves_source_account_and_private_history(
         .await
         .unwrap();
     let data = reopened
-        .material_page(auth[0].clone(), 1, 0, 0)
+        .material_page(auth[0].clone(), 1001, 0, 0)
         .await
         .unwrap();
     assert_eq!(data.page.units[0].correction, "Retained correction");
@@ -3057,7 +3064,7 @@ async fn material_registry_ids_are_byte_bounded_including_nul() {
             .run(move |db| {
                 db.execute("INSERT INTO registry_games VALUES(?1,'Synthetic')", [&game])?;
                 db.execute(
-                    "INSERT INTO registry_editions VALUES(?1,?2,'Synthetic',0)",
+                    "INSERT INTO registry_editions(game_id,edition_id,label) VALUES(?1,?2,'Synthetic')",
                     params![game, edition],
                 )?;
                 db.execute(

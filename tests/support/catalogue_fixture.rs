@@ -1,5 +1,5 @@
 //! Shared synthetic catalogue fixture for the catalogue integration suites (reference
-//! `docs/catalogues.md`): a registered nonnative pair, a finalized synthetic source, CLI
+//! `docs/catalogues.md`): a registered pair, a finalized synthetic source, CLI
 //! helpers and the redaction sentinels.
 #![allow(
     dead_code,
