@@ -309,7 +309,15 @@ async fn progress_is_visible_and_the_permit_is_released_at_the_end() {
 
 #[tokio::test]
 async fn cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range() {
-    let rig = Rig::new(20_000).await;
+    // Every received byte is written at once, so the wait below holds however the body is split.
+    let rig = Rig::with(
+        20_000,
+        Config {
+            flush: 1,
+            ..config()
+        },
+    )
+    .await;
     let row = rig.confirm().await;
     rig.hub.respond({
         let content = Arc::clone(&rig.content);
@@ -320,12 +328,13 @@ async fn cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range() {
                     seen.headers.get("range").and_then(|v| v.to_str().ok()),
                 )
             } else {
-                Reply::Slow {
+                // The first 6000 bytes, then nothing until the cancel: a slow body that could
+                // finish before the cancel landed made this flaky under load.
+                Reply::Stall {
                     status: 200,
                     headers: Vec::new(),
-                    body: content.to_vec(),
-                    piece: 1000,
-                    gap: Duration::from_millis(40),
+                    first: content[..6000].to_vec(),
+                    declared: Some(20_000),
                 }
             }
         }
@@ -337,14 +346,34 @@ async fn cancel_keeps_the_partial_and_resume_asks_for_the_rest_with_range() {
         |phase| matches!(phase, Phase::Running { received, .. } if *received >= 5000),
     )
     .await;
+    // The phase counts buffered bytes. Wait until all 6000 are on disk, so the cancel lands
+    // while the task waits on the stalled body rather than during a write it would leave
+    // running in the background.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(rig.partial_file(&row)).map_or(0, |m| m.len()) < 6000 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "partial never reached 6000 bytes"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     rig.downloader.cancel(None).await;
     assert_eq!(
         finished(&rig.downloader).await,
         Phase::Stopped(Stop::Cancelled)
     );
     let kept = std::fs::metadata(rig.partial_file(&row)).unwrap().len();
-    assert!(kept > 0 && kept < 20_000, "{kept}");
-    rig.downloader.resume(row.id, permit()).await.unwrap();
+    assert_eq!(kept, 6000);
+    // The cancelled task may still be releasing work it had already finished.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match rig.downloader.resume(row.id, permit()).await {
+            Err(Refusal::Finishing) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            resumed => break resumed.unwrap(),
+        }
+    }
     assert_eq!(finished(&rig.downloader).await, Phase::Done);
     assert_eq!(std::fs::read(rig.model_file(&row)).unwrap(), *rig.content);
     // The resume asked for bytes from the partial's length, cut back by one chunk of 1000.
