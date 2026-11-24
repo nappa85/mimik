@@ -92,6 +92,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   RUSTSEC-2023-0089, RUSTSEC-2026-0574..0582 and RUSTSEC-2026-0543 (chrono) ignores from
   `.cargo/audit.toml` (DEP-24): with Mimik's hakoniwa features (no defaults) neither heapless nor
   chrono stays in the tree. procfs's own jiff option: eminence/procfs#379 (opened 2026-11-20, for #374).
+  For hakoniwa's own `cgroups` feature: souk4711/hakoniwa#209 (opened 2026-11-24) updates to
+  libcgroups 0.8.0 (youki#3904 released) and nix 0.31; it asks the maintainer about libbpf-sys
+  (libcgroups' `systemd` now needs it). Not needed by Mimik.
 
 ## Next steps
 
