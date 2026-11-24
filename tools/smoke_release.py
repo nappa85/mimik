@@ -1290,11 +1290,16 @@ AUTH_DENIED_PATHS = (
 
 # The shared header's form on every signed-in page (templates/layout.html), not a page form.
 HEADER_FORMS = ("/auth/logout",)
+# A current Master's one-click "Mark revision N as opened" form on a sheet page (CAMP-16).
+SEEN_FORM = re.compile(r"/private-sheets/[0-9]+/seen")
 
 
 def editor_action(forms):
-    """The one page form's action, the header's Sign out form left aside."""
-    actions = [action for action in forms if action not in HEADER_FORMS]
+    """The one page form's action, the header's Sign out form and a Master's seen form left
+    aside."""
+    actions = [
+        action for action in forms if action not in HEADER_FORMS and not SEEN_FORM.fullmatch(action)
+    ]
     require(len(actions) == 1, "Expected one private editor form")
     return actions[0]
 

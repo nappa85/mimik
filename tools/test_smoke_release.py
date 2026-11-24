@@ -276,6 +276,15 @@ class EditorActionTests(unittest.TestCase):
         )
         self.assertEqual(editor_action(parser.forms), "/characters/1/edit")
 
+    def test_a_masters_seen_form_is_not_the_editor_form(self):
+        parser = FormFields()
+        parser.feed(
+            '<form method="post" action="/private-sheets/1"><input name="revision" value="2">'
+            '</form><form id="seen-form" method="post" action="/private-sheets/1/seen">'
+            '<input name="revision" value="2"></form>'
+        )
+        self.assertEqual(editor_action(parser.forms), "/private-sheets/1")
+
     def test_two_page_forms_are_still_refused(self):
         with self.assertRaises(AssertionError):
             editor_action({"/a": {}, "/b": {}, "/auth/logout": {}})
