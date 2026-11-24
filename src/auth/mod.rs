@@ -682,6 +682,67 @@ pub(crate) async fn request_auth(
     admission(&account)
 }
 
+/// Read-only admission for GET Master data paths (the snapshot probe, later the event stream).
+///
+/// Unlike [`request_auth`] it never goes through the library `Session` or [`principal`]: it
+/// cannot create, rotate, flush, save or extend a session, write a last-seen time or a
+/// tombstone. It reads the session row once (a plain SELECT), refuses a missing, expired,
+/// revoked or invalid session without touching storage, and yields the same [`RequestAuth`]
+/// binding, with the session's absolute expiry as its deadline, so `recheck` applies unchanged.
+/// A request that carries `Origin` must carry the expected one; fetch metadata other than
+/// `same-origin`/`none` is refused; no CORS header is ever produced.
+pub(crate) async fn read_only_request_auth(
+    state: &AuthState,
+    headers: &axum::http::HeaderMap,
+    expected: &crate::network::ExpectedOrigin,
+) -> Result<RequestAuth, StatusCode> {
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    match (sites.next(), sites.next()) {
+        (None, _) => {}
+        (Some(site), None) if matches!(site.as_bytes(), b"same-origin" | b"none") => {}
+        _ => return Err(StatusCode::FORBIDDEN),
+    }
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    if let Some(origin) = origins.next()
+        && (origin.to_str().ok() != Some(expected.value.as_str()) || origins.next().is_some())
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let mut cookies = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().strip_prefix("mimik_session="));
+    let (Some(cookie), None) = (cookies.next(), cookies.next()) else {
+        return Err(StatusCode::UNAUTHORIZED);
+    };
+    let id: tower_sessions::session::Id = cookie.parse().map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let record = tower_sessions::SessionStore::load(&state.sessions, &id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let binding: Principal = record
+        .data
+        .get("principal")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let account = state
+        .accounts
+        .current(binding.id, binding.epoch)
+        .await
+        .map_err(|error| storage(&error))?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if account.owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(RequestAuth {
+        account: binding,
+        original_id: record.id,
+        deadline: record.expiry_date.unix_timestamp(),
+    })
+}
+
 /// The domain admission of an account `principal` just loaded, from the request's captured
 /// session read.
 fn admission(account: &Summary) -> Result<RequestAuth, StatusCode> {

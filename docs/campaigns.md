@@ -71,7 +71,8 @@ and, for a catalogue-backed name, `suggest/{f}/{p}` and `cells/{f}/{r}/{p}/which
 
 ## Master workspace and seen marks
 
-Routes: `GET /campaigns/{id}/master` and `POST /private-sheets/{id}/seen`.
+Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot` and
+`POST /private-sheets/{id}/seen`.
 
 - **Workspace** (plain HTML): linked from the campaign page to current Masters only. It lists
   every sheet of the campaign in two sections, "Player sheets" and "NPC sheets" (custodian
@@ -81,6 +82,30 @@ Routes: `GET /campaigns/{id}/master` and `POST /private-sheets/{id}/seen`.
   other campaigns' Masters get the uniform 403, authorized in the page's own transaction and
   again at its end. The page needs a reload to refresh. A sheet opened from the list shows a
   link back to it, with the list's cursors only on that first GET.
+- **Snapshot** (`GET /campaigns/{id}/master/snapshot`, same two cursors and the same uniform 403
+  as the page, an ordinary request inside `boundary`): JSON of the selected pages from the
+  same projection, authorised read-only (no session write, see `auth-and-sessions.md`) and
+  rechecked, including the current Master role, in its own read transaction. Body:
+  `{"players":{"rows":[...],"next":"id"|null},"npcs":{...}}`, a row being `id`, `name`,
+  `custodian`, `revision`, `state`, `npc` (bool) and `seen` (this Master's mark or null),
+  all IDs and revisions as decimal strings. 401 without a valid session, 403 for everyone but
+  a current Master of the campaign, 400 for bad cursors, `no-store`, no CORS. A row over
+  2 KiB, a body over 256 KiB or more than 100 rows is a 500, never truncated (the limits are defence in depth: validated names and display names of at most 100
+  characters keep real rows far below them, and two pages of 50 rows cannot exceed 100).
+- **Hints** (`src/hub.rs`): after a commit, outside the SQLite mutex and by the committing
+  task (so also when the caller is cancelled), every write publishes small typed hints on
+  the store's broadcast ring: `Sheet{campaign,sheet,revision}` for each committed sheet
+  revision (every shared save, creations, each departure freeze), `Role{campaign,account}`
+  for a join, promotion, demotion, leave or removal, and `Seen{campaign,recipient,sheet}`
+  when a Master's mark actually changed (the seen POST and the own-save acknowledgement).
+  A departure publishes its role and all freeze hints only after the whole transaction. Nothing
+  is published for no-ops, refused, stale or rolled-back writes. Hints are invalidations, not
+  an ordered or durable log: a consumer reads authoritative state from SQL, `Feed` shows a
+  consumer only its campaign's hints (and its own account's seen hints), and a subscriber that
+  falls more than 256 hints behind gets `Lagged` and must take a fresh snapshot. The event
+  stream that consumes the hints is not built yet. Account disable, credential reset and epoch
+  changes (in-process administration and the out-of-process CLI) publish no hint: consumers rely
+  on the per-stream recheck and the periodic SQL reconcile for them.
 - **NPC classification:** `private_sheets.is_npc` (migration 039), set only at creation by a
   current Master for a sheet they hold. The choice is the create URL's `npc=1`
   (`/campaigns/{id}/sheets/new?version=V&npc=1`, never a form key; only 0 or 1), offered as

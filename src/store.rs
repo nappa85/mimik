@@ -58,6 +58,7 @@ pub struct Store(
     Arc<std::sync::OnceLock<NoteHook>>,
     pub(crate) Arc<crate::sources::proposals::ProposalCache>,
     pub(crate) Arc<crate::sources::pdf_store::PdfStore>,
+    crate::hub::Hub,
 );
 
 /// Called after every committed sheet save that wrote change notes: the sheet, the new
@@ -209,7 +210,32 @@ impl Store {
             Arc::new(std::sync::OnceLock::new()),
             Arc::default(),
             Arc::new(files),
+            crate::hub::Hub::default(),
         ))
+    }
+
+    /// A receiver of the hints published from now on (the Master view's invalidations).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
+    )]
+    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::hub::Hint> {
+        self.4.subscribe()
+    }
+
+    /// A subscription filtered by campaign and seen recipient only. It does not authorize:
+    /// the caller must already have admitted `account` as a current Master of `campaign`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
+    )]
+    pub(crate) fn feed(&self, campaign: i64, account: i64) -> crate::hub::Feed {
+        crate::hub::Feed::new(self.subscribe(), campaign, account)
+    }
+
+    /// Publishes hints of a committed change (never call it before the commit).
+    pub(crate) fn publish(&self, hints: impl IntoIterator<Item = crate::hub::Hint>) {
+        self.4.publish(hints);
     }
 
     /// Installs the post-commit note hook; a second one is refused.
@@ -309,6 +335,26 @@ impl Store {
         })
         .await
         .map_err(|_| AppError::Worker)?
+    }
+
+    /// [`Self::run_campaign`] for a write that owns its transaction and returns, with its result,
+    /// the hints of what it committed: they are published after the commit, outside the database
+    /// mutex, by the committing task itself (so also when the caller is cancelled), and never
+    /// when the operation fails.
+    pub(crate) async fn run_publishing<T: Send + 'static>(
+        &self,
+        auth: crate::auth::RequestAuth,
+        operation: impl FnOnce(&mut Connection) -> Result<(T, Vec<crate::hub::Hint>), AppError>
+        + Send
+        + 'static,
+    ) -> Result<T, AppError> {
+        let hub = self.4.clone();
+        self.run_after(
+            move |db| crate::auth::with_domain_request(auth, || operation(db)),
+            move |(_, hints)| hub.publish(hints.iter().copied()),
+        )
+        .await
+        .map(|(value, _)| value)
     }
 
     pub(crate) async fn run_bounded_auth<T: Send + 'static>(
