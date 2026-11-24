@@ -94,7 +94,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   chrono stays in the tree. procfs's own jiff option: eminence/procfs#379 (opened 2026-11-20, for #374).
   For hakoniwa's own `cgroups` feature: souk4711/hakoniwa#209 (opened 2026-11-24) updates to
   libcgroups 0.8.0 (youki#3904 released) and nix 0.31; it asks the maintainer about libbpf-sys
-  (libcgroups' `systemd` now needs it). Not needed by Mimik.
+  (libcgroups' `systemd` now needs it). youki-dev/youki#3939 (opened 2026-11-24) adds a
+  `systemd_base` feature without eBPF/libbpf, offered on #209 as the alternative. Not needed by Mimik.
 
 ## Next steps
 
