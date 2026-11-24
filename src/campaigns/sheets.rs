@@ -10,7 +10,7 @@ use crate::{
         private_pin::{self, ImmutablePin},
     },
 };
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use tokio::sync::OwnedSemaphorePermit;
 
 pub(crate) struct SheetSummary {
@@ -25,8 +25,39 @@ pub(crate) struct HistorySummary {
     pub actor: String,
     pub occurred_at: i64,
 }
+/// How a save acknowledges its new revision for a saving Master (owner decision 6, 2026-11-23).
+/// A creation always acknowledges revision 1 and is told apart by `sheet_id == 0`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Ack {
+    /// The save's base is the revision the page rendered (the full form and the list form):
+    /// the new revision is acknowledged.
+    Witnessed,
+    /// Every other save is rebased onto the live revision L before it reaches the writer, so
+    /// its base proves nothing: the new revision is acknowledged only when this Master had
+    /// already acknowledged L.
+    CompareAndSet,
+}
+
+/// What a current Master's sheet page offers for acknowledgement (never set for anyone else).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Seen {
+    /// This Master has acknowledged the rendered revision or a later one.
+    Opened(i64),
+    /// The rendered revision is not acknowledged yet.
+    Offer,
+}
+
 pub(crate) struct SheetView {
     pub snapshot: PrivateSnapshot,
+    /// The create page's classification (`npc=1` on the create URL): this sheet is to be an NPC
+    /// sheet. Lives here, never in the snapshot or the form's key set; meaningful only while
+    /// `snapshot.sheet_id == 0`, and only a current Master can hold it.
+    pub npc: bool,
+    /// How a save of this view acknowledges the new revision (see [`Ack`]).
+    pub ack: Ack,
+    /// A current Master's acknowledgement state of the live revision; read in the final read
+    /// boundary of a current page, `None` for history pages, the create page and non-Masters.
+    pub seen: Option<Seen>,
     pub immutable: Option<ImmutablePin>,
     pub warning: String,
     pub editable: bool,
@@ -234,6 +265,9 @@ impl Store {
             Ok::<_, AppError>((
                 SheetView {
                     snapshot,
+                    npc: false,
+                    ack: Ack::CompareAndSet,
+                    seen: None,
                     immutable,
                     warning,
                     editable,
@@ -281,11 +315,26 @@ impl Store {
         }).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn private_create_context(
         &self,
         auth: RequestAuth,
         id: i64,
         version: i64,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(SheetView, OwnedSemaphorePermit), AppError> {
+        self.private_create_context_as(auth, id, (version, false), permit)
+            .await
+    }
+
+    /// The create context of a player sheet (`npc` false) or of an NPC sheet held by the
+    /// requesting current Master (`npc` true); anyone else asking for an NPC sheet is refused
+    /// like any other unauthorised request, never given a player sheet instead.
+    pub(crate) async fn private_create_context_as(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        (version, npc): (i64, bool),
         permit: OwnedSemaphorePermit,
     ) -> Result<(SheetView, OwnedSemaphorePermit), AppError> {
         let admitted_auth = auth.clone();
@@ -294,8 +343,11 @@ impl Store {
                 let tx = db.transaction()?;
                 auth.recheck(&tx)?;
                 let campaign = campaign(&tx, id)?;
-                if role(&tx, id, auth.account_id())?.is_none() {
-                    return Err(AppError::NotFound);
+                match role(&tx, id, auth.account_id())?.as_deref() {
+                    None => return Err(AppError::NotFound),
+                    Some("master") => {}
+                    Some(_) if npc => return Err(AppError::NotFound),
+                    Some(_) => {}
                 }
                 // A sheet is created only on an immutable runtime pin; there is no pin-less create.
                 if version <= 0 {
@@ -337,6 +389,9 @@ impl Store {
             Ok::<_, AppError>((
                 SheetView {
                     snapshot,
+                    npc,
+                    ack: Ack::CompareAndSet,
+                    seen: None,
                     immutable,
                     warning: String::new(),
                     editable: true,
@@ -388,6 +443,8 @@ impl Store {
             if let Some(hook)=BEFORE_SAVE_RECHECK.lock().unwrap().take(){hook(&tx)?;}
             auth.recheck(&tx)?;
             let create=view.snapshot.sheet_id==0;
+            // The classification is re-read here: only a current Master creates an NPC sheet.
+            if create && view.npc && role(&tx,view.snapshot.campaign_id,auth.account_id())?.as_deref()!=Some("master"){return Err(AppError::NotFound);}
             if create {snapshots::authorize_edit(&tx,&auth,&view.snapshot)?;}else{
                 let old=snapshots::load(&tx,view.snapshot.sheet_id)?;
                 snapshots::authorize_edit(&tx,&auth,&old)?;
@@ -407,7 +464,8 @@ impl Store {
                 let max:i64=tx.query_row("SELECT coalesce(max(id),0) FROM private_sheets",[],|r|r.get(0))?;
                 view.snapshot.sheet_id=max.checked_add(1).ok_or(AppError::Conflict)?;
             }
-            let result=snapshots::write(&tx,&auth,view.snapshot,if create{"create"}else{"edit"},view.immutable.as_ref())?;
+            let result=snapshots::write_classified(&tx,&auth,view.snapshot,if create{"create"}else{"edit"},view.immutable.as_ref(),create&&view.npc)?;
+            acknowledge_own_save(&tx,&result,if create{Ack::Witnessed}else{view.ack},&auth)?;
             // Change notes join the revision in the same transaction (D-T); any failure rolls
             // the whole save back.
             #[cfg(test)]
@@ -499,7 +557,8 @@ impl Store {
                 let current = campaign(&tx, view.snapshot.campaign_id)?;
                 if current.game_id != view.snapshot.game_id
                     || current.edition_id != view.snapshot.edition_id
-                    || auth.account_id() != view.snapshot.custodian_id {
+                    || auth.account_id() != view.snapshot.custodian_id
+                    || (view.npc && role(&tx, view.snapshot.campaign_id, auth.account_id())?.as_deref() != Some("master")) {
                     return Err(AppError::NotFound);
                 }
                 snapshots::authorize_edit(&tx, &auth, &view.snapshot)?;
@@ -516,6 +575,17 @@ impl Store {
                     Ok(()) => true,
                     Err(AppError::NotFound) => false,
                     Err(error) => return Err(error),
+                };
+                // A current Master's acknowledgement of the rendered revision, in the same
+                // read as the correspondence check above.
+                view.seen = if history.is_none() && role(&tx, view.snapshot.campaign_id, auth.account_id())?.as_deref() == Some("master") {
+                    let seen: Option<i64> = tx.query_row("SELECT seen_revision FROM master_sheet_seen WHERE master_id=?1 AND sheet_id=?2", params![auth.account_id(), view.snapshot.sheet_id], |r| r.get(0)).optional()?;
+                    Some(match seen {
+                        Some(seen) if seen >= view.snapshot.revision => Seen::Opened(seen),
+                        _ => Seen::Offer,
+                    })
+                } else {
+                    None
                 };
             }
             // Change notes in the same read as the correspondence check: the current note of
@@ -547,5 +617,70 @@ impl Store {
             }
             auth.recheck(&tx)?;tx.commit()?;Ok((view,permit))
         }).await
+    }
+}
+
+/// A saving Master's acknowledgement of the revision just written (owner decision 6): after
+/// `snapshots::write`, in the save's transaction, only for a current Master (the same status
+/// the `master_sheet_seen` triggers demand, so a disagreement rolls the save back). A
+/// creation passes `Witnessed` (revision 1); see [`Ack`] for the others. Departure freezes never call
+/// this.
+fn acknowledge_own_save(
+    tx: &rusqlite::Connection,
+    written: &PrivateSnapshot,
+    ack: Ack,
+    auth: &RequestAuth,
+) -> Result<(), AppError> {
+    if role(tx, written.campaign_id, auth.account_id())?.as_deref() != Some("master") {
+        return Ok(());
+    }
+    let (master, sheet, new) = (auth.account_id(), written.sheet_id, written.revision);
+    match ack {
+        Ack::Witnessed => {
+            tx.execute("INSERT INTO master_sheet_seen(master_id,sheet_id,seen_revision) VALUES(?1,?2,?3) ON CONFLICT(master_id,sheet_id) DO UPDATE SET seen_revision=max(seen_revision,excluded.seen_revision)", params![master, sheet, new])?;
+        }
+        Ack::CompareAndSet => {
+            tx.execute("UPDATE master_sheet_seen SET seen_revision=?3 WHERE master_id=?1 AND sheet_id=?2 AND seen_revision=?3-1", params![master, sheet, new])?;
+        }
+    }
+    Ok(())
+}
+
+impl Store {
+    /// Records that the requesting current Master has opened revision `revision` of sheet
+    /// `id` (the click-only `POST /private-sheets/{id}/seen`). The revision must exist in the
+    /// sheet's history; the stored mark only ever rises (`max(old, submitted)`), so a stale
+    /// open never lowers it and a concurrent newer revision stays "Changed". No sheet revision
+    /// or history is written.
+    pub(crate) async fn acknowledge_seen(
+        &self,
+        auth: RequestAuth,
+        id: i64,
+        revision: i64,
+    ) -> Result<(), AppError> {
+        self.run_campaign(auth.clone(), move |db| {
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            auth.recheck(&tx)?;
+            let campaign: i64 = tx
+                .query_row("SELECT campaign_id FROM private_sheets WHERE id=?1", [id], |r| r.get(0))
+                .optional()?
+                .ok_or(AppError::NotFound)?;
+            if role(&tx, campaign, auth.account_id())?.as_deref() != Some("master") {
+                return Err(AppError::NotFound);
+            }
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM private_sheet_history WHERE sheet_id=?1 AND revision=?2)",
+                params![id, revision],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(AppError::Invalid("That revision does not exist."));
+            }
+            tx.execute("INSERT INTO master_sheet_seen(master_id,sheet_id,seen_revision) VALUES(?1,?2,?3) ON CONFLICT(master_id,sheet_id) DO UPDATE SET seen_revision=max(seen_revision,excluded.seen_revision)", params![auth.account_id(), id, revision])?;
+            auth.recheck(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 }

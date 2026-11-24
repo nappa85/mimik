@@ -52,6 +52,8 @@ mod interpret_route_tests;
 pub(super) mod list_tests;
 #[path = "list_values_tests.rs"]
 mod list_values_tests;
+#[path = "master_tests.rs"]
+mod master_tests;
 #[path = "material_tests.rs"]
 mod material_tests;
 #[path = "native_removal_tests.rs"]

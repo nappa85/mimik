@@ -1,127 +1,27 @@
 # Master view: remaining work (CAMP-14, ROAD-8)
 
-The schema change is migration 039 (the next free number on 2026-11-23; recheck at integration).
-Slice (a) is next.
+Slice (a) is built (migration 039, NPC classification, seen marks, own-save acknowledgement,
+the plain-HTML workspace, classified creation and the click-only seen POST); the reference is
+`docs/campaigns.md` ("Master workspace and seen marks") and CAMP-15/CAMP-16 in
+`docs/decisions.md`. Slices (b) and (c) remain. Section numbers 3 to 6 keep their original
+numbers (sections 1 and 2 were slice (a)).
 
-## 1. Persist classification and opened revisions
+## 1. What slice (a) leaves for the next slices
 
-- **Migration 039.** Bump `SCHEMA_VERSION` and `MIGRATIONS` (`store.rs`). Many tests rewind
-  a migrated database and reopen it (e.g. `store_native_tests.rs`, `store_pdf_tests.rs`,
-  `home_tests.rs`, `material_tests.rs`, `notes_tests.rs`), so add a `number == 39` guard in
-  `Store::migrate` like 037/038: when `pragma_table_info('private_sheets')` already lists
-  `is_npc`, skip only the `ALTER TABLE`; run the rest of 039 (all `IF NOT EXISTS`), then set
-  `user_version=39`. Add a rewound-below-039 regression test.
-- **NPC classification.** Add `private_sheets.is_npc INTEGER NOT NULL DEFAULT 0 CHECK(is_npc IN
-  (0,1))`, set only at creation. It is separate from `kind` (only `runtime` is created since
-  038), canonical game values and snapshot encoding 1; it never enters `PrivateSnapshot`. Keep
-  old snapshots, hashes and history byte-exact; rewrite no history and manufacture no revision.
-  Existing sheets stay player sheets (`0`); never infer NPC status from custody or role.
-  - Leave the long `private_sheets_insert` (038) and `private_sheets_update` (012) triggers
-    untouched and add separate ones, so every existing restriction holds by construction:
-    `private_sheets_npc_insert` (BEFORE INSERT `WHEN NEW.is_npc=1`: refuse unless the custodian
-    is the request's authenticated account and an active Master of the campaign, via
-    `campaign_request_auth` and `campaign_members`) and `private_sheets_npc_immutable` (BEFORE
-    UPDATE `WHEN NEW.is_npc IS NOT OLD.is_npc`: refuse).
-  - Index `(campaign_id,is_npc,id)` for the two lists.
-- **Seen revisions.** Add STRICT `master_sheet_seen(master_id INTEGER NOT NULL REFERENCES accounts(id),
-  sheet_id INTEGER NOT NULL REFERENCES private_sheets(id), seen_revision INTEGER NOT NULL CHECK(seen_revision>0), PRIMARY
-  KEY (master_id,sheet_id), FOREIGN KEY(sheet_id,seen_revision) REFERENCES
-  private_sheet_history(sheet_id,revision))` (that pair is the history table's primary key; the
-  history row is written before any acknowledgement in the same transaction). No timestamps
-  decide unread state.
-  - Triggers: INSERT and UPDATE require `campaign_request_auth.account_id=NEW.master_id` and an
-    active Master membership in the sheet's campaign; UPDATE also requires unchanged
-    `master_id`/`sheet_id` and `NEW.seen_revision>=OLD.seen_revision`; DELETE is refused.
-    Writes run under `with_domain_request` (`Store::run_campaign`).
-  - Rows survive demotion and re-promotion, but reads and writes need current Master status.
-    Storage is bounded by sheet/Master pairs under the existing caps; a future purge must remove
-    these rows explicitly.
-- **Unread state.** A sheet is "Changed" when its current revision is above that Master's seen
-  revision, and "Not opened" (also shown as text) when there is no row. Creation, edits,
-  note-only revisions and freezes count; no-op saves, list views and stream delivery do not.
-  Each Master's marks are independent and never shown to another Master.
-- **Own saves (owner decision 6).** Give `private_save_keeping` an explicit acknowledgement
-  input. The shared save cannot use a page base: unit, switch, Undo and accepted-proposal saves
-  are rebased onto the live revision L before they reach it, and per-unit bases move ahead of the
-  page (`sheet-assist.js`, refused JSON answers). In the save transaction, after
-  `snapshots::write`, and only when `role(&tx, campaign, account)` (`campaigns/mod.rs`) re-read
-  there is `master` (it must agree with the seen triggers, or the save rolls back):
-  - **Create:** acknowledge revision 1.
-  - **Full-form and list-form saves** (`save_parsed`; `apply_save` refuses a submitted
-    `revision` other than L, rechecked in `private_save_keeping`): acknowledge the new revision.
-    They are the only saves whose base is the page's rendered revision. Editable saved pages
-    show unit forms only, so this fires on create and on resubmitted full-form drafts.
-    `save_parsed` passes Create when `sheet_id == 0`, otherwise Witnessed; the unit, assist and
-    interpret save paths pass the compare-and-set kind.
-  - **Unit, scalar, meta, cell, row, quick-add, switch, Undo and accepted-proposal saves:**
-    `UPDATE master_sheet_seen SET seen_revision=L+1 WHERE master_id=? AND sheet_id=? AND
-    seen_revision=L`, so a save acknowledges only when this Master had already seen L; otherwise
-    seen is unchanged and another Master's change stays "Changed".
-  - **Departure freezes** never acknowledge.
-  - Without JS (slice a), a Master who edits by units without clicking Seen keeps the badge;
-    slice (c)'s auto-submit removes this in practice.
-- **Projections.** `is_npc` is selected only by the Master workspace projection and the create
-  path. Every existing query names its columns, so nothing leaks today; player lists, player
-  campaign pages, sheet and history HTML, JSON answers and error echoes must keep omitting it
-  (hidden inputs and data attributes included). The label grants no access: custody,
-  current-Master reads, departure freezes and immutable pins are unchanged. Demotion neither
-  transfers nor erases an NPC; its custodian keeps the existing sheet rights without seeing the
-  label in player views.
-
-## 2. Render a usable Master workspace and acknowledge opens
-
-Slice (a) is plain HTML: acknowledgement is one click, and there is no hub or stream (the JS
-auto-submit is slice (c), the post-commit seen invalidation slice (b)).
-
-- **Workspace page.** `GET /campaigns/{id}/master`, linked from the campaign page only for
-  current Masters. Authorize in the store transaction, including a final boundary after
-  render preparation; Owner, player, former Master and other-campaign requests get the uniform
-  refusal (`AppError::NotFound`, rendered as 403) with no sheet metadata.
-  - One Store projection with its own DTO (name, custodian, revision, active/frozen state, NPC
-    flag, this Master's seen revision), reusable by slice (b)'s snapshot and stream.
-  - "Player sheets" and "NPC sheets" are separate sections with textual "Changed"/"Not opened"
-    badges (not colour alone). The NPC section lists every classified NPC with its custodian;
-    unclassified Master-held sheets stay in the player section.
-  - Pagination follows `DetailPage` (`domain.rs`, `serde(deny_unknown_fields)`, nonnegative):
-    cursors `players_after` and `npcs_after`, `Listing::new` (`pagination.rs`), `LIMIT 51` per
-    section, stable ID order, empty states, next/first-page links. Never truncate a campaign
-    to its first 50 sheets.
-- **Opening a sheet.** One ordinary sheet document at a time through `GET /private-sheets/{id}`
-  (`private_sheet.html`: unit forms and full form, the unsupported-pin read-only panel, history,
-  read-only warnings, conflicts). No multi-sheet panels or iframes; separate browser tabs are
-  allowed. No push replaces sheet values, form bases, drafts or unsaved input; sheet pages open
-  no stream and show no live newer-revision notice. A return link to the Master list keeps the
-  validated cursors only on the GET opened from the list; after a save (which redirects to a
-  bare `/private-sheets/{id}`) it falls back to the first page.
-- **Classified creation.** The choice travels on the create URL, never as a form key:
-  `/campaigns/{id}/sheets/new?version=V&npc=1`, with `npc: u8` added to the `Version` query
-  (`deny_unknown_fields`; default 0, anything but 0 or 1 refused). It is carried on `SheetView`
-  (not `PrivateSnapshot`) from `private_create_context`, threaded through `save_private`,
-  `save_parsed`, `load_editor` and `rejected_editor`, and used by the form action builder. The campaign page shows "New NPC sheet" links only to current
-  Masters, and the create form's action is rebuilt with the flag, so it survives draft
-  operations, oversize 422, invalid drafts and 409 without entering the closed
-  key set. Validate "current active Master, self as custodian" in `private_create_context` and
-  `private_badge` and again in the save transaction; without current Master status refuse with
-  the uniform 403 rather than create a player sheet. Pass the flag to `snapshots::write` as an
-  explicit create-only argument of its INSERT. NPCs count toward the 32-per-custodian and
-  2048-instance limits (owner decision 8).
-- **Acknowledging an open.** `POST /private-sheets/{id}/seen`, mounted in the top-level router
-  (8 KiB body limit) outside the sheet router's `runtime` layer. Global `post_origin` already
-  enforces the exact Origin and urlencoded content type; the handler runs `check_csrf`, then
-  `request_auth`, then `Pairs::admit({"csrf","revision"})`, with transactional
-  session/principal/role rechecks.
-  - Only `read_private` with no history and status 200, for a viewer who is a current Master at
-    `private_badge`'s final boundary, renders the seen form, carrying **that exact rendered
-    revision**. 409/422 drafts, `rejected_editor`, the busy page, history, catalogue reads and
-    failed renders never offer or perform an acknowledgement. When the Master's seen revision
-    already reaches the rendered one (read in the same final boundary), the page shows
-    "Opened (revision N)" instead of the form.
-  - The POST validates that the revision exists for this authorized sheet, never substitutes
-    the latest one, raises seen with `max(old, submitted)` (an older submission never lowers
-    it; a concurrent N+1 stays changed when N is acknowledged), creates no sheet revision or
-    history, and answers 303 to `/private-sheets/{id}`, never a sheet document.
-  - A failed acknowledgement is visible and never reported as seen. This records the Master's
-    reading preference, not proof that every value was read; it needs no signed receipts.
+- **Projection.** `Store::master_workspace` (`campaigns/master.rs`) returns `MasterSheet` rows
+  (ID, name, custodian, revision, state, this Master's seen revision; the NPC flag is the
+  section a row sits in). Slice (b)'s snapshot and stream reuse that query; they add the NPC flag
+  to the row, decimal-string IDs and the per-row and per-event size limits of section 4.
+- **Acknowledgement.** `Store::acknowledge_seen` is the only seen writer besides the own-save
+  step in `private_save_keeping`. Slice (b) publishes the seen invalidation (recipient: that
+  Master only) after the commit of either; slice (c) auto-submits the seen form with JS (the
+  page's `#seen-form` carries the exact rendered revision). Without JS a Master who edits by
+  units without clicking Seen keeps the badge (owner decision 6); slice (c)'s auto-submit removes
+  this in practice.
+- **Opening a sheet** stays one ordinary document per tab: no multi-sheet panels, no push that
+  replaces values, form bases or drafts, no stream on sheet pages, no live newer-revision notice.
+- **Pages.** The workspace uses the default page policy today; slice (c) gives it the strict
+  `SheetPage` policy with its script. Pagination, cursors and the 403 rules are as built.
 
 ## 3. Publish committed changes, with bounded recovery
 
@@ -272,20 +172,14 @@ auto-submit is slice (c), the post-commit seen invalidation slice (b)).
 ## 6. Verification, integration and reference updates
 
 Implement in reviewed slices: (a) schema/classification and seen/open contracts with plain
-HTML; (b) commit hints and SSE resource/auth lifecycle; (c) external enhancement and browser/LAN
-gate integration. Each slice retains meaningful regression tests; establish a failing test
+HTML (built); (b) commit hints and SSE resource/auth lifecycle; (c) external enhancement and
+browser/LAN gate integration. Each slice retains meaningful regression tests; establish a failing test
 before fixing any reproducible defect encountered.
 
-- **Data/domain:** migrate empty and populated databases; history bytes,
-  hashes and foreign keys unchanged; NPC immutable/default/forged-player creation guards;
-  independent Masters; absent/equal/newer seen states; stale open racing N+1 and overlapping
-  opens; future/nonexistent revision refusal, session binding, CSRF and revoked-role writes;
-  frozen/unsupported sheets; no seen changes on list/SSE/history/failed render or no-op.
-  Keep regression coverage for the untouched `private_sheets_insert` and
-  `private_sheets_update` triggers, and add tests for `private_sheets_npc_insert`,
-  `private_sheets_npc_immutable` and the seen triggers. Test own-save acknowledgement independently for each Master.
-  Assert label absence in player responses, including a demoted NPC custodian and rejected
-  drafts. Check fresh/reopened persistence and 50/51-row pagination in both sections.
+- **Data/domain (slice a, built):** `campaigns/master_tests.rs` and `store_master_tests.rs`.
+  Still to add with slices (b) and (c): stale open racing N+1 and overlapping opens at the
+  publication level, seen updates across same-Master tabs, no seen changes on SSE, and the
+  browser-level label-absence checks in player and outsider network responses.
 - **Publication/concurrency:** every production write path, note-only and empty-note edits,
   multi-sheet freezes, final-freeze failure rollback, caller cancellation after commit,
   out-of-order callbacks, subscribe/snapshot race, seen updates across same-Master tabs,

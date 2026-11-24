@@ -69,6 +69,45 @@ and, for a catalogue-backed name, `suggest/{f}/{p}` and `cells/{f}/{r}/{p}/which
   route admits it. Corrupt immutable content is an error.
 - Account disablement blocks access but does not transfer custody or freeze sheets.
 
+## Master workspace and seen marks
+
+Routes: `GET /campaigns/{id}/master` and `POST /private-sheets/{id}/seen`.
+
+- **Workspace** (plain HTML): linked from the campaign page to current Masters only. It lists
+  every sheet of the campaign in two sections, "Player sheets" and "NPC sheets" (custodian
+  shown), each 50 per page on its own cursor (`players_after`, `npcs_after`, nonnegative,
+  nothing else accepted). Each row shows a textual badge: "Changed" (revision above this
+  Master's mark), "Not opened" (no mark) or "Opened". The Owner, players, former Masters and
+  other campaigns' Masters get the uniform 403, authorized in the page's own transaction and
+  again at its end. The page needs a reload to refresh. A sheet opened from the list shows a
+  link back to it, with the list's cursors only on that first GET.
+- **NPC classification:** `private_sheets.is_npc` (migration 039), set only at creation by a
+  current Master for a sheet they hold. The choice is the create URL's `npc=1`
+  (`/campaigns/{id}/sheets/new?version=V&npc=1`, never a form key; only 0 or 1), offered as
+  "New NPC sheet" links on the campaign page to current Masters only. It is checked again at
+  the create page, the final read boundary and the save transaction (without current Master
+  status: 403, never a player sheet), and by the `private_sheets_npc_insert` trigger. The
+  `private_sheets_npc_immutable` trigger refuses any change. The flag grants no access:
+  custody, current-Master reads and departure freezes are as for any sheet, and a demoted
+  Master's NPC stays in their custody. It is read only by the workspace projection and never
+  appears in the snapshot, history, player lists, sheet pages or JSON answers.
+- **Seen marks** (`master_sheet_seen`, one row per Master and sheet, the newest acknowledged
+  revision; the composite foreign key keeps it on an existing history revision; triggers
+  require the request's own account to be a current Master of the sheet's campaign, refuse
+  lowering, moving and deleting). Rows survive demotion; reads and writes need current Master
+  status. Marks are independent per Master and never shown to another.
+- **Acknowledging an open:** a plain current read (status 200, no history) of a current Master
+  shows a one-click form carrying the rendered revision, or "Opened (revision N)" when the mark
+  already reaches it. The POST (CSRF, session, exactly `csrf` and `revision`) refuses
+  non-Masters (403), malformed revisions (400) and revisions the sheet's history lacks (422),
+  raises the mark to `max(old, submitted)`, writes no sheet revision and answers 303 to the
+  sheet. 409/422 re-renders, history, the busy page and listings never offer or write it.
+- **Own saves:** after the sheet write, in the same transaction and only for a current Master:
+  a create acknowledges revision 1; a full-form or list-form save (its base is the rendered
+  revision) acknowledges its new revision; every other save (unit, scalar, metadata, cell, row,
+  quick-add, switch, Undo, accepted proposal; they are rebased onto the live revision L)
+  moves the mark from L to L+1 only if it was L. Departure freezes never acknowledge.
+
 ## Departure and freeze
 
 Leaving or being removed sets the membership inactive and, in the same transaction,
@@ -118,7 +157,7 @@ Enforced in both Rust and SQL triggers (migration 012), as of now:
 | Private sheets per instance | 2,048 |
 | Stored snapshot | 1 MiB (1,048,576 bytes), canonical |
 | Sheet name / notes | 100 / 20,000 characters |
-| Directory, roster, requests, versions, sheet lists, history | 50 per page, independent cursors, Next only when another row exists |
+| Directory, roster, requests, versions, sheet lists, Master workspace sections, history | 50 per page, independent cursors, Next only when another row exists |
 | Ruleset selector | first 50 registered pairs |
 | Body: campaign forms | 8 KiB |
 | Body: sheet create/full save | 5 MiB (`SHEET_POST_BYTES`); draft echo up to 1 MiB |

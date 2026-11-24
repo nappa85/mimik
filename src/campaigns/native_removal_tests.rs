@@ -32,6 +32,9 @@ async fn regression_a_sheet_without_an_admitted_pin_admits_no_form_keys() {
     };
     let view = SheetView {
         snapshot,
+        npc: false,
+        ack: crate::campaigns::sheets::Ack::CompareAndSet,
+        seen: None,
         immutable: None,
         warning: String::new(),
         editable: true,

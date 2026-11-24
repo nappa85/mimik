@@ -7,6 +7,7 @@ mod entry;
 mod formulas;
 mod history_diff;
 mod interpret;
+mod master;
 mod notes;
 mod quick;
 mod remind;
