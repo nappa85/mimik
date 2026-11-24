@@ -9,6 +9,7 @@
 {% for version in detail.versions %}<p><a href="/campaigns/{{ detail.campaign.id }}/sheets/new?version={{ version.0 }}">New {{ version.2 }} sheet, version {{ version.1 }}</a></p>{% endfor %}
 {% if let Some(next) = detail.versions_next %}<a href="/campaigns/{{ detail.campaign.id }}?versions_after={{ next }}&amp;members_after={{ page.members }}&amp;requests_after={{ page.requests }}&amp;sheets_after={{ page.sheets }}">Next definition page</a>{% endif %}
 {% if detail.versions.is_empty() %}<p>Capability unavailable. The Owner must register and explicitly approve an exact-pair runtime definition against source images. Registration alone does not enable sheet creation.</p>{% endif %}
+{% if detail.role == "master" %}<p><a href="/campaigns/{{ detail.campaign.id }}/master">Master workspace</a></p>{% for version in detail.versions %}<p><a href="/campaigns/{{ detail.campaign.id }}/sheets/new?version={{ version.0 }}&amp;npc=1">New NPC {{ version.2 }} sheet, version {{ version.1 }}</a></p>{% endfor %}{% endif %}
 {% for sheet in sheets %}<article><a href="/private-sheets/{{ sheet.id }}">{{ sheet.name }}</a> · {{ sheet.state }} · revision {{ sheet.revision }}</article>{% endfor %}
 {% if let Some(next) = sheets_next %}<a href="/campaigns/{{ detail.campaign.id }}?sheets_after={{ next }}&amp;members_after={{ page.members }}&amp;requests_after={{ page.requests }}&amp;versions_after={{ page.versions }}">Next sheets page</a>{% endif %}
 </section>

@@ -246,13 +246,28 @@ pub(crate) fn authorize_edit(
     Ok(())
 }
 
-/// The sole private live/history writer. Caller owns an immediate transaction.
+/// The private live/history writer for every edit, freeze and unclassified create (a create
+/// through it is a player sheet). Caller owns an immediate transaction.
 pub(crate) fn write(
+    db: &Connection,
+    auth: &RequestAuth,
+    resulting: PrivateSnapshot,
+    operation: &str,
+    admitted: Option<&crate::definitions::private_pin::ImmutablePin>,
+) -> Result<PrivateSnapshot, AppError> {
+    write_classified(db, auth, resulting, operation, admitted, false)
+}
+
+/// The sole private live/history writer. `npc` is the Master's classification and is used only
+/// by the INSERT of a creation (`private_sheets.is_npc`, migration 039); an edit or freeze never
+/// touches it, and it never enters the snapshot. Caller owns an immediate transaction.
+pub(crate) fn write_classified(
     db: &Connection,
     auth: &RequestAuth,
     mut resulting: PrivateSnapshot,
     operation: &str,
     admitted: Option<&crate::definitions::private_pin::ImmutablePin>,
+    npc: bool,
 ) -> Result<PrivateSnapshot, AppError> {
     if operation != "freeze" && !supported(&resulting) {
         return Err(AppError::Invalid(
@@ -334,7 +349,7 @@ pub(crate) fn write(
     let pin = serde_json::to_string(&resulting.pin)?;
     let now = auth.recheck(db)?;
     if operation=="create"{
-        db.execute("INSERT INTO private_sheets(id,campaign_id,custodian_id,game_id,edition_id,kind,pin,revision,state,snapshot,hash) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![resulting.sheet_id,resulting.campaign_id,resulting.custodian_id,resulting.game_id,resulting.edition_id,resulting.kind,pin,resulting.revision,resulting.state,content,hash])?;
+        db.execute("INSERT INTO private_sheets(id,campaign_id,custodian_id,game_id,edition_id,kind,pin,revision,state,snapshot,hash,is_npc) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![resulting.sheet_id,resulting.campaign_id,resulting.custodian_id,resulting.game_id,resulting.edition_id,resulting.kind,pin,resulting.revision,resulting.state,content,hash,npc])?;
     }else if db.execute("UPDATE private_sheets SET revision=?3,state=?4,snapshot=?5,hash=?6 WHERE id=?1 AND revision=?2",params![resulting.sheet_id,previous,resulting.revision,resulting.state,content,hash])?!=1{return Err(AppError::Conflict);}
     if db.execute("INSERT INTO private_sheet_history(sheet_id,revision,hash,snapshot,operation,previous_revision,actor_id,actor_epoch,session_digest,occurred_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![resulting.sheet_id,resulting.revision,hash,content,operation,previous,auth.account_id(),auth.epoch(),auth.digest(),now])?!=1{return Err(AppError::Conflict);}
     auth.recheck(db)?;

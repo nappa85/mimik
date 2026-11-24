@@ -1,0 +1,16 @@
+{% extends "layout.html" %}{% block title %}Master workspace · {{ workspace.campaign.title }} · Mimik{% endblock %}{% block content %}
+<a href="/campaigns/{{ workspace.campaign.id }}">Campaign</a><h1>Master workspace</h1><p><bdi>{{ workspace.campaign.title }}</bdi> · #{{ workspace.campaign.id }}</p>
+<p>Reload this page to refresh the lists. "Changed" means a sheet has a newer revision than the one you last marked as opened; "Not opened" means you never did. Marking is one click on the sheet's page and is yours alone.</p><p><a id="reload" href="/campaigns/{{ workspace.campaign.id }}/master?players_after={{ page.players }}&amp;npcs_after={{ page.npcs }}">Reload</a></p>
+<section class="panel" aria-labelledby="players-heading"><h2 id="players-heading">Player sheets</h2>
+{% if workspace.players.rows.is_empty() %}<p>No player sheets{% if page.players > 0 %} on this page{% endif %}.</p>{% endif %}
+{% for sheet in workspace.players.rows %}<article><a href="/private-sheets/{{ sheet.id }}?players_after={{ page.players }}&amp;npcs_after={{ page.npcs }}"><bdi>{{ sheet.name }}</bdi></a> · custodian <bdi>{{ sheet.custodian }}</bdi> · {{ sheet.state }} · revision {{ sheet.revision }} · <strong>{{ sheet.badge() }}</strong></article>{% endfor %}
+{% if let Some(next) = workspace.players.next %}<a href="/campaigns/{{ workspace.campaign.id }}/master?players_after={{ next }}&amp;npcs_after={{ page.npcs }}">Next player sheets</a>{% endif %}
+{% if page.players > 0 %}<a href="/campaigns/{{ workspace.campaign.id }}/master?players_after=0&amp;npcs_after={{ page.npcs }}">First player sheets</a>{% endif %}
+</section>
+<section class="panel" aria-labelledby="npcs-heading"><h2 id="npcs-heading">NPC sheets</h2>
+{% if workspace.npcs.rows.is_empty() %}<p>No NPC sheets{% if page.npcs > 0 %} on this page{% endif %}.</p>{% endif %}
+{% for sheet in workspace.npcs.rows %}<article><a href="/private-sheets/{{ sheet.id }}?players_after={{ page.players }}&amp;npcs_after={{ page.npcs }}"><bdi>{{ sheet.name }}</bdi></a> · custodian <bdi>{{ sheet.custodian }}</bdi> · {{ sheet.state }} · revision {{ sheet.revision }} · <strong>{{ sheet.badge() }}</strong></article>{% endfor %}
+{% if let Some(next) = workspace.npcs.next %}<a href="/campaigns/{{ workspace.campaign.id }}/master?players_after={{ page.players }}&amp;npcs_after={{ next }}">Next NPC sheets</a>{% endif %}
+{% if page.npcs > 0 %}<a href="/campaigns/{{ workspace.campaign.id }}/master?players_after={{ page.players }}&amp;npcs_after=0">First NPC sheets</a>{% endif %}
+</section>
+{% endblock %}

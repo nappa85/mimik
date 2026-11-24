@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 38;
+pub const SCHEMA_VERSION: i64 = 39;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 38] = [
+const MIGRATIONS: [&str; 39] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -49,6 +49,7 @@ const MIGRATIONS: [&str; 38] = [
     include_str!("../migrations/036_upload_limits.sql"),
     include_str!("../migrations/037_pdf_store.sql"),
     include_str!("../migrations/038_remove_native_game.sql"),
+    include_str!("../migrations/039_master_view.sql"),
 ];
 
 #[derive(Clone)]
@@ -167,6 +168,26 @@ impl Store {
                         continue;
                     }
                     refuse_native_data(&tx)?;
+                }
+                // 039 adds `private_sheets.is_npc` first, then only idempotent statements. A
+                // database whose version was set back below 039 after that (a restore, or a test
+                // fixture rewinding the schema) already has the column: only that first
+                // statement (the file's first line) is skipped.
+                if number == 39
+                    && !tx.query_row(
+                        "SELECT count(*)=0 FROM pragma_table_info('private_sheets') WHERE name='is_npc'",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )?
+                {
+                    let (_, rest) = migration
+                        .split_once('\n')
+                        .filter(|(first, _)| {
+                            first.starts_with("ALTER TABLE private_sheets ADD COLUMN is_npc")
+                        })
+                        .ok_or(AppError::Invalid("Migration 039 must start with its ALTER."))?;
+                    tx.execute_batch(rest)?;
+                    continue;
                 }
                 tx.execute_batch(migration)?;
             }
@@ -556,3 +577,7 @@ mod upload_limits_tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "store_pdf_tests.rs"]
 mod pdf_store_migration_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "store_master_tests.rs"]
+mod master_view_migration_tests;

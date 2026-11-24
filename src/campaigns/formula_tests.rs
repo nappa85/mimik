@@ -1047,7 +1047,10 @@ fn sheet_form(document: &scraper::Html) -> Option<scraper::ElementRef<'_>> {
     let forms = scraper::Selector::parse("form").unwrap();
     document
         .select(&forms)
-        .find(|form| form.select(&revision).next().is_some())
+        // Not the Master's one-click seen form, which also carries a `revision`.
+        .find(|form| {
+            form.value().id() != Some("seen-form") && form.select(&revision).next().is_some()
+        })
         .or_else(|| {
             document
                 .select(&forms)

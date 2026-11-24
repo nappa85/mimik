@@ -310,9 +310,19 @@ pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
         .route("/private-sheets", get(personal))
         .route("/private-sheets/{id}/history", get(history))
         .layer(DefaultBodyLimit::max(8192))
+        .merge(master_routes())
         .merge(sheets)
         .merge(units)
         .merge(suggest_route())
+}
+
+/// The Master workspace page and the click-only acknowledgement of an opened revision: outside
+/// the sheet router's `runtime` layer (neither reads a sheet document), with the small body limit.
+fn master_routes() -> Router<AuthState> {
+    Router::new()
+        .route("/campaigns/{id}/master", get(master))
+        .route("/private-sheets/{id}/seen", post(seen))
+        .layer(DefaultBodyLimit::max(8192))
 }
 
 /// The suggest route (step 4): JSON, inside `signed_in`, outside the `runtime` layer (its own
@@ -436,6 +446,69 @@ async fn detail(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     )
     .into_response())
+}
+
+#[derive(Template)]
+#[template(path = "master.html")]
+struct MasterTemplate<'a> {
+    nav: crate::auth::nav::Nav,
+    workspace: &'a super::master::MasterWorkspace,
+    page: super::master::MasterPage,
+}
+
+/// The Master workspace (plain HTML): player and NPC sheets with this Master's seen state.
+/// Everyone but a current Master of the campaign gets the uniform 403.
+async fn master(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    Query(page): Query<super::master::MasterPage>,
+) -> ResultResponse {
+    if !page.valid() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let auth = auth::request_auth(&state, &session).await?;
+    let workspace = state
+        .store()
+        .master_workspace(auth, id, page)
+        .await
+        .map_err(error)?;
+    Ok(Html(
+        MasterTemplate {
+            nav: crate::auth::nav::Nav::here(crate::auth::nav::Section::Campaigns),
+            workspace: &workspace,
+            page,
+        }
+        .render()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    )
+    .into_response())
+}
+
+/// Records that the current Master opened the rendered revision: CSRF, then the session, then
+/// the closed key set. Answers 303 to the sheet, never a sheet document, and writes no sheet
+/// revision.
+async fn seen(
+    State(state): State<AuthState>,
+    session: Session,
+    Path(id): Path<i64>,
+    body: axum::body::Bytes,
+) -> ResultResponse {
+    let pairs = super::transport::Pairs::parse(&body)?;
+    auth::check_csrf(&session, pairs.csrf()?).await?;
+    let auth = auth::request_auth(&state, &session).await?;
+    let form = pairs.admit(&["csrf", "revision"].into_iter().collect())?;
+    let revision = form["revision"]
+        .parse::<i64>()
+        .ok()
+        .filter(|revision| *revision > 0)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    state
+        .store()
+        .acknowledge_seen(auth, id, revision)
+        .await
+        .map_err(error)?;
+    Ok(Redirect::to(&format!("/private-sheets/{id}")).into_response())
 }
 
 fn pairs(bytes: &[u8], keys: &[&str]) -> Result<BTreeMap<String, String>, StatusCode> {
@@ -612,13 +685,37 @@ async fn history(
 struct Version {
     #[serde(default)]
     version: i64,
+    /// The Master's classification of the sheet to create (`1` for an NPC sheet): it travels on
+    /// the create URL, never as a form key, so it survives every re-render of the create form.
+    /// Anything but 0 or 1 is refused.
+    #[serde(default)]
+    npc: u8,
+}
+
+/// The create page's identity: the pinned definition version and the classification.
+#[derive(Clone, Copy)]
+struct CreateKey {
+    version: i64,
+    npc: bool,
+}
+
+impl Version {
+    fn key(&self) -> Result<CreateKey, StatusCode> {
+        match self.npc {
+            0 | 1 => Ok(CreateKey {
+                version: self.version,
+                npc: self.npc == 1,
+            }),
+            _ => Err(StatusCode::BAD_REQUEST),
+        }
+    }
 }
 
 /// A sheet view's optional focus after a row move (slice 1.5b review), `up-<f>-<r>` or
 /// `down-<f>-<r>`, or after a quick-add (slice 1.6), `quick-<f>`. Read from the raw query:
 /// anything else, including a repeated `focus` and any other parameter, is ignored, never
 /// refused (a focus is a convenience).
-struct SheetQuery(Option<String>);
+struct SheetQuery(Option<String>, Option<(i64, i64)>);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SheetQuery {
     type Rejection = std::convert::Infallible;
@@ -631,7 +728,22 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for SheetQuery {
             .filter(|(key, _)| key == "focus")
             .map(|(_, value)| value.into_owned());
         let first = focus.next();
-        std::future::ready(Ok(Self(first.filter(|_| focus.next().is_none()))))
+        // The Master list's cursors, kept only when each appears at most once and is a
+        // nonnegative integer; anything else falls back to the list's first page.
+        let cursor = |name: &str| {
+            let mut found = form_urlencoded::parse(query.as_bytes())
+                .filter(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned());
+            let one = found.next();
+            if found.next().is_some() {
+                return None;
+            }
+            one.map_or(Some(0), |value| {
+                value.parse::<i64>().ok().filter(|n| *n >= 0)
+            })
+        };
+        let back = cursor("players_after").zip(cursor("npcs_after"));
+        std::future::ready(Ok(Self(first.filter(|_| focus.next().is_none()), back)))
     }
 }
 
@@ -1535,6 +1647,10 @@ struct PrivateTemplate<'a> {
     nav: crate::auth::nav::Nav,
     view: &'a SheetView,
     csrf: &'a str,
+    /// The Master workspace link of a current Master's current page.
+    master_link: Option<String>,
+    /// The acknowledgement a plain current read offers a current Master.
+    seen_block: Option<SeenBlock>,
     action: String,
     groups: &'a [GroupView],
     message: &'a str,
@@ -1562,6 +1678,13 @@ struct PrivateTemplate<'a> {
     /// Whether the page has a form per unit (slice 1.5a), and which metadata control a
     /// refused unit save focuses.
     unit_forms: UnitForms,
+}
+
+/// What the seen block of a Master's page shows: "Opened (revision N)" or the one-click form
+/// carrying the exact rendered revision.
+struct SeenBlock {
+    opened: Option<i64>,
+    revision: i64,
 }
 
 /// A saved runtime page the reader may edit has a form per unit (slice 1.5a): Name, General
@@ -1651,17 +1774,41 @@ fn render_private(
             version_id: version,
             ..
         } = view.snapshot.pin;
+        // The classification travels on the create URL, never as a form key.
         format!(
-            "/campaigns/{}/sheets/new?version={version}",
-            view.snapshot.campaign_id
+            "/campaigns/{}/sheets/new?version={version}{}",
+            view.snapshot.campaign_id,
+            if view.npc { "&npc=1" } else { "" }
         )
     } else {
         format!("/private-sheets/{}", view.snapshot.sheet_id)
     };
+    // A current Master's page (never a player's, never a history page) links back to the
+    // workspace and may offer the acknowledgement of the rendered revision.
+    let master_link = (!create && view.seen.is_some()).then(|| match notice.back {
+        Some((players, npcs)) if players > 0 || npcs > 0 => format!(
+            "/campaigns/{}/master?players_after={players}&npcs_after={npcs}",
+            view.snapshot.campaign_id
+        ),
+        _ => format!("/campaigns/{}/master", view.snapshot.campaign_id),
+    });
+    let seen_block = notice
+        .offer_seen
+        .then_some(view.seen)
+        .flatten()
+        .map(|seen| SeenBlock {
+            opened: match seen {
+                super::sheets::Seen::Opened(revision) => Some(revision),
+                super::sheets::Seen::Offer => None,
+            },
+            revision: view.snapshot.revision,
+        });
     PrivateTemplate {
         nav,
         view,
         csrf,
+        master_link,
+        seen_block,
         action,
         groups: &groups,
         message: &notice.message,
@@ -1905,6 +2052,11 @@ struct Notice {
     alert: String,
     focus: Option<values::Focus>,
     draft: Option<unit_web::UnitDraft>,
+    /// A plain current read (status 200, no history) of a current Master's page offers the
+    /// acknowledgement; every other render (refused drafts, busy, history) never does.
+    offer_seen: bool,
+    /// Validated Master workspace cursors of the list page this sheet was opened from.
+    back: Option<(i64, i64)>,
 }
 
 impl Notice {
@@ -1957,11 +2109,12 @@ async fn new_sheet(
     Query(version): Query<Version>,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
+    let key = version.key()?;
     let permit = admission.take()?;
     let auth = auth::request_auth(&state, &session).await?;
     let (view, permit) = state
         .store()
-        .private_create_context(auth, id, version.version, permit)
+        .private_create_context_as(auth, id, (key.version, key.npc), permit)
         .await
         .map_err(error)?;
     let csrf = auth::token(&session)
@@ -1977,7 +2130,14 @@ async fn read_sheet(
     query: SheetQuery,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
-    read_private(state, session, (id, None), query.focus(), admission).await
+    read_private(
+        state,
+        session,
+        (id, None),
+        (query.focus(), query.1),
+        admission,
+    )
+    .await
 }
 async fn read_history(
     State(state): State<AuthState>,
@@ -1985,13 +2145,20 @@ async fn read_history(
     Path((id, revision)): Path<(i64, i64)>,
     Extension(admission): Extension<RuntimeAdmission>,
 ) -> ResultResponse {
-    read_private(state, session, (id, Some(revision)), None, admission).await
+    read_private(
+        state,
+        session,
+        (id, Some(revision)),
+        (None, None),
+        admission,
+    )
+    .await
 }
 async fn read_private(
     state: AuthState,
     session: Session,
     (id, history): (i64, Option<i64>),
-    focus: Option<values::Focus>,
+    (focus, back): (Option<values::Focus>, Option<(i64, i64)>),
     admission: RuntimeAdmission,
 ) -> ResultResponse {
     let permit = admission.take()?;
@@ -2006,6 +2173,8 @@ async fn read_private(
         .ok_or(StatusCode::UNAUTHORIZED)?;
     let notice = Notice {
         focus,
+        offer_seen: history.is_none(),
+        back: back.filter(|_| history.is_none()),
         ..Notice::default()
     };
     rendered(view, permit, csrf, None, StatusCode::OK, notice).await
@@ -2020,7 +2189,7 @@ async fn create_sheet(
     body: axum::body::Bytes,
 ) -> ResultResponse {
     let permit = admission.take()?;
-    save_private(state, session, id, Some(version.version), permit, body).await
+    save_private(state, session, id, Some(version.key()?), permit, body).await
 }
 /// The full-form and list-form save (slice 1.5a review, Sonnet M1): like a unit save it
 /// parses its body and checks CSRF and the session (review round 2, Sol Minor 1), then
@@ -2213,7 +2382,7 @@ async fn save_private(
     state: AuthState,
     session: Session,
     id: i64,
-    version: Option<i64>,
+    version: Option<CreateKey>,
     permit: OwnedSemaphorePermit,
     body: axum::body::Bytes,
 ) -> ResultResponse {
@@ -2231,7 +2400,7 @@ async fn save_private(
 async fn save_parsed(
     state: &AuthState,
     session: &Session,
-    (id, version): (i64, Option<i64>),
+    (id, version): (i64, Option<CreateKey>),
     (auth, permit): (auth::RequestAuth, OwnedSemaphorePermit),
     pairs: super::transport::Pairs,
 ) -> ResultResponse {
@@ -2275,6 +2444,9 @@ async fn save_parsed(
     if op != values::Op::Save {
         return draft_op(view, permit, csrf, form, op).await;
     }
+    // The full form and the list form are the only saves whose base is the page's own rendered
+    // revision (checked by `apply_save` and again in the save transaction).
+    view.ack = super::sheets::Ack::Witnessed;
     let (result, view, form, permit) = tokio::task::spawn_blocking(move || {
         let result = apply_save(&mut view, &form);
         (result, view, form, permit)
@@ -2323,7 +2495,7 @@ async fn save_parsed(
 async fn invalid_draft(
     state: &AuthState,
     auth: auth::RequestAuth,
-    (id, version): (i64, Option<i64>),
+    (id, version): (i64, Option<CreateKey>),
     permit: OwnedSemaphorePermit,
     csrf: String,
     form: BTreeMap<String, String>,
@@ -2353,7 +2525,7 @@ async fn invalid_draft(
 async fn unchanged(
     state: &AuthState,
     auth: auth::RequestAuth,
-    (id, version): (i64, Option<i64>),
+    (id, version): (i64, Option<CreateKey>),
     view: SheetView,
     permit: OwnedSemaphorePermit,
     csrf: String,
@@ -2403,7 +2575,7 @@ async fn rejected_editor(
     state: &AuthState,
     auth: auth::RequestAuth,
     id: i64,
-    version: Option<i64>,
+    version: Option<CreateKey>,
     permit: Option<OwnedSemaphorePermit>,
 ) -> Result<(SheetView, OwnedSemaphorePermit), StatusCode> {
     #[cfg(test)]
@@ -2434,13 +2606,13 @@ async fn load_editor(
     state: &AuthState,
     auth: auth::RequestAuth,
     id: i64,
-    version: Option<i64>,
+    version: Option<CreateKey>,
     permit: OwnedSemaphorePermit,
 ) -> Result<(SheetView, OwnedSemaphorePermit), StatusCode> {
-    if let Some(version) = version {
+    if let Some(key) = version {
         state
             .store()
-            .private_create_context(auth, id, version, permit)
+            .private_create_context_as(auth, id, (key.version, key.npc), permit)
             .await
             .map_err(error)
     } else {
