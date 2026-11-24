@@ -120,7 +120,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 - **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md` (two review rounds,
   owner decisions 2026-11-05 recorded). Slice (a) landed (migration 039, NPC classification,
-  seen marks, plain-HTML workspace). Next: slice (b), commit hints and the SSE lifecycle.
+  seen marks, plain-HTML workspace). Slice (b1) landed: the notification hub, hints published
+  after commit at every write path, read-only admission and the JSON snapshot probe. Next: slice
+  (b2), the SSE `/master/events` endpoint (connection slots, stream worker semaphore,
+  revalidation loops); then (c), the client enhancement and browser/LAN gates.
 0. llama.cpp built without OpenSSL (`LLAMA_OPENSSL=OFF`) so the runtime starts on hosts with only
    OpenSSL 4; the official b12110 build needs `libssl.so.3` (this host: `openssl-compat:3`).
    llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release

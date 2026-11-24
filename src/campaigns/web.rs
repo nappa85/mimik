@@ -321,6 +321,7 @@ pub(crate) fn routes(assistant: bool) -> Router<AuthState> {
 fn master_routes() -> Router<AuthState> {
     Router::new()
         .route("/campaigns/{id}/master", get(master))
+        .route("/campaigns/{id}/master/snapshot", get(master_snapshot))
         .route("/private-sheets/{id}/seen", post(seen))
         .layer(DefaultBodyLimit::max(8192))
 }
@@ -483,6 +484,36 @@ async fn master(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     )
     .into_response())
+}
+
+/// The finite JSON projection of the workspace's selected pages (the probe of the live list):
+/// the same cursors, query and uniform 403 as the page, admitted read-only (no session write
+/// of any kind) and rechecked in the projection's own read transaction. A row or body over its
+/// limit is a visible 500, never a truncated answer.
+async fn master_snapshot(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    axum::Extension(expected): axum::Extension<crate::network::ExpectedOrigin>,
+    Path(id): Path<i64>,
+    Query(page): Query<super::master::MasterPage>,
+) -> ResultResponse {
+    if !page.valid() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let auth = auth::read_only_request_auth(&state, &headers, &expected).await?;
+    let workspace = state
+        .store()
+        .master_workspace(auth, id, page)
+        .await
+        .map_err(error)?;
+    let body = workspace
+        .snapshot_json()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response())
 }
 
 /// Records that the current Master opened the rendered revision: CSRF, then the session, then

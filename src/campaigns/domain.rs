@@ -1,7 +1,7 @@
 use super::{
     Campaign, JoinRequest, Listing, Member, campaign, event, master, name_notes, role, snapshots,
 };
-use crate::{AppError, Store, auth::RequestAuth};
+use crate::{AppError, Store, auth::RequestAuth, hub::Hint};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 pub(crate) struct Workspace {
@@ -172,7 +172,7 @@ impl Store {
         revision: i64,
         accept: bool,
     ) -> Result<(), AppError> {
-        self.run_campaign(auth.clone(),move |db| {
+        self.run_publishing(auth.clone(),move |db| {
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             auth.recheck(&tx)?;master(&tx,id,&auth)?;
             if accept && tx.query_row("SELECT EXISTS(SELECT 1 FROM account_owner WHERE account_id=?1)",[target],|row|row.get::<_,bool>(0))? {
@@ -188,7 +188,9 @@ impl Store {
                     tx.execute("UPDATE campaign_members SET revision=?3,state='active',role='player' WHERE campaign_id=?1 AND account_id=?2",params![id,target,next])?;
                 }else{tx.execute("INSERT INTO campaign_members VALUES(?1,?2,1,'active','player')",params![id,target])?;}
             }
-            event(&tx,id,&auth,target,if accept{"accept"}else{"decline"})?;tx.commit()?;Ok(())
+            event(&tx,id,&auth,target,if accept{"accept"}else{"decline"})?;tx.commit()?;
+            // A join changes a role; a declined request changes none.
+            Ok(((),if accept{vec![Hint::Role{campaign:id,account:target}]}else{Vec::new()}))
         }).await
     }
 
@@ -200,14 +202,14 @@ impl Store {
         revision: i64,
         promote: bool,
     ) -> Result<(), AppError> {
-        self.run_campaign(auth.clone(),move |db| {
+        self.run_publishing(auth.clone(),move |db| {
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             auth.recheck(&tx)?;
             if campaign(&tx,id)?.creator_id!=auth.account_id() || target==auth.account_id(){return Err(AppError::NotFound);}
             master(&tx,id,&auth)?;
             let next=revision.checked_add(1).ok_or(AppError::Conflict)?;
             if tx.execute("UPDATE campaign_members SET revision=?4,role=?5 WHERE campaign_id=?1 AND account_id=?2 AND revision=?3 AND state='active' AND role=?6",params![id,target,revision,next,if promote{"master"}else{"player"},if promote{"player"}else{"master"}])?!=1{return Err(AppError::Conflict);}
-            event(&tx,id,&auth,target,if promote{"promote"}else{"demote"})?;tx.commit()?;Ok(())
+            event(&tx,id,&auth,target,if promote{"promote"}else{"demote"})?;tx.commit()?;Ok(((),vec![Hint::Role{campaign:id,account:target}]))
         }).await
     }
 
@@ -245,7 +247,7 @@ impl Store {
         if let Some(hook) = DEPARTURE_PINS.lock().unwrap().take() {
             hook(&pins);
         }
-        self.run_campaign(auth.clone(),move |db| {
+        self.run_publishing(auth.clone(),move |db| {
             let _permit=permit;
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             auth.recheck(&tx)?;
@@ -255,13 +257,16 @@ impl Store {
             if tx.execute("UPDATE campaign_members SET revision=?4,state='inactive' WHERE campaign_id=?1 AND account_id=?2 AND revision=?3 AND state='active'",params![id,target,revision,next])?!=1{return Err(AppError::Conflict);}
             let ids={let mut q=tx.prepare("SELECT id FROM private_sheets WHERE campaign_id=?1 AND custodian_id=?2 AND state='active' ORDER BY id LIMIT 33")?;q.query_map(params![id,target],|r|r.get::<_,i64>(0))?.collect::<Result<Vec<_>,_>>()?};
             if ids.len()>32{return Err(AppError::Invalid("Corrupt private sheet capacity."));}
+            // Every freeze hint is published only after the whole transaction commits.
+            let mut hints=vec![Hint::Role{campaign:id,account:target}];
             for sheet in ids {
                 let mut saved=snapshots::load(&tx,sheet)?;
                 let snapshots::Pin::Runtime{version_id,..}=saved.pin;let pin=Some(pins.get(&version_id).ok_or(AppError::Conflict)?);
                 saved.state="frozen".into();
-                snapshots::write(&tx,&auth,saved,"freeze",pin)?;
+                let frozen=snapshots::write(&tx,&auth,saved,"freeze",pin)?;
+                hints.push(Hint::Sheet{campaign:id,sheet,revision:frozen.revision});
             }
-            event(&tx,id,&auth,target,if target==auth.account_id(){"leave"}else{"remove"})?;tx.commit()?;Ok(())
+            event(&tx,id,&auth,target,if target==auth.account_id(){"leave"}else{"remove"})?;tx.commit()?;Ok(((),hints))
         }).await
     }
 }

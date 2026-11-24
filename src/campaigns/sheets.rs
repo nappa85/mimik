@@ -9,6 +9,7 @@ use crate::{
         WiringStatus,
         private_pin::{self, ImmutablePin},
     },
+    hub::Hint,
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use tokio::sync::OwnedSemaphorePermit;
@@ -436,6 +437,7 @@ impl Store {
         // even when this caller is cancelled), outside the database mutex (plan §1.4, "Routes").
         let committed = self.clone();
         let request = auth.clone();
+        let committed_by = auth.account_id();
         let outcome = self.run_after(move |db| crate::auth::with_domain_request(request, || {
             let result=(||{
             let tx=db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -465,23 +467,29 @@ impl Store {
                 view.snapshot.sheet_id=max.checked_add(1).ok_or(AppError::Conflict)?;
             }
             let result=snapshots::write_classified(&tx,&auth,view.snapshot,if create{"create"}else{"edit"},view.immutable.as_ref(),create&&view.npc)?;
-            acknowledge_own_save(&tx,&result,if create{Ack::Witnessed}else{view.ack},&auth)?;
+            let seen_changed=acknowledge_own_save(&tx,&result,if create{Ack::Witnessed}else{view.ack},&auth)?;
             // Change notes join the revision in the same transaction (D-T); any failure rolls
             // the whole save back.
             #[cfg(test)]
             if let Some(hook)=super::notes::BEFORE_INSERT.lock().unwrap().take(){hook(&mut view.notes.pending)?;}
             super::notes::insert(&tx,result.sheet_id,result.revision,&view.notes.pending,view.notes.bundle)?;
             let noted:Vec<String>=view.notes.pending.iter().map(|note|note.address.clone()).collect();
-            tx.commit()?;Ok((result.sheet_id,result.revision,noted))
+            tx.commit()?;Ok((result.sheet_id,result.revision,noted,result.campaign_id,seen_changed))
             })();
             Ok((result,permit))
         }), move |(result, _)| {
-            if let Ok((id, revision, noted)) = result {
+            if let Ok((id, revision, noted, campaign, seen_changed)) = result {
                 committed.notes_committed(*id, *revision, noted);
+                // Invalidation hints, after the commit and outside the mutex: the sheet change
+                // for every Master watching the campaign, the seen change for the saver only.
+                committed.publish(
+                    std::iter::once(Hint::Sheet { campaign: *campaign, sheet: *id, revision: *revision })
+                        .chain(seen_changed.then_some(Hint::Seen { campaign: *campaign, recipient: committed_by, sheet: *id })),
+                );
             }
         }).await;
         match outcome {
-            Ok((Ok((id, _, _)), permit)) => Ok((id, permit)),
+            Ok((Ok((id, ..)), permit)) => Ok((id, permit)),
             Ok((Err(error), permit)) => Err((error, Some(permit))),
             Err(error) => Err((error, None)),
         }
@@ -630,20 +638,30 @@ fn acknowledge_own_save(
     written: &PrivateSnapshot,
     ack: Ack,
     auth: &RequestAuth,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     if role(tx, written.campaign_id, auth.account_id())?.as_deref() != Some("master") {
-        return Ok(());
+        return Ok(false);
     }
     let (master, sheet, new) = (auth.account_id(), written.sheet_id, written.revision);
-    match ack {
-        Ack::Witnessed => {
-            tx.execute("INSERT INTO master_sheet_seen(master_id,sheet_id,seen_revision) VALUES(?1,?2,?3) ON CONFLICT(master_id,sheet_id) DO UPDATE SET seen_revision=max(seen_revision,excluded.seen_revision)", params![master, sheet, new])?;
-        }
+    // The mark's row count says whether it actually changed (the hint is published only then).
+    let changed = match ack {
+        Ack::Witnessed => raise_seen(tx, master, sheet, new)?,
         Ack::CompareAndSet => {
-            tx.execute("UPDATE master_sheet_seen SET seen_revision=?3 WHERE master_id=?1 AND sheet_id=?2 AND seen_revision=?3-1", params![master, sheet, new])?;
+            tx.execute("UPDATE master_sheet_seen SET seen_revision=?3 WHERE master_id=?1 AND sheet_id=?2 AND seen_revision=?3-1", params![master, sheet, new])?
         }
-    }
-    Ok(())
+    };
+    Ok(changed == 1)
+}
+
+/// Raises Master `master`'s mark of `sheet` to `revision`; the mark never lowers. Returns the
+/// number of changed rows: 0 when the mark already reached `revision`.
+fn raise_seen(
+    tx: &rusqlite::Connection,
+    master: i64,
+    sheet: i64,
+    revision: i64,
+) -> Result<usize, AppError> {
+    Ok(tx.execute("INSERT INTO master_sheet_seen(master_id,sheet_id,seen_revision) VALUES(?1,?2,?3) ON CONFLICT(master_id,sheet_id) DO UPDATE SET seen_revision=excluded.seen_revision WHERE excluded.seen_revision>seen_revision", params![master, sheet, revision])?)
 }
 
 impl Store {
@@ -658,7 +676,7 @@ impl Store {
         id: i64,
         revision: i64,
     ) -> Result<(), AppError> {
-        self.run_campaign(auth.clone(), move |db| {
+        self.run_publishing(auth.clone(), move |db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             auth.recheck(&tx)?;
             let campaign: i64 = tx
@@ -676,10 +694,14 @@ impl Store {
             if !exists {
                 return Err(AppError::Invalid("That revision does not exist."));
             }
-            tx.execute("INSERT INTO master_sheet_seen(master_id,sheet_id,seen_revision) VALUES(?1,?2,?3) ON CONFLICT(master_id,sheet_id) DO UPDATE SET seen_revision=max(seen_revision,excluded.seen_revision)", params![auth.account_id(), id, revision])?;
+            let changed = raise_seen(&tx, auth.account_id(), id, revision)? == 1;
             auth.recheck(&tx)?;
             tx.commit()?;
-            Ok(())
+            let hints = changed
+                .then_some(Hint::Seen { campaign, recipient: auth.account_id(), sheet: id })
+                .into_iter()
+                .collect();
+            Ok(((), hints))
         })
         .await
     }

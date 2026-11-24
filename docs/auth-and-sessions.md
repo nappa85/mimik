@@ -268,6 +268,19 @@ table `auth_sessions`, migration 011).
   `/`, the home page.
 - **Per request** the account is rebuilt from current state: enabled and same epoch, or
   the session is invalid. Any epoch change (reset, disable) revokes all its sessions.
+- **Read-only admission** (`read_only_request_auth`, `src/auth/mod.rs`) for GET Master data
+  paths (the snapshot probe; later the event stream). It bypasses the library `Session` and
+  `request_auth`, so it cannot create, rotate, flush, save or extend a session, or write a
+  last-seen time or tombstone: it parses the single `mimik_session` cookie, reads the row with
+  one `SELECT`: a missing or malformed cookie, an unknown, expired or revoked session or one
+  without a principal is 401 with nothing written, a corrupt session row is 500 (503 when
+  storage is busy), as `load` errors map. Two `mimik_session` cookies are refused with 401
+  here, stricter than the normal path. It checks the
+  account is enabled at the bound epoch (Owner: 403) and yields the usual `RequestAuth`
+  whose deadline is the session's absolute expiry, so `recheck` applies unchanged. `Origin`,
+  when present, must be the single expected origin; `Sec-Fetch-Site` must be absent,
+  `same-origin` or `none` (`cross-site` and `same-site` are refused, 403); no CORS header is
+  ever sent. POST rules are unchanged.
 - **Mutations** recheck session, deadline, epoch and grants inside their transaction.
 - **Logout** revokes the record (state `revoked`, payload cleared); the tombstone stays
   until original expiry so an old ID cannot be revived.

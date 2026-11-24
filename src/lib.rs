@@ -5,6 +5,7 @@ pub mod campaigns;
 pub mod catalogues;
 pub mod definitions;
 mod form_text;
+mod hub;
 mod local_file;
 pub mod network;
 mod presentation;

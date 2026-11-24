@@ -1327,3 +1327,6 @@ async fn json_post(setup: &Setup, who: usize, path: &str, pairs: Pairs) -> (Stat
     let status = response.status();
     (status, super::formula_tests::body(response).await)
 }
+
+#[path = "master_hub_tests.rs"]
+mod hub;

@@ -2117,3 +2117,48 @@ async fn csrf_then_404(setup: &Setup, key: &str) -> StatusCode {
     assert_eq!(status, StatusCode::FORBIDDEN, "CSRF first");
     remind(setup, key).await.0
 }
+
+/// Publication (Master view b1): an accepted proposal and an applied interpretation both go
+/// through the shared save and publish the sheet's new revision after the commit; a refused
+/// apply publishes nothing. Both are driven by the stub interpreter and a test-built offer.
+#[tokio::test]
+async fn an_applied_proposal_and_an_applied_interpretation_publish_their_revision() {
+    use crate::hub::Hint;
+    use tokio::sync::broadcast::error::TryRecvError;
+    let _auth_lock = crate::auth::test_resource_lock().await;
+    let _runtime_lock = crate::definitions::TEST_RESOURCE_LOCK.lock().await;
+    let below_max = r#"{"kind":"options","options":[{"expr":{"op":"sub","l":{"ref":"max_hp"},"r":{"lit":15}},"explanation":"15 below max"}]}"#;
+    let (offering, origin) = decreased().await;
+    let setup = &offering.setup;
+    let sheet_hints = |rx: &mut tokio::sync::broadcast::Receiver<Hint>| {
+        let mut out = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(Hint::Sheet {
+                    sheet, revision, ..
+                }) => out.push((sheet, revision)),
+                Ok(_) | Err(TryRecvError::Lagged(_)) => {}
+                Err(_) => return out,
+            }
+        }
+    };
+    // Accepted proposal.
+    let before = saved(setup, 1).await.0;
+    let action = offered(&offering, &origin, four());
+    let mut rx = setup.store.subscribe();
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::OK);
+    assert_eq!(sheet_hints(&mut rx), vec![(1, before + 1)]);
+    // A refused apply (an offer for a stale origin revision) publishes nothing.
+    let stale = offered(&offering, &origin, four());
+    assert_eq!(apply(setup, &stale, &[]).await.0, StatusCode::CONFLICT);
+    assert_eq!(sheet_hints(&mut rx), Vec::<(i64, i64)>::new());
+    // An applied interpretation (the stub answers one option).
+    let assisted = assisted(&[below_max]).await;
+    let setup = &assisted.setup;
+    let key = scribble(setup, "15 below max").await;
+    let (action, _) = first_option(setup, &key).await;
+    let mut rx = setup.store.subscribe();
+    let before = saved(setup, 1).await.0;
+    assert_eq!(apply(setup, &action, &[]).await.0, StatusCode::OK);
+    assert_eq!(sheet_hints(&mut rx), vec![(1, before + 1)]);
+}

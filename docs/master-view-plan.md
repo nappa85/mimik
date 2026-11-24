@@ -6,45 +6,30 @@ the plain-HTML workspace, classified creation and the click-only seen POST); the
 `docs/decisions.md`. Slices (b) and (c) remain. Section numbers 3 to 6 keep their original
 numbers (sections 1 and 2 were slice (a)).
 
-## 1. What slice (a) leaves for the next slices
+## 1. What the built slices leave for the next ones
 
-- **Projection.** `Store::master_workspace` (`campaigns/master.rs`) returns `MasterSheet` rows
-  (ID, name, custodian, revision, state, this Master's seen revision; the NPC flag is the
-  section a row sits in). Slice (b)'s snapshot and stream reuse that query; they add the NPC flag
-  to the row, decimal-string IDs and the per-row and per-event size limits of section 4.
-- **Acknowledgement.** `Store::acknowledge_seen` is the only seen writer besides the own-save
-  step in `private_save_keeping`. Slice (b) publishes the seen invalidation (recipient: that
-  Master only) after the commit of either; slice (c) auto-submits the seen form with JS (the
-  page's `#seen-form` carries the exact rendered revision). Without JS a Master who edits by
-  units without clicking Seen keeps the badge (owner decision 6); slice (c)'s auto-submit removes
-  this in practice.
+- **Built:** slice (a) (workspace, seen marks, NPC classification) and slice (b1): the
+  notification hub (`src/hub.rs`), hints published after every commit, read-only admission
+  (`auth::read_only_request_auth`) and the JSON snapshot probe; the reference is
+  `docs/campaigns.md` ("Master workspace and seen marks") and `docs/auth-and-sessions.md`.
+- **Acknowledgement.** Slice (c) auto-submits the seen form with JS (the page's `#seen-form`
+  carries the exact rendered revision). Without JS a Master who edits by units without
+  clicking Seen keeps the badge (owner decision 6); slice (c)'s auto-submit removes this in
+  practice.
 - **Opening a sheet** stays one ordinary document per tab: no multi-sheet panels, no push that
   replaces values, form bases or drafts, no stream on sheet pages, no live newer-revision notice.
 - **Pages.** The workspace uses the default page policy today; slice (c) gives it the strict
-  `SheetPage` policy with its script. Pagination, cursors and the 403 rules are as built.
+  `SheetPage` policy with its script.
 
-## 3. Publish committed changes, with bounded recovery
+## 3. Consume the hints, with bounded recovery (what b2 adds)
 
-- Publish a Master-targeted seen invalidation after an acknowledgement commits, so that
-  Master's other list tab clears its badge (never broadcast one Master's seen state to another).
-- Use existing Tokio `broadcast` for a Store-owned, in-process notification hub (shared
-  across Store clones, isolated between stores). Begin with one 256-entry ring carrying
-  small typed hints: campaign ID, sheet ID/revision or role invalidation, and a recipient
-  ID for seen changes. No snapshots, notes, sessions, credentials or page HTML in the hub.
-  Filter hints before projecting data; never forward the global ring to a browser.
-- Collect hints at transaction-owning write paths, publish only after successful commit
-  outside the SQLite mutex using the cancellation-safe `Store::run_after` pattern. The
-  existing `notes_committed` hook ignores empty note lists and is not a general sheet
-  notification mechanism: extend the commit result alongside it, preserving its behavior.
-  Every sheet write goes through `snapshots::write` at two sites: the shared save in
-  `sheets.rs` (create/full save, scalar/cell/list/quick-add, switch, Undo and accepted
-  assistant proposals) and the departure freeze in `domain.rs`; departure/removal must publish all freeze changes
-  only after the entire membership-plus-freezes transaction commits. Role changes need
-  post-commit invalidation too. No notifications for no-ops, stale/invalid saves or rollback.
-- Treat hints as invalidations, not a durable ordered log. Callbacks can race after the
-  mutex is released; always read authoritative revisions, never apply an older hint over
-  newer state. Subscribe **before** the initial authorized snapshot; then drain/coalesce
-  hints, with at most one projection read per stream at once and one refresh per 250 ms.
+- Subscribe **before** the initial authorized snapshot (`Store::feed(campaign, account)`);
+  then drain/coalesce hints, with at most one projection read per stream at once and one
+  refresh per 250 ms. Hints are invalidations, not an ordered log: callbacks can race after the
+  mutex is released and arrive out of revision order, so always read authoritative revisions and
+  never apply an older hint over newer state. `Feed` filters by campaign and seen recipient only
+  and is not an authorization: admit a current Master of the campaign (and recheck it) before
+  creating one, because sheet hints reveal sheet IDs and revisions, NPC sheets included.
 - On `RecvError::Lagged`, discard deltas and send a fresh authorized snapshot of the
   selected list pages. Do the same on every connection/reconnection. Use no SSE event IDs
   or replay promise in v1; add no `Last-Event-ID` handling. A full snapshot replaces list
@@ -66,10 +51,8 @@ numbers (sections 1 and 2 were slice (a)).
   reject cross-site fetch metadata and expose no CORS permissions. Normal EventSource GETs
   without Origin must work. No CSRF token in URLs/headers and no session creation/rotation,
   lifetime extension, last-seen write or other mutation on events or snapshot GETs.
-  Do not call `request_auth()` → `principal()` on these paths: it can flush a session
-  and write a tombstone. Provide read-only admission that refuses invalid sessions without
-  flushing/saving; assert session storage is unchanged on successful and refused requests.
-  Keep all POST Origin/CSRF rules (REL-5) unchanged.
+  Admit through `auth::read_only_request_auth` (built in b1), never `request_auth()`. Keep all
+  POST Origin/CSRF rules (REL-5) unchanged.
 - Capture the existing `RequestAuth` session binding in the finite handshake. Its
   `deadline` is the absolute session expiry, **not** the outer 5 s request budget; reuse
   `recheck` rather than minting or extending it. Recheck active session/tombstone, enabled
@@ -106,7 +89,7 @@ numbers (sections 1 and 2 were slice (a)).
 - Give stream projections/rechecks their own **2-permit semaphore**, separate from the
   non-queuing 16-permit `AUTH_WORKERS` pool. Never draw stream work from that pool. Streams
   acquire it with a fair (FIFO) bounded wait counted inside each operation's 1 s deadline.
-  The finite `GET .../master/snapshot` probe is an ordinary request on `AUTH_WORKERS`.
+  The finite `GET .../master/snapshot` probe (built in b1) is an ordinary request on `AUTH_WORKERS`.
   Each short operation has a 1 s deadline. On busy/timeout hold output, coalesce work and
   retry with bounded delay; close if no recheck succeeds for **10 s** (initial admission
   still obeys the 5 s handshake budget). No output without a fresh successful recheck.
@@ -172,7 +155,7 @@ numbers (sections 1 and 2 were slice (a)).
 ## 6. Verification, integration and reference updates
 
 Implement in reviewed slices: (a) schema/classification and seen/open contracts with plain
-HTML (built); (b) commit hints and SSE resource/auth lifecycle; (c) external enhancement and
+HTML (built); (b) commit hints (b1, built) and SSE resource/auth lifecycle (b2); (c) external enhancement and
 browser/LAN gate integration. Each slice retains meaningful regression tests; establish a failing test
 before fixing any reproducible defect encountered.
 
@@ -180,11 +163,10 @@ before fixing any reproducible defect encountered.
   Still to add with slices (b) and (c): stale open racing N+1 and overlapping opens at the
   publication level, seen updates across same-Master tabs, no seen changes on SSE, and the
   browser-level label-absence checks in player and outsider network responses.
-- **Publication/concurrency:** every production write path, note-only and empty-note edits,
-  multi-sheet freezes, final-freeze failure rollback, caller cancellation after commit,
-  out-of-order callbacks, subscribe/snapshot race, seen updates across same-Master tabs,
-  ring overflow/lag, disconnected/slow readers, bounded memory and no producer backpressure
-  on commits. Restart and missing hints recover through authoritative SQL snapshots.
+- **Publication/concurrency:** b1 tests the write paths, rollback, cancellation, lag and the
+  subscribe/snapshot order at the hub level (`campaigns/master_hub_tests.rs`). Still to add with
+  b2: out-of-order callbacks and disconnected/slow readers through real streams; restart and
+  missing hints recovering through authoritative SQL snapshots.
 - **Real HTTP streams:** assert bytes arrive after >5 s, including heartbeat; hold multiple
   streams and concurrently read/edit/login without exhausting the eight `REQUESTS` slots
   or holding definition/SQL permits. Saturate each connection limit concurrently, verify
@@ -193,8 +175,8 @@ before fixing any reproducible defect encountered.
   two healthy list tabs, the displaced tab shows the terminal replaced state and does not
   reclaim the slot (the newest tab stays live). A JS unit save after a refused or rebased
   answer does not acknowledge another Master's revision.
-  Assert read-only events/snapshot authentication leaves session storage unchanged even
-  for expired/revoked sessions; verify normalized 429 `Retry-After: 6` through the router.
+  Assert read-only events authentication leaves session storage unchanged even
+  for expired/revoked sessions (the snapshot probe's test is built); verify normalized 429 `Retry-After: 6` through the router.
   Test separate stream-worker saturation, SQL contention, output hold/retry/grace expiry
   and recovery without ordinary-load/login 503s from `AUTH_WORKERS` exhaustion.
   Test role loss, logout, CLI reset/disable/epoch changes and absolute expiry mid-stream,
@@ -222,9 +204,9 @@ before fixing any reproducible defect encountered.
   allowlisted container/source inputs; run against the unpacked artifact, not a dev binary.
   Preserve the fail-closed gate: formatting, strict Clippy, locked Rust tests, helper
   lint/tests, audit/notices, release packaging/startup/edit/persistence and browser/LAN jobs.
-- Update `docs/campaigns.md` (routes, metadata/seen semantics, pagination and limits),
-  `docs/auth-and-sessions.md` (finite handshake versus stream lifecycle, revalidation,
-  capacities and proxy example), `docs/architecture.md` (hub/module),
+- Update `docs/campaigns.md` (the stream route and limits),
+  `docs/auth-and-sessions.md` (stream lifecycle, revalidation,
+  capacities and proxy example),
   `docs/assisted-entry.md` (open acknowledgements/editor interaction),
   `docs/decisions.md` (owner choices/DEP selection), assets/notices if applicable, and
   `docs/release-scope.md` (actual verified Master scope and gates). Update ROAD-8 and any
