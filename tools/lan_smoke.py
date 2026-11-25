@@ -28,6 +28,56 @@ def cpu_cap(value):
     return str(int(value))
 
 
+PROXY_IMAGE = (
+    "nginxinc/nginx-unprivileged:1.28-alpine"
+    "@sha256:7377697a821c131a924a7105fafbe7414db4e9fcc77a6f08f776f33f141ec3f8"
+)
+
+
+def proxy_config(upstream):
+    """The maintained reverse proxy (nginx) in front of the server, as an operator would run it.
+
+    Response buffering is left at nginx's default (on) and compression at its default (off): the
+    stream must be flushed because of its own `X-Accel-Buffering: no`, not because the proxy was
+    tuned for it. Port 3443 is the configured root origin with a 60 s read timeout (above the
+    15 s heartbeat). Port 3444 answers for the same origin but cuts an upstream that stays silent
+    for 3 s, standing for a proxy or a sleeping link closing an idle stream. Port 3445 has a 20 s
+    read timeout, above the 15 s heartbeat but below the time a held stream is watched. All pass wrong
+    forwarding data (loopback, plain HTTP) that the server must ignore."""
+
+    def listener(port, host, timeout):
+        return f"""
+    server {{
+        listen {port} ssl;
+        ssl_certificate /tls/fixture.crt;
+        ssl_certificate_key /tls/fixture.key;
+        location / {{
+            proxy_pass http://{upstream}:3000;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host {host};
+            proxy_set_header X-Forwarded-For 127.0.0.1;
+            proxy_set_header X-Forwarded-Proto http;
+            proxy_set_header Forwarded "for=127.0.0.1;proto=http";
+            proxy_read_timeout {timeout};
+        }}
+    }}"""
+
+    return f"""worker_processes 1;
+error_log /dev/stderr warn;
+pid /tmp/nginx.pid;
+events {{ worker_connections 256; }}
+http {{
+    access_log off;
+    client_body_temp_path /tmp/client;
+    proxy_temp_path /tmp/proxy;
+    fastcgi_temp_path /tmp/fastcgi;
+    uwsgi_temp_path /tmp/uwsgi;
+    scgi_temp_path /tmp/scgi;{listener(3443, "$http_host", "60s")}{listener(3444, "mimik.example:3443", "3s")}{listener(3445, "mimik.example:3443", "20s")}
+}}
+"""
+
+
 def network_address(container, network):
     value = docker(
         "inspect",
@@ -46,6 +96,7 @@ def main():
     parser.add_argument("--source-fixture", required=True, type=Path)
     parser.add_argument("--ci-image", default="mimik-ci")
     parser.add_argument("--browser-image", default="mimik-browser")
+    parser.add_argument("--proxy-image", default=PROXY_IMAGE)
     parser.add_argument(
         "--cpus",
         type=cpu_cap,
@@ -64,6 +115,7 @@ def main():
     )
     tag = "mimik-lan-" + uuid.uuid4().hex[:12]
     primary, secondary, server = tag + "-primary", tag + "-secondary", tag + "-server"
+    proxy = tag + "-proxy"
     created = []
     containers = []
     with tempfile.TemporaryDirectory(prefix="mimik-lan-verification-") as temp:
@@ -122,6 +174,107 @@ def main():
             docker("network", "connect", secondary, server)
             other = network_address(server, secondary)
             mounts = ["--mount", f"type=bind,src={source / 'tools'},dst=/checks,readonly"]
+            # The reverse proxy: a self-signed certificate for the configured origin, made in a
+            # throwaway container, and nginx on the same network as the server.
+            tls = verification / "tls"
+            tls.mkdir()
+            owner = f"{os.getuid()}:{os.getgid()}"
+            (tls / "nginx.conf").write_text(proxy_config(address))
+            containers.append(tag + "-tls")
+            docker(
+                "run",
+                "--name",
+                tag + "-tls",
+                "--user",
+                owner,
+                "--network=none",
+                f"--cpus={args.cpus}",
+                "--mount",
+                f"type=bind,src={tls},dst=/tls",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--read-only",
+                args.ci_image,
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                "/tls/fixture.key",
+                "-out",
+                "/tls/fixture.crt",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=mimik.example",
+                "-addext",
+                "subjectAltName=DNS:mimik.example",
+            )
+            containers.append(proxy)
+            docker(
+                "run",
+                "-d",
+                "--name",
+                proxy,
+                "--user",
+                owner,
+                "--network",
+                primary,
+                f"--cpus={args.cpus}",
+                "--memory=256m",
+                "--pids-limit=64",
+                "--cap-drop=ALL",
+                "--security-opt=no-new-privileges",
+                "--read-only",
+                "--tmpfs",
+                "/tmp",
+                "--mount",
+                f"type=bind,src={tls / 'nginx.conf'},dst=/etc/nginx/nginx.conf,readonly",
+                "--mount",
+                f"type=bind,src={tls},dst=/tls,readonly",
+                args.proxy_image,
+            )
+            proxy_address = network_address(proxy, primary)
+            for port in (3443, 3444, 3445):
+                for _ in range(80):
+                    ready = docker(
+                        "exec",
+                        server,
+                        "python",
+                        "-c",
+                        "import socket,sys; "
+                        f"socket.create_connection(({proxy_address!r}, {port}), timeout=1).close()",
+                        check=False,
+                    )
+                    if ready.returncode == 0:
+                        break
+                    time.sleep(0.25)
+                else:
+                    logs = docker("logs", proxy, check=False)
+                    require_secret_free((logs.stdout + logs.stderr).encode(), ())
+                    print((logs.stdout + logs.stderr).strip())
+                    raise AssertionError(f"Reverse proxy port {port} did not open")
+            # Loopback: the same stream and probe checks from inside the server's own container.
+            loopback = docker(
+                "exec",
+                server,
+                "python",
+                "-B",
+                "/checks/lan_client.py",
+                "--address",
+                "127.0.0.1",
+                "--origin",
+                "http://127.0.0.1:3000",
+                "--streams-only",
+                check=False,
+            )
+            if loopback.returncode:
+                require_secret_free((loopback.stdout + loopback.stderr).encode(), ())
+                print((loopback.stdout + loopback.stderr).strip())
+            require(loopback.returncode == 0, "Loopback Master stream gate failed")
+            print(loopback.stdout.strip())
             # Different subnet, allowed advertised Host, spoofed forwarding: real peer must win.
             containers.append(tag + "-denier")
             denied = docker(
@@ -171,6 +324,8 @@ def main():
                 address,
                 "--origin",
                 f"http://{address}:3000",
+                "--proxy-address",
+                proxy_address,
                 "--verification",
                 "/verification",
                 check=False,

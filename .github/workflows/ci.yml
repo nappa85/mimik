@@ -270,6 +270,8 @@ jobs:
         run: |
           docker build -f containers/ci.Dockerfile -t mimik-ci .
           docker build -f containers/browser.Dockerfile -t mimik-browser .
+          # The reverse proxy of the Master stream checks: the digest pinned in lan_smoke.py.
+          docker pull "$(python3 -c 'import sys; sys.path.insert(0, "tools"); import lan_smoke; print(lan_smoke.PROXY_IMAGE)')"
       - name: Unpacked separate-client LAN and HTTPS proxy acceptance
         run: python3 tools/lan_smoke.py --binary release/mimik-0.1.0-linux-x86_64/mimik --source-root release/lan-source/mimik-0.1.0 --source-fixture smoke-source
 

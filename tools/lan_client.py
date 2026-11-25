@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from lan_stream import Peer, suite, wait_for_port
 from material_browser import run_material_browser
 from smoke_release import require, wait_until
 
@@ -30,10 +31,26 @@ def control(address, operation, value):
         connection.close()
 
 
+MASTER_PATHS = ("/campaigns/1/master/events", "/campaigns/1/master/snapshot")
+
+
+def fixture_version(address):
+    """The generic sheet definition's version ID, as the fixture reports it."""
+    connection = http.client.HTTPConnection(address, 3001, timeout=15)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        require(response.status == 200, "Synthetic LAN control failed")
+        return json.loads(response.read())["version"]
+    finally:
+        connection.close()
+
+
 def negative_requests(address, advertised, denial=False):
     authority = urlsplit(advertised).netloc
     cases = (
         [("GET", "/assets/app.css", authority, None, 403)]
+        + [("GET", path, authority, None, 403) for path in MASTER_PATHS]
         if denial
         else [
             ("GET", "/", "attacker.example:3000", None, 400),
@@ -41,6 +58,8 @@ def negative_requests(address, advertised, denial=False):
             ("POST", "/auth/login", authority, "http://localhost:3000", 403),
             ("POST", "/auth/login", "localhost:3000", advertised, 403),
         ]
+        + [("GET", path, "attacker.example:3000", None, 400) for path in MASTER_PATHS]
+        + [("GET", path, authority, "http://localhost:3000", 403) for path in MASTER_PATHS]
     )
     for method, path, host, origin, status in cases:
         connection = http.client.HTTPConnection(address, 3000, timeout=10)
@@ -51,6 +70,9 @@ def negative_requests(address, advertised, denial=False):
                 "Forwarded": "for=127.0.0.1",
                 "Content-Type": "application/x-www-form-urlencoded",
             }
+            if method == "GET" and path in MASTER_PATHS:
+                # Refused before any session lookup, even with a well-formed cookie.
+                headers["Cookie"] = "mimik_session=" + "A" * 22
             if origin:
                 headers["Origin"] = origin
             connection.request(method, path, body="" if method == "POST" else None, headers=headers)
@@ -413,21 +435,47 @@ def scenario(browser, address, origin, viewport, name, verification=None, proxy=
 
 
 def main():
+    global STAGE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--address", required=True)
     parser.add_argument("--origin", required=True)
     parser.add_argument("--verification", type=Path)
     parser.add_argument("--denial-only", action="store_true")
+    parser.add_argument(
+        "--streams-only",
+        action="store_true",
+        help="only the Master stream and probe checks over --origin (the loopback run)",
+    )
+    parser.add_argument(
+        "--proxy-address",
+        help="address of the HTTPS reverse proxy (ports 3443 and 3444); default --address",
+    )
     args = parser.parse_args()
     negative_requests(args.address, args.origin, args.denial_only)
     if args.denial_only:
         print("Real disallowed-peer/forwarding-spoof denial passed.")
         return
+    direct = Peer(args.address, 3000, urlsplit(args.origin).netloc, args.origin, tls=False)
+    if args.streams_only:
+        suite(direct, fixture_version(args.address), "loopback")
+        print("Master stream and probe checks over " + args.origin + " passed.")
+        return
     from playwright.sync_api import sync_playwright
+
+    proxy_address = args.proxy_address or args.address
+    version = fixture_version(args.address)
+    STAGE = "LAN stream"
+    suite(
+        direct,
+        version,
+        "LAN",
+        restart=lambda: control(args.address, "/restart", {}),
+    )
+    control(args.address, "/restart", {})  # an independent form quota for the scenarios below
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
-            args=["--host-resolver-rules=MAP mimik.example " + args.address]
+            args=["--host-resolver-rules=MAP mimik.example " + proxy_address]
         )
         try:
             login_errors(browser, args.address, args.origin)
@@ -441,6 +489,20 @@ def main():
                     args.address, "/restart", {}
                 )  # Independent workflow quota, persisted account state.
             proxy = control(args.address, "/proxy", {})["origin"]
+            STAGE = "proxy stream"
+            wait_for_port(proxy_address, 3443)
+            wait_for_port(proxy_address, 3444)
+            wait_for_port(proxy_address, 3445)
+            suite(
+                Peer(proxy_address, 3443, "mimik.example:3443", proxy, tls=True),
+                version,
+                "proxy",
+                restart=lambda: control(args.address, "/restart", {}),
+                idle=Peer(proxy_address, 3444, "mimik.example:3443", proxy, tls=True),
+                hold=Peer(proxy_address, 3445, "mimik.example:3443", proxy, tls=True),
+                direct=False,
+            )
+            control(args.address, "/restart", {})
             login_errors(browser, args.address, proxy, True)
             control(args.address, "/restart", {})
             scenario(
@@ -455,7 +517,7 @@ def main():
         finally:
             browser.close()
     print(
-        "Separate-client LAN HTTP copy/link/QR/date/retry and HTTPS proxy Origin/Secure-cookie workflows passed."
+        "Separate-client LAN HTTP and HTTPS proxy Master stream and probe, copy/link/QR/date/retry and Origin/Secure-cookie workflows passed."
     )
 
 

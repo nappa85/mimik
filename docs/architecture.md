@@ -192,7 +192,9 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    revocation and the label-absence checks) against the release binary, then
    `assist_model_browser.py` against the development binary and a fake model server.
 5. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
-   separate clients, a denied subnet and an HTTPS reverse proxy.
+   separate clients, a denied subnet and an nginx HTTPS reverse proxy (pinned image, own
+   container), plus the Master stream and snapshot probe over LAN HTTP, loopback and the proxy
+   (`lan_stream.py`: refusals, Secure cookies, incremental push, reconnect and idle closure).
 6. **llama-runtime** (needs llama-fetch and checks; host steps, since Docker's seccomp profile
    refuses the namespaces the sandbox needs; no Rust toolchain): verifies and unpacks the release,
    reapplies the manifest's modes, lifts the Ubuntu AppArmor user-namespace

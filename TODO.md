@@ -120,10 +120,6 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   disk; if so, sync a batch's files once and commit once a batch. Cost: pages publish eight at
   a time, and a cancel or crash loses up to a batch.
 
-- **Master view (CAMP-14, ROAD-8):** plan `docs/master-view-plan.md`. Slices (a), (b) and (c1)
-  landed (the workspace, the event stream, the strict-policy client with the automatic
-  acknowledgement and the loopback browser suite in CI). Next: slice (c2), the LAN, loopback and
-  HTTPS-proxy gates (`lan_client.py`/`lan_smoke.py`).
 0. llama.cpp built without OpenSSL (`LLAMA_OPENSSL=OFF`) so the runtime starts on hosts with only
    OpenSSL 4; the official b12110 build needs `libssl.so.3` (this host: `openssl-compat:3`).
    llama.cpp versions (ASSIST-46): (a) a scheduled CI job that tries each new llama.cpp release

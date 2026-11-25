@@ -7,15 +7,15 @@ import os
 import re
 import signal
 import sqlite3
-import ssl
 import subprocess
 import tempfile
-import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from smoke_release import (
+    latest_version,
+    prepare_auth_player,
     prepare_workspace_materials,
     require,
     require_secret_free,
@@ -30,6 +30,11 @@ class Fixture:
         self.binary, self.directory = binary, directory
         _, self.passwords = smoke_accounts(binary, directory)
         prepare_workspace_materials(binary, directory, source)
+        # Two plain accounts for the Master stream checks: the clients create the campaign and
+        # promote nothing; whoever creates a campaign is its Master.
+        for login in ("stream-master", "stream-player"):
+            prepare_auth_player(binary, directory, self.passwords, login=login)
+        self.version = latest_version(directory, "sheet")
         self.process, self.log = None, None
         self.primary, self.external = None, None
         self.start()
@@ -84,7 +89,8 @@ class Control(BaseHTTPRequestHandler):
         pass  # Fixed synthetic control calls contain no diagnostic payload logging.
 
     def do_GET(self):
-        self.send_json({"origin": f"http://{self.server.fixture.primary}:3000"})
+        fixture = self.server.fixture
+        self.send_json({"origin": f"http://{fixture.primary}:3000", "version": fixture.version})
 
     def send_json(self, value):
         data = json.dumps(value).encode()
@@ -133,45 +139,6 @@ class Control(BaseHTTPRequestHandler):
             self.send_error(500, "Synthetic control failed; diagnostics redacted")
 
 
-class Proxy(BaseHTTPRequestHandler):
-    def log_message(self, *args):
-        pass
-
-    def do_GET(self):
-        self.forward()
-
-    def do_POST(self):
-        self.forward()
-
-    def forward(self):
-        connection = http.client.HTTPConnection("127.0.0.1", 3000, timeout=10)
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            require(0 <= length <= 1024 * 1024, "Proxy fixture body bound exceeded")
-            body = self.rfile.read(length) if length else None
-            headers = {
-                name: value
-                for name, value in self.headers.items()
-                if name.lower() not in {"connection", "proxy-connection"}
-            }
-            # Deliberately wrong forwarding data must not choose the trusted scheme.
-            headers["X-Forwarded-Proto"] = "http"
-            connection.request(self.command, self.path, body=body, headers=headers)
-            response = connection.getresponse()
-            data = response.read()
-            self.send_response(response.status)
-            for name, value in response.getheaders():
-                if name.lower() not in {"connection", "transfer-encoding", "content-length"}:
-                    self.send_header(name, value)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-        except Exception:
-            self.send_error(502, "Synthetic proxy failed; diagnostics redacted")
-        finally:
-            connection.close()
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -184,46 +151,10 @@ def main():
         fixture = Fixture(args.binary.resolve(), directory, args.source_fixture.resolve())
         control = ThreadingHTTPServer(("0.0.0.0", 3001), Control)
         control.fixture = fixture
-        certificate, key = directory / "fixture.crt", directory / "fixture.key"
-        result = subprocess.run(
-            [
-                "openssl",
-                "req",
-                "-x509",
-                "-newkey",
-                "rsa:2048",
-                "-nodes",
-                "-keyout",
-                str(key),
-                "-out",
-                str(certificate),
-                "-days",
-                "1",
-                "-subj",
-                "/CN=mimik.example",
-                "-addext",
-                "subjectAltName=DNS:mimik.example",
-            ],
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
-        require(result.returncode == 0, "Synthetic TLS certificate generation failed")
-        os.chmod(key, 0o600)
-        proxy = ThreadingHTTPServer(("0.0.0.0", 3443), Proxy)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certificate, key)
-        proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
-        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
-        thread.start()
         try:
             control.serve_forever()
         finally:
             control.server_close()
-            proxy.shutdown()
-            proxy.server_close()
-            thread.join(timeout=5)
-            require(not thread.is_alive(), "TLS fixture did not stop")
             fixture.close()
 
 

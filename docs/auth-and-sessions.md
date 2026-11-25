@@ -313,7 +313,10 @@ table `auth_sessions`, migration 011).
     `X-Accel-Buffering: no`; turn off response buffering and compression for the path) and a proxy
     read timeout above the 15 s heartbeat (for example 60 s). The proxy's `Host` and the Secure
     cookie rules are as for every route; forwarded headers are never trusted. Direct LAN HTTP,
-    loopback and the root-origin HTTPS proxy are exercised in slice (c), not here.
+    loopback and the root-origin HTTPS proxy (nginx, default buffering, which the route's
+    `X-Accel-Buffering: no` overrides) are exercised by CI `lan-smoke`
+    (`tools/lan_stream.py`), which also holds a stream for 45 s behind a 20 s read timeout: the
+    heartbeats keep it open.
 - **Mutations** recheck session, deadline, epoch and grants inside their transaction.
 - **Logout** revokes the record (state `revoked`, payload cleared); the tombstone stays
   until original expiry so an old ID cannot be revived.
