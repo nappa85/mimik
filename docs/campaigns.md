@@ -71,8 +71,8 @@ and, for a catalogue-backed name, `suggest/{f}/{p}` and `cells/{f}/{r}/{p}/which
 
 ## Master workspace and seen marks
 
-Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot` and
-`POST /private-sheets/{id}/seen`.
+Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot`,
+`GET /campaigns/{id}/master/events` and `POST /private-sheets/{id}/seen`.
 
 - **Workspace** (plain HTML): linked from the campaign page to current Masters only. It lists
   every sheet of the campaign in two sections, "Player sheets" and "NPC sheets" (custodian
@@ -92,6 +92,49 @@ Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot` and
   a current Master of the campaign, 400 for bad cursors, `no-store`, no CORS. A row over
   2 KiB, a body over 256 KiB or more than 100 rows is a 500, never truncated (the limits are defence in depth: validated names and display names of at most 100
   characters keep real rows far below them, and two pages of 50 rows cannot exceed 100).
+  With `?stream=<token>` (1 to 64 characters, else 400) the answer also carries
+  `X-Master-Stream: live | replaced | unknown` for that token among the requesting Master's own
+  streams (see the stream below); without the parameter there is no such header.
+- **Event stream** (`GET /campaigns/{id}/master/events`, `src/campaigns/master_stream.rs` and
+  `src/streams.rs`): the same two cursors, read-only admission and uniform refusals as the probe
+  (401, 403, 400), then `text/event-stream` with `X-Accel-Buffering: no`, `no-store` and no CORS.
+  Events, in the order sent: a `status` event `{"code":"live","stream":"<32 hex>"}` carrying
+  `retry: 3000` and the tab's stream token (random, public, meaningful only to the same
+  account's probe); a `snapshot` event with exactly the probe's JSON; then `snapshot` events
+  whenever the projection changed, `:` comments every 15 s of idleness, and at the end a fixed
+  `status` event, `{"code":"replaced"}` (a newer tab of the same Master took the slot: the
+  client stops automatic retries and offers an explicit resume), `{"code":"closing"}` (maximum
+  age, shutdown, output blocked) or `{"code":"error"}`
+  (a projection over its limits or failing), after which the body ends. Revocation, expiry,
+  demotion and a transient failure beyond its grace (10 s) end the body with no notice and discard anything queued. No event IDs, no replay and
+  no `Last-Event-ID`: a reconnect always starts with a full snapshot. Snapshots replace the list
+  (pagination metadata included); an unchanged projection is not resent.
+  - **Handshake:** read-only admission, then a current-Master check in one read transaction
+    (before anything is subscribed: hints reveal sheet IDs), the connection slot, the hint
+    subscription, the first projection and only then the connection slot (a handshake that fails
+    leaves the Master's older stream alone), all inside the request's 5 s boundary on ordinary
+    request capacity; the lazy body is returned and the request permit is released as for any
+    response.
+  - **Slots** (RAII, released on every exit): 1 per Master account across campaigns (the newest
+    stream evicts the oldest, which flushes `replaced` and closes), 16 per campaign (429, which
+    `normalize` gives `Retry-After: 6`), 128 per instance (503). An eviction frees the slot in the
+    same atomic step, so the caps never overshoot; the evicted stream does no further work.
+  - **Producer** (one task per stream, never waiting on the body): hints only mark the stream
+    dirty (`Lagged` too, and a SQL reconcile every 30 s without hints); at most one projection
+    per stream at a time and one per 250 ms; a capacity-one output queue (the next snapshot is
+    projected only once the body took the previous one; events that stay untaken for 1 s, with
+    or without a newer snapshot waiting, close the stream with `closing`; the handshake's two
+    first events count as queued until taken); maximum age 15 min; a shutdown signal makes every stream send `closing` and end.
+  - **Revalidation** (`auth-and-sessions.md`): session binding, epoch, expiry, Owner exclusion
+    and the active Master role are rechecked before every projection (at its start, at its end
+    and once more after the commit), every 5 s while idle and at the session's absolute expiry,
+    on a separate 2-permit FIFO worker pool with a 1 s deadline per operation. Busy or timed-out
+    operations hold the output and retry every 250 ms; no successful recheck for 10 s closes the
+    stream.
+  - **The replaced probe:** the tab remembers its token. After a stream error it probes
+    `GET .../master/snapshot?stream=<token>`; `replaced` means it must not reclaim a slot, so a
+    displaced tab does not fight the newest (only the last 8 replaced tokens of an account are
+    remembered, in memory: `unknown` after that or after a restart, and the tab may reconnect).
 - **Hints** (`src/hub.rs`): after a commit, outside the SQLite mutex and by the committing
   task (so also when the caller is cancelled), every write publishes small typed hints on
   the store's broadcast ring: `Sheet{campaign,sheet,revision}` for each committed sheet
@@ -103,7 +146,7 @@ Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot` and
   an ordered or durable log: a consumer reads authoritative state from SQL, `Feed` shows a
   consumer only its campaign's hints (and its own account's seen hints), and a subscriber that
   falls more than 256 hints behind gets `Lagged` and must take a fresh snapshot. The event
-  stream that consumes the hints is not built yet. Account disable, credential reset and epoch
+  stream consumes them as invalidations (above). Account disable, credential reset and epoch
   changes (in-process administration and the out-of-process CLI) publish no hint: consumers rely
   on the per-stream recheck and the periodic SQL reconcile for them.
 - **NPC classification:** `private_sheets.is_npc` (migration 039), set only at creation by a

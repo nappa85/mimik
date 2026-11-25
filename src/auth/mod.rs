@@ -629,6 +629,10 @@ impl RequestAuth {
     pub(crate) fn epoch(&self) -> i64 {
         self.account.epoch
     }
+    /// The absolute expiry of the bound session (Unix seconds, on the authentication clock).
+    pub(crate) fn deadline(&self) -> i64 {
+        self.deadline
+    }
     pub(crate) fn digest(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
@@ -1126,13 +1130,22 @@ pub async fn serve_with_options(
         "Mimik auth mode: {} — private campaign workspace",
         options.origin()
     );
+    let streams = store.streams();
     let sessions = SqliteSessions::new(store);
-    tokio::select! {
-        result=axum::serve(listener,router.into_make_service_with_connect_info::<std::net::SocketAddr>())=>{result?;},
-        result=cleanup_loop(sessions)=>{result?;},
-        result=tokio::signal::ctrl_c()=>{result?;},
-    }
-    Ok(())
+    let server = axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
+    let outcome: Result<(), Box<dyn std::error::Error>> = tokio::select! {
+        result=server=>result.map_err(Into::into),
+        result=cleanup_loop(sessions)=>result.map_err(Into::into),
+        result=tokio::signal::ctrl_c()=>result.map_err(Into::into),
+    };
+    // Termination or a cleanup failure: tell every event stream (each flushes a fixed notice and
+    // closes), then leave after a bounded drain. Reconnecting clients get a fresh snapshot.
+    streams.begin_shutdown();
+    tokio::time::sleep(crate::streams::timing::SHUTDOWN_DRAIN).await;
+    outcome
 }
 
 async fn cleanup_loop(sessions: SqliteSessions) -> Result<(), AppError> {
@@ -1146,6 +1159,12 @@ async fn cleanup_loop(sessions: SqliteSessions) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only: the free slots of the ordinary-request pool (`REQUESTS`).
+#[cfg(test)]
+pub(crate) fn free_request_slots() -> usize {
+    REQUESTS.available_permits()
+}
 
 #[cfg(test)]
 pub(crate) async fn test_resource_lock() -> tokio::sync::OwnedMutexGuard<()> {

@@ -269,7 +269,7 @@ table `auth_sessions`, migration 011).
 - **Per request** the account is rebuilt from current state: enabled and same epoch, or
   the session is invalid. Any epoch change (reset, disable) revokes all its sessions.
 - **Read-only admission** (`read_only_request_auth`, `src/auth/mod.rs`) for GET Master data
-  paths (the snapshot probe; later the event stream). It bypasses the library `Session` and
+  paths (the snapshot probe and the event stream). It bypasses the library `Session` and
   `request_auth`, so it cannot create, rotate, flush, save or extend a session, or write a
   last-seen time or tombstone: it parses the single `mimik_session` cookie, reads the row with
   one `SELECT`: a missing or malformed cookie, an unknown, expired or revoked session or one
@@ -281,6 +281,39 @@ table `auth_sessions`, migration 011).
   when present, must be the single expected origin; `Sec-Fetch-Site` must be absent,
   `same-origin` or `none` (`cross-site` and `same-site` are refused, 403); no CORS header is
   ever sent. POST rules are unchanged.
+- **Event stream lifecycle** (`GET /campaigns/{id}/master/events`, `docs/campaigns.md` for the
+  events). The *handshake* is an ordinary request: read-only admission, a current-Master check,
+  the slot, the subscription and the first projection inside `boundary`'s 5 s, on `REQUESTS` and
+  `AUTH_WORKERS` like the probe; the response then streams a lazy body, and the permit goes back as
+  for any response. Nothing in `boundary` is exempted or lengthened for it. The *stream* holds no
+  `REQUESTS` or `AUTH_WORKERS` permit, mutex or transaction while it waits; it owns a connection
+  slot and one producer task, and borrows a permit of its own **2-permit FIFO stream-worker pool**
+  (`src/streams.rs`) for one short operation at a time: the wait counts inside the operation's 1 s
+  deadline, the worker keeps its permit until it exits even after a timeout (and skips its SQL if
+  its deadline passed before it held the database mutex), and a busy or timed-out operation holds
+  the output and retries every 250 ms (a stream can therefore briefly own both permits: the
+  timed-out worker still running and its retry). Stream tasks run outside `boundary`'s task-locals, so busy
+  is detected explicitly and the SQL guards get their request context through
+  `with_domain_request`.
+  - *Revalidation:* the `RequestAuth` captured at the handshake (its deadline is the session's
+    absolute expiry, never extended) is rechecked in one read transaction (session `active` with
+    the exact expiry, epoch, enabled account, Owner exclusion, current active Master role) at the
+    start and end of every projection, once more after the commit and before the data is queued,
+    every 5 s while idle and at the expiry instant. Failure by revocation (logout, CLI reset, disable,
+    epoch change), expiry or demotion closes the stream with no notice and discards whatever was
+    queued; nothing is emitted without a fresh successful recheck, and a stream with no success
+    for 10 s closes. Rechecks run on the producer's own clock, independent of whether the body is
+    polled, so a non-reading socket neither delays revocation nor keeps its slot (an output queue
+    unread for 1 s closes the stream). Bytes already handed to the network cannot be retracted.
+  - *Capacities:* 1 live stream per Master account (newest wins), 16 per campaign (429 +
+    `Retry-After: 6`), 128 per instance (503), maximum age 15 min (the client reconnects with a full
+    snapshot), SQL reconcile every 30 s. Shutdown (Ctrl-C or a cleanup failure) signals every stream
+    to flush `closing` and end, and the process leaves after a 500 ms drain.
+  - *Proxy notes:* the stream needs unbuffered, uncompressed delivery (the route sends
+    `X-Accel-Buffering: no`; turn off response buffering and compression for the path) and a proxy
+    read timeout above the 15 s heartbeat (for example 60 s). The proxy's `Host` and the Secure
+    cookie rules are as for every route; forwarded headers are never trusted. Direct LAN HTTP,
+    loopback and the root-origin HTTPS proxy are exercised in slice (c), not here.
 - **Mutations** recheck session, deadline, epoch and grants inside their transaction.
 - **Logout** revokes the record (state `revoked`, payload cleared); the tombstone stays
   until original expiry so an old ID cannot be revived.
@@ -297,6 +330,7 @@ table `auth_sessions`, migration 011).
 | New anonymous sessions + login/redemption attempts | burst 10, one slot per 6 s (`governor`); 429 with `Retry-After: 6` |
 | In-flight requests | 8, no queue (503) |
 | Auth SQL workers | 16 (503 when busy) |
+| Master event streams | 1 per Master, 16 per campaign (429, `Retry-After: 6`), 128 per instance (503); stream workers 2 (FIFO, 1 s per operation), separate from the auth SQL workers |
 | Request timeout | 5 s (408); SQLite busy timeout 5 s |
 | Body | 8 KiB for auth and campaign forms (sheet routes: `campaigns.md`) |
 

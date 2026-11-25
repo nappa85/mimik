@@ -322,6 +322,7 @@ fn master_routes() -> Router<AuthState> {
     Router::new()
         .route("/campaigns/{id}/master", get(master))
         .route("/campaigns/{id}/master/snapshot", get(master_snapshot))
+        .route("/campaigns/{id}/master/events", get(master_events))
         .route("/private-sheets/{id}/seen", post(seen))
         .layer(DefaultBodyLimit::max(8192))
 }
@@ -486,11 +487,80 @@ async fn master(
     .into_response())
 }
 
+/// The query of the snapshot probe: the page cursors of the workspace and, optionally, the
+/// public token a stream issued to this tab (its first `status` event).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotQuery {
+    #[serde(default)]
+    players_after: i64,
+    #[serde(default)]
+    npcs_after: i64,
+    #[serde(default)]
+    stream: Option<String>,
+}
+
+/// The header of the probe's answer that tells whether the tab's stream (named by `stream`) is
+/// `live`, was `replaced` by a newer tab of the same Master, or is `unknown`.
+const STREAM_STATE_HEADER: &str = "x-master-stream";
+
 /// The finite JSON projection of the workspace's selected pages (the probe of the live list):
 /// the same cursors, query and uniform 403 as the page, admitted read-only (no session write
 /// of any kind) and rechecked in the projection's own read transaction. A row or body over its
-/// limit is a visible 500, never a truncated answer.
+/// limit is a visible 500, never a truncated answer. With a `stream` token it also reports,
+/// only for the requesting Master's own streams, what became of that tab's stream, so a
+/// displaced tab does not reclaim the slot.
 async fn master_snapshot(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    axum::Extension(expected): axum::Extension<crate::network::ExpectedOrigin>,
+    Path(id): Path<i64>,
+    Query(query): Query<SnapshotQuery>,
+) -> ResultResponse {
+    let page = super::master::MasterPage {
+        players: query.players_after,
+        npcs: query.npcs_after,
+    };
+    if !page.valid()
+        || query
+            .stream
+            .as_ref()
+            .is_some_and(|token| token.is_empty() || token.len() > 64)
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let auth = auth::read_only_request_auth(&state, &headers, &expected).await?;
+    let account = auth.account_id();
+    let store = state.store();
+    let workspace = store
+        .master_workspace(auth, id, page)
+        .await
+        .map_err(error)?;
+    let body = workspace
+        .snapshot_json()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut response = (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response();
+    if let Some(token) = &query.stream {
+        let state = match store.streams().token_state(account, token) {
+            crate::streams::TokenState::Live => axum::http::HeaderValue::from_static("live"),
+            crate::streams::TokenState::Replaced => {
+                axum::http::HeaderValue::from_static("replaced")
+            }
+            crate::streams::TokenState::Unknown => axum::http::HeaderValue::from_static("unknown"),
+        };
+        response.headers_mut().insert(STREAM_STATE_HEADER, state);
+    }
+    Ok(response)
+}
+
+/// The live Master list: a server-sent event stream of the same snapshots (see
+/// `master_stream`), admitted read-only like the probe, with the same cursors. The handshake
+/// finishes inside the request boundary; the response body is then lazy.
+async fn master_events(
     State(state): State<AuthState>,
     headers: axum::http::HeaderMap,
     axum::Extension(expected): axum::Extension<crate::network::ExpectedOrigin>,
@@ -501,19 +571,7 @@ async fn master_snapshot(
         return Err(StatusCode::BAD_REQUEST);
     }
     let auth = auth::read_only_request_auth(&state, &headers, &expected).await?;
-    let workspace = state
-        .store()
-        .master_workspace(auth, id, page)
-        .await
-        .map_err(error)?;
-    let body = workspace
-        .snapshot_json()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response())
+    super::master_stream::open(state.store(), auth, id, page).await
 }
 
 /// Records that the current Master opened the rendered revision: CSRF, then the session, then

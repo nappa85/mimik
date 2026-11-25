@@ -59,6 +59,7 @@ pub struct Store(
     pub(crate) Arc<crate::sources::proposals::ProposalCache>,
     pub(crate) Arc<crate::sources::pdf_store::PdfStore>,
     crate::hub::Hub,
+    Arc<crate::streams::Streams>,
 );
 
 /// Called after every committed sheet save that wrote change notes: the sheet, the new
@@ -211,26 +212,46 @@ impl Store {
             Arc::default(),
             Arc::new(files),
             crate::hub::Hub::default(),
+            Arc::default(),
         ))
     }
 
     /// A receiver of the hints published from now on (the Master view's invalidations).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-    )]
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::hub::Hint> {
         self.4.subscribe()
     }
 
     /// A subscription filtered by campaign and seen recipient only. It does not authorize:
     /// the caller must already have admitted `account` as a current Master of `campaign`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-    )]
     pub(crate) fn feed(&self, campaign: i64, account: i64) -> crate::hub::Feed {
         crate::hub::Feed::new(self.subscribe(), campaign, account)
+    }
+
+    /// The event streams of this store (slots, worker pool, shutdown).
+    pub(crate) fn streams(&self) -> Arc<crate::streams::Streams> {
+        self.5.clone()
+    }
+
+    /// Starts one short stream operation on a blocking thread that owns `permit` (of the
+    /// stream-worker pool) until it exits, whether or not anyone still waits. It skips the SQL
+    /// when `cancelled` is set by the time the database mutex is held, and runs it with the
+    /// request admission `auth` for the SQL guards. Takes no `AUTH_WORKERS` permit.
+    pub(crate) fn stream_operation<T: Send + 'static>(
+        &self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        auth: crate::auth::RequestAuth,
+        operation: impl FnOnce(&mut Connection) -> Result<T, AppError> + Send + 'static,
+    ) -> tokio::task::JoinHandle<Result<T, AppError>> {
+        let connection = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut guard = connection.lock().map_err(|_| AppError::Worker)?;
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(AppError::AuthStorageBusy);
+            }
+            crate::auth::with_domain_request(auth, || operation(&mut guard))
+        })
     }
 
     /// Publishes hints of a committed change (never call it before the commit).

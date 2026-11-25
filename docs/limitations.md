@@ -221,6 +221,8 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **CAMP-L1** [campaigns] Transfer, frozen-sheet reactivation, soft delete, Owner restore, purge and rollback are decided (CAMP-9 to CAMP-12) but not built; nothing can be deleted. Rollback semantics are undecided: ask the user when the lifecycle slice is selected.
 - **CAMP-L2** [campaigns] The creator cannot leave, be removed or hand over the campaign; no creator succession.
 - **CAMP-L4** [campaigns] Prototype character records cannot move into campaigns, and changing a campaign's ruleset or moving a sheet across rulesets has no policy.
+- **CAMP-L5** [campaigns] The Master event stream is in-process: hints, the connection slots and the remembered replaced-stream tokens (8 per account, 1,024 accounts) live in memory, so a restart or a second process serving the same database loses them (a reconnect gets a full snapshot, the 30 s reconcile repairs a missed hint, and a displaced tab's probe then says `unknown`). Past 1,024 accounts the whole token map is cleared, so displaced tabs then see `unknown` and may reconnect once. Tested with a paused clock and one real-socket test, not through a proxy or on a physical device (slice c). Closed by a durable shared mechanism if more than one process is ever supported.
+- **CAMP-L6** [campaigns] A displaced or closed Master stream is freed from its slot at once, but its connection stays open until the client takes the final notice: hyper has no write timeout, so a client that stops reading keeps the TCP connection indefinitely, and the slot caps do not bound sockets. Closed by a connection write/idle timeout.
 
 ## Storage, platform and release
 
