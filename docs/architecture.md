@@ -187,6 +187,9 @@ Runs on every push, pull request and manual dispatch, on `ubuntu-22.04` (`llama-
    binary, offline, with dropped capabilities and resource limits;
    `review_browser.py` checks synthetic source review at desktop/phone sizes with and without
    JavaScript, even if the preceding browser smoke fails (unless cancelled); then
+   `suggest_browser.py` and `master_browser.py` (the Master workspace at 1280 and 390 px with
+   JavaScript on and off: two Masters, a player and an outsider, push, replaced tab, restart,
+   revocation and the label-absence checks) against the release binary, then
    `assist_model_browser.py` against the development binary and a fake model server.
 5. **lan-smoke:** `lan_smoke.py` runs the unpacked binary on isolated container networks with
    separate clients, a denied subnet and an HTTPS reverse proxy.

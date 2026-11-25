@@ -221,6 +221,14 @@ fn router_with_sessions(
             "/assets/sheet-assist.js",
             get(crate::campaigns::web::script_asset),
         )
+        .route(
+            "/assets/master-live.js",
+            get(crate::campaigns::web::master_script_asset),
+        )
+        .route(
+            "/assets/sheet-seen.js",
+            get(crate::campaigns::web::seen_script_asset),
+        )
         .fallback(|| async { StatusCode::FORBIDDEN })
         .with_state(state)
         .layer(DefaultBodyLimit::max(8192))

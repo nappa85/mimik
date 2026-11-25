@@ -5,6 +5,10 @@ It is served locally and embedded in the executable; no CDN or Node.js toolchain
 
 htmx is third-party software under the Zero-Clause BSD license, included as `htmx-LICENSE`.
 `app.css` is Mimik's application styling. `nav.js` closes the header menus on an outside click or Escape.
+`master-live.js` (the Master workspace's live list around the browser's native `EventSource`) and
+`sheet-seen.js` (the automatic opened acknowledgement) are Mimik's own modules, written for the
+strict sheet policy; the htmx SSE extension was tried first and cannot run under it (DEP-33), so
+it is not bundled.
 
 `htmx.source.js` is the preferred-form upstream source for the incorporated htmx
 2.0.8 asset, retrieved from https://github.com/bigskysoftware/htmx/blob/v2.0.8/src/htmx.js.

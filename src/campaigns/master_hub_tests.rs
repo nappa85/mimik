@@ -28,7 +28,7 @@ fn sheet_hint(sheet: i64, revision: i64) -> Hint {
     }
 }
 
-fn seen_hint(recipient: i64, sheet: i64) -> Hint {
+pub(super) fn seen_hint(recipient: i64, sheet: i64) -> Hint {
     Hint::Seen {
         campaign: 1,
         recipient,
@@ -584,7 +584,7 @@ async fn raw_get(setup: &Setup, path: &str, headers: &[(&str, &str)]) -> axum::r
         .unwrap()
 }
 
-async fn snapshot_as(
+pub(super) async fn snapshot_as(
     setup: &Setup,
     who: usize,
     headers: &[(&str, &str)],

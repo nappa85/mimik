@@ -2265,27 +2265,50 @@ fn hostile_definition() -> Value {
     })
 }
 
-/// The only script is at most the one sheet module tag (step 2a): `type="module"`, its
-/// `src`, no other attribute and no body; nothing injected beside it.
-fn assert_module_only(page: &scraper::Html, context: &str) {
+/// The only scripts are the sheet module tag (step 2a) and, on a current Master's page that
+/// offers the one-click form, the acknowledgement module tag (CAMP-16): each `type="module"`
+/// with its `src`, no other attribute and no body, each at most once; nothing injected beside
+/// them. `offers_seen` is true only where a current Master's page offers the form.
+fn assert_module_only(page: &scraper::Html, context: &str, offers_seen: bool) {
     let scripts: Vec<_> = page.select(&selector("script")).collect();
-    assert!(scripts.len() <= 1, "{context}: {} scripts", scripts.len());
-    if let Some(script) = scripts.first() {
+    let count = scripts.len();
+    assert!(count <= 2, "{context}: {count} scripts");
+    let mut sources = Vec::new();
+    for script in scripts {
         let mut attributes: Vec<_> = script.value().attrs().collect();
         attributes.sort_unstable();
+        let src = script.value().attr("src").unwrap_or_default();
+        let allowed: &[&str] = if offers_seen {
+            &["/assets/sheet-assist.js", "/assets/sheet-seen.js"]
+        } else {
+            &["/assets/sheet-assist.js"]
+        };
+        assert!(allowed.contains(&src), "{context}: script {src}");
         assert_eq!(
             attributes,
-            vec![("src", "/assets/sheet-assist.js"), ("type", "module")],
+            vec![("src", src), ("type", "module")],
             "{context}: script attributes"
         );
         assert_eq!(script.inner_html(), "", "{context}: script body");
+        sources.push(src);
     }
+    sources.sort_unstable();
+    sources.dedup();
+    assert_eq!(
+        sources.len(),
+        scripts_len(page),
+        "{context}: a script twice"
+    );
+}
+
+fn scripts_len(page: &scraper::Html) -> usize {
+    page.select(&selector("script")).count()
 }
 
 /// No injected element, and every payload reads back verbatim from its own context.
-fn assert_inert(html: &str, context: &str, values: &[(&str, &str)]) {
+fn assert_inert(html: &str, context: &str, values: &[(&str, &str)], offers_seen: bool) {
     let page = scraper::Html::parse_document(html);
-    assert_module_only(&page, context);
+    assert_module_only(&page, context, offers_seen);
     for tag in ["b", "i", "u"] {
         assert_eq!(
             page.select(&selector(tag)).count(),
@@ -2314,7 +2337,7 @@ async fn list_payloads_escaped_in_context() {
     .unwrap();
     let saved = [("row-1-0-0", text), ("row-1-0-1", story)];
     let view = sheet_page(&setup).await;
-    assert_inert(&view, "view", &saved);
+    assert_inert(&view, "view", &saved, true);
     assert!(view.contains("&#60;script&#62;List"), "list label escaped");
     // Op page: a forged hidden ID, an invalid enum value and an invalid Set/Not set state are
     // echoed in attribute values; the status message carries the list label.
@@ -2334,7 +2357,7 @@ async fn list_payloads_escaped_in_context() {
         ("row-1-0-2", forged_enum),
         ("set-1-0-2", forged_state),
     ];
-    assert_inert(&op, "op", &echoed);
+    assert_inert(&op, "op", &echoed, false);
     assert_eq!(
         status_text(&op),
         "Row added to <script>List. Not saved yet."
@@ -2344,19 +2367,19 @@ async fn list_payloads_escaped_in_context() {
     save.retain(|(key, _)| key != "op");
     let (status, rejected) = setup.post("/private-sheets/1", save.clone()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_inert(&rejected, "422", &echoed);
+    assert_inert(&rejected, "422", &echoed, false);
     // 409: the same draft after a competing write.
     let second = edit(&setup, &created, created.data.clone()).await.unwrap();
     let (status, conflict) = setup.post("/private-sheets/1", save).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_inert(&conflict, "409", &echoed);
+    assert_inert(&conflict, "409", &echoed, false);
     // History and its change summary (labels carry markup).
     let mut changed = second.data.clone();
     changed["gear"][0]["name"] = "renamed".into();
     edit(&setup, &second, changed).await.unwrap();
     let history = history_page(&setup, 3).await;
     let page = scraper::Html::parse_document(&history);
-    assert_module_only(&page, "history");
+    assert_module_only(&page, "history", false);
     for tag in ["b", "i", "u"] {
         assert_eq!(page.select(&selector(tag)).count(), 0, "history: <{tag}>");
     }

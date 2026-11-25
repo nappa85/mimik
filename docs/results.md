@@ -5,6 +5,24 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## htmx SSE extension under the sheet policy (DEP-33, 2026-11-25)
+
+`tools/htmx_sse_probe.py` in the browser container (Chromium of Playwright 1.56): a throwaway
+server serves one page with bundled htmx 2.0.8, htmx-ext-sse 2.2.4 (SHA-256
+`98a46496de0c3605fbffdce9167ba427bdd9553184f83f149c261891a92c0136`) and a same-origin event
+stream whose `snapshot` event carries an HTML fragment, once without a policy and once with
+`SHEET_CSP` copied from the source (a test keeps the copy equal). One page load each; no real
+Mimik page, no other extension version.
+
+- Without a policy the fragment is swapped into the page.
+- Under `SHEET_CSP` it is not: one `require-trusted-types-for` violation, "This document
+  requires 'TrustedHTML' assignment", from the extension's `insertAdjacentHTML`; the page keeps
+  its initial content.
+
+Conclusion: the extension cannot run under the unchanged strict policy, so the Master list uses
+a native `EventSource` module (DEP-33). The probe does not test a Trusted Types policy, which
+the owner excluded.
+
 ## Large-input gate on the host (SRC-15, 2026-11-21)
 
 Release build on the development host (12 cores, magnetic disk at `/media/data`), the opt-in
