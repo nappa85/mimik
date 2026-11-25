@@ -29,6 +29,7 @@ class CleanupTests(unittest.TestCase):
                 source_fixture=fixture,
                 ci_image="ci",
                 browser_image="browser",
+                proxy_image="proxy@sha256:0",
                 cpus=cpus,
             )
 
@@ -81,7 +82,9 @@ class CleanupTests(unittest.TestCase):
         browser = next(
             command
             for command in calls
-            if "/checks/lan_client.py" in command and "--denial-only" not in command
+            if command[1] == "run"
+            and "/checks/lan_client.py" in command
+            and "--denial-only" not in command
         )
         self.assertIn("--user", browser)
         self.assertEqual(browser[browser.index("--user") + 1], f"{os.getuid()}:{os.getgid()}")
@@ -100,7 +103,7 @@ class CleanupTests(unittest.TestCase):
         for cpus in ("2", "6"):
             calls = self.invoke_timeout(decoder=True, cpus=cpus)
             runs = [command for command in calls if command[1] == "run"]
-            self.assertEqual(len(runs), 4, runs)
+            self.assertEqual(len(runs), 6, runs)
             for command in runs:
                 self.assertEqual(
                     [part for part in command if part.startswith("--cpus")],
@@ -109,6 +112,37 @@ class CleanupTests(unittest.TestCase):
                 )
             decoder = next(command for command in runs if "qr_decode" in command)
             self.assertIn(f"CARGO_BUILD_JOBS={cpus}", decoder)
+
+    def test_proxy_container_is_confined_and_pinned(self):
+        calls = self.invoke_timeout()
+        proxy = next(c for c in calls if c[1] == "run" and "mimik-lan-0123456789ab-proxy" in c)
+        for flag in ("--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
+            self.assertIn(flag, proxy)
+        self.assertIn("@sha256:", proxy[-1])
+        self.assertTrue(
+            any(c[1:3] == ["rm", "-f"] and "mimik-lan-0123456789ab-proxy" in c for c in calls)
+        )
+        self.assertTrue(
+            any(c[1:3] == ["rm", "-f"] and "mimik-lan-0123456789ab-tls" in c for c in calls)
+        )
+
+    def test_loopback_stream_checks_run_inside_the_server_container(self):
+        calls = self.invoke_timeout()
+        loopback = next(c for c in calls if c[1] == "exec" and "--streams-only" in c)
+        self.assertIn("mimik-lan-0123456789ab-server", loopback)
+        self.assertIn("127.0.0.1", loopback)
+
+    def test_proxy_config_keeps_default_buffering_and_a_short_idle_listener(self):
+        config = lan_smoke.proxy_config("172.20.0.2")
+        self.assertNotIn("proxy_buffering", config)
+        self.assertNotIn("gzip on", config)
+        self.assertIn("proxy_pass http://172.20.0.2:3000;", config)
+        self.assertIn("proxy_read_timeout 60s;", config)
+        self.assertIn("proxy_read_timeout 3s;", config)
+        self.assertIn("listen 3445 ssl;", config)
+        self.assertIn("proxy_read_timeout 20s;", config)
+        self.assertIn("proxy_set_header X-Forwarded-Proto http;", config)
+        self.assertIn("proxy_set_header Host $http_host;", config)
 
     def test_cpu_cap_must_be_a_small_positive_integer(self):
         self.assertEqual(lan_smoke.cpu_cap("2"), "2")

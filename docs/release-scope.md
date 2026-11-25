@@ -24,9 +24,20 @@ key or internet access is needed; the assistant and its model downloads are opti
   everything also works as plain pages (Reload, paging, Open links and a one-click "mark
   opened") without JavaScript. Verified: Chromium on loopback against the release binary at
   1280 x 720 and 390 x 844, JavaScript on and off, with two Masters, a player and an
-  outsider (CI `browser-smoke`, `tools/master_browser.py`). Not yet verified: direct LAN
-  HTTP, the HTTPS proxy and proxy idle closure with a separate client, and physical devices
-  (`limitations.md`, ROAD-8).
+  outsider (CI `browser-smoke`, `tools/master_browser.py`). The event stream and the snapshot probe
+  are also verified, from the unpacked release in isolated container networks with separate
+  clients (CI `lan-smoke`, `tools/lan_stream.py`), on three transports: direct LAN HTTP, loopback
+  (run inside the server's container) and an nginx HTTPS reverse proxy on the configured root
+  origin. On each: Host and Secure-cookie selection (Secure only on the HTTPS origin, whatever
+  forwarded headers claim), refusals (no or forged session, wrong Host, foreign Origin,
+  cross-site fetch, a player), an event arriving on an open stream after another client's
+  change, and a full snapshot on reconnect after the client drops the connection. Only on
+  direct LAN: a client from a denied subnet is refused, and the stream and probe are refused
+  before any session lookup; a server restart ends the stream and the reconnect is a full
+  snapshot (LAN and proxy, not loopback). Only behind the proxy: a proxy's idle closure ends the
+  stream and the reconnect is a full snapshot, and heartbeats keep a stream open for 45 s past a
+  20 s proxy read timeout. Not verified: physical devices and networks, the public internet and any proxy
+  other than nginx (`limitations.md`, ROAD-8).
 - **Private sheets.** Each sheet belongs to its player and campaign, with complete revision
   history. Two kinds:
   - runtime sheets from a published game definition: scalar and list fields, advisory derived
@@ -186,7 +197,7 @@ holding exactly the pinned files);
   with and without JavaScript (the sheet module under its strict CSP), and name suggestions
   with "Which one?"; the assistant's page flow runs in a development build (never released)
   against a fake model server;
-- **lan-smoke:** the same binary on isolated networks with separate clients, a denied subnet
+- **lan-smoke:** the same binary on isolated networks with separate clients, the Master event stream and snapshot probe over LAN, loopback and an nginx proxy, a denied subnet
   and an HTTPS reverse proxy, including Secure cookies and rendered QR codes;
 - **llama-runtime:** on Ubuntu 24.04 from the unpacked archive, with the AppArmor user-namespace
   restriction switched off for the job (the probe's outcome with it on is recorded first, not
