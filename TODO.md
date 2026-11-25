@@ -98,7 +98,8 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   breaks musl builds); rebased onto main 2026-11-25. youki-dev/youki#3939 (opened 2026-11-24) adds a
   `systemd_base` feature without eBPF/libbpf; youki-dev/youki#3940 (independent) replaces
   libbpf-sys with direct bpf(2) syscalls over aya-obj. Both updated for the review on 2026-11-25
-  (aya-obj 0.2.1 offered as the MSRV alternative). Not needed by Mimik.
+  (aya-obj 0.2.1 offered as the MSRV alternative); #3940 CI green except the `label` check,
+  which needs a maintainer to set a label. Not needed by Mimik.
 
 ## Next steps
 
