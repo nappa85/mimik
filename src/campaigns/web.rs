@@ -79,6 +79,34 @@ pub(crate) async fn script_asset() -> impl IntoResponse {
     )
 }
 
+/// The Master live-list module (`assets/master-live.js`, CAMP-14).
+pub(crate) async fn master_script_asset() -> Response {
+    let mut response = (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        include_str!("../../assets/master-live.js"),
+    )
+        .into_response();
+    response.extensions_mut().insert(SheetPage);
+    response
+}
+
+/// The one-click acknowledgement module of a Master's sheet page (`assets/sheet-seen.js`).
+pub(crate) async fn seen_script_asset() -> Response {
+    let mut response = (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        include_str!("../../assets/sheet-seen.js"),
+    )
+        .into_response();
+    response.extensions_mut().insert(SheetPage);
+    response
+}
+
 /// Marks a unit save's styled busy page (503, D-X3): the auth layer keeps its body, which
 /// holds the player's entry.
 #[derive(Clone)]
@@ -475,16 +503,19 @@ async fn master(
         .master_workspace(auth, id, page)
         .await
         .map_err(error)?;
-    Ok(Html(
+    let mut response = Html(
         MasterTemplate {
-            nav: crate::auth::nav::Nav::here(crate::auth::nav::Section::Campaigns),
+            nav: crate::auth::nav::Nav::here_strict(crate::auth::nav::Section::Campaigns),
             workspace: &workspace,
             page,
         }
         .render()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     )
-    .into_response())
+    .into_response();
+    // The page runs the live-list module under the strict sheet policy.
+    response.extensions_mut().insert(SheetPage);
+    Ok(response)
 }
 
 /// The query of the snapshot probe: the page cursors of the workspace and, optionally, the
@@ -554,6 +585,7 @@ async fn master_snapshot(
         };
         response.headers_mut().insert(STREAM_STATE_HEADER, state);
     }
+    response.extensions_mut().insert(SheetPage);
     Ok(response)
 }
 
@@ -571,7 +603,9 @@ async fn master_events(
         return Err(StatusCode::BAD_REQUEST);
     }
     let auth = auth::read_only_request_auth(&state, &headers, &expected).await?;
-    super::master_stream::open(state.store(), auth, id, page).await
+    let mut response = super::master_stream::open(state.store(), auth, id, page).await?;
+    response.extensions_mut().insert(SheetPage);
+    Ok(response)
 }
 
 /// Records that the current Master opened the rendered revision: CSRF, then the session, then

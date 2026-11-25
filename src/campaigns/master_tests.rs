@@ -1333,3 +1333,6 @@ mod hub;
 
 #[path = "master_stream_tests.rs"]
 mod stream;
+
+#[path = "master_client_tests.rs"]
+mod client;

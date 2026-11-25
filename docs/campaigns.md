@@ -74,13 +74,13 @@ and, for a catalogue-backed name, `suggest/{f}/{p}` and `cells/{f}/{r}/{p}/which
 Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot`,
 `GET /campaigns/{id}/master/events` and `POST /private-sheets/{id}/seen`.
 
-- **Workspace** (plain HTML): linked from the campaign page to current Masters only. It lists
+- **Workspace** (plain HTML plus the live-list module): linked from the campaign page to current Masters only. It lists
   every sheet of the campaign in two sections, "Player sheets" and "NPC sheets" (custodian
   shown), each 50 per page on its own cursor (`players_after`, `npcs_after`, nonnegative,
   nothing else accepted). Each row shows a textual badge: "Changed" (revision above this
   Master's mark), "Not opened" (no mark) or "Opened". The Owner, players, former Masters and
   other campaigns' Masters get the uniform 403, authorized in the page's own transaction and
-  again at its end. The page needs a reload to refresh. A sheet opened from the list shows a
+  again at its end. The page carries the strict sheet policy and loads `assets/master-live.js`, which keeps the lists current from the event stream (`assisted-entry.md`, "Master workspace script"); without it the page says updates need a reload and the Reload link, the paging links, the Open links and the one-click seen form work. A GET (reload, open) never clears a badge: the acknowledgement is the POST, sent by the sheet page's module or by one click. A sheet opened from the list shows a
   link back to it, with the list's cursors only on that first GET.
 - **Snapshot** (`GET /campaigns/{id}/master/snapshot`, same two cursors and the same uniform 403
   as the page, an ordinary request inside `boundary`): JSON of the selected pages from the

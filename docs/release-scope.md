@@ -15,6 +15,18 @@ key or internet access is needed; the assistant and its model downloads are opti
 - **Campaigns.** Players create campaigns bound to one exact game and edition, request to join,
   and the creator manages additional Masters. A player who leaves keeps read-only access to
   their sheet, which stays frozen.
+- **Master workspace.** A campaign's current Masters get `/campaigns/{id}/master`: every sheet
+  of the campaign in "Player sheets" and "NPC sheets" (a Master classifies a sheet as an NPC only
+  when creating it; no player-visible page carries the label), each marked "Changed", "Not
+  opened" or "Opened" for that Master alone. The lists update by themselves (server-sent
+  events: one live stream per Master, 16 per campaign, 128 per instance; a displaced tab
+  stops until Resume), a sheet opened by a Master is marked opened automatically, and
+  everything also works as plain pages (Reload, paging, Open links and a one-click "mark
+  opened") without JavaScript. Verified: Chromium on loopback against the release binary at
+  1280 x 720 and 390 x 844, JavaScript on and off, with two Masters, a player and an
+  outsider (CI `browser-smoke`, `tools/master_browser.py`). Not yet verified: direct LAN
+  HTTP, the HTTPS proxy and proxy idle closure with a separate client, and physical devices
+  (`limitations.md`, ROAD-8).
 - **Private sheets.** Each sheet belongs to its player and campaign, with complete revision
   history. Two kinds:
   - runtime sheets from a published game definition: scalar and list fields, advisory derived

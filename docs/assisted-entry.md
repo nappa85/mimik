@@ -499,6 +499,46 @@ are 200 (saved, "No change"), 409 and 422.
 
 What it does not refresh is listed in ASSIST-L15 and ASSIST-L16.
 
+## Master workspace script and the opened acknowledgement
+
+CAMP-14 to CAMP-16, DEP-33. A current Master's pages run two small modules under the same strict
+policy as the sheet pages (`SheetPage`: the workspace, the modules and the sheet page all
+carry `SHEET_CSP`, which stays unchanged); neither is needed for the page to work, and a Rust test refuses
+in both any HTML sink, `eval`, inline style or hand-written event-stream parser.
+
+- **Opened acknowledgement** (`assets/sheet-seen.js`, owner decision 1). A Master's sheet page
+  that offers the one-click form (`#seen-form`, carrying the revision the server rendered)
+  loads the module, which posts that same form (its own action, CSRF token and revision,
+  `redirect: 'manual'`) once, as soon as the page is visible, and then shows "Opened (revision
+  N)" in its place. The revision is never read from a later answer, so a draft, a refused or
+  rebased save and another Master's revision cannot be acknowledged by it; a failed post leaves
+  the form for one click. Without JavaScript (off, blocked or failing) the one click remains.
+  The page does not offer the form, nor load the module, once it is opened, on history pages,
+  on a refused draft or for the custodian-player.
+- **Live list** (`assets/master-live.js`, the browser's native `EventSource`; no htmx, no SSE
+  parser). The page is the plain workspace: the module only updates it. Each row is an
+  `article[data-id]` in `#players-rows` or `#npcs-rows`; a snapshot updates rows in place by
+  sheet ID (text nodes and the Open link's `href` only when they changed, in the server's
+  order), so row elements, focus and scroll stay put; a removed row that held focus moves it
+  to its section heading, a focused Open link is never replaced. The status paragraph
+  (`#live-status`, `role="status"`, polite) changes only when the state does: "Connecting",
+  "Live: this list updates by itself", "Reconnecting; the list may be stale", "Offline",
+  "busy", the terminal "moved to another tab" with a Resume button, the sign-in state with a
+  "Sign in" link and "Try again", and "access ended" after the lists were cleared. The Reload
+  link is always there; the server-rendered text says updates need JavaScript.
+- **Failures.** On any stream failure (a transport error, a `closing` or `error` status, a
+  snapshot that is not exactly the documented shape) the module closes the `EventSource` and
+  probes `GET .../master/snapshot` (with `?stream=<token>` once the `live` status gave one):
+  401 stops and offers sign-in, 403 clears the lists and stops, 429 and 503 back off (at least
+  `Retry-After`, uncapped), `X-Master-Stream: replaced` stops without reconnecting, anything else
+  retries after a jittered 3 to 30 s (growing with the attempts). A good probe's snapshot is
+  applied at once. A `replaced` status is terminal: only Resume reconnects, which in turn
+  replaces the other tab. `pagehide` closes the stream; a page shown again on `pageshow` with `persisted` (the back/forward
+  cache, which the `no-store` pages normally prevent) opens exactly one (a live tab opens none).
+- **What it does not do.** No push on sheet pages: opening a sheet is one ordinary document per
+  tab, with no live newer-revision notice, and a draft is never touched by a remote edit
+  (`limitations.md`, ROAD-8).
+
 ## Interpretation assistant
 
 Steps 2c-1 and 2c-2a (D-D, D-F, D-H, D-J, D-P, ASSIST-27 to ASSIST-43). The assistant reads a
