@@ -8,6 +8,7 @@ mod formulas;
 mod history_diff;
 mod interpret;
 mod master;
+mod master_stream;
 mod notes;
 mod quick;
 mod remind;

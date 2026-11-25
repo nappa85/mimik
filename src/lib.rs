@@ -14,6 +14,7 @@ mod registry_admin;
 pub(crate) mod sandbox;
 pub mod sources;
 mod store;
+mod streams;
 mod text_fold;
 mod web;
 

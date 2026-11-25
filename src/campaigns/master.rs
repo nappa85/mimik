@@ -73,7 +73,7 @@ impl Store {
 
 /// The one projection: both selected pages in a single read transaction that rechecks the
 /// session binding and the current Master role at its start and at its final boundary.
-fn read_workspace(
+pub(super) fn read_workspace(
     db: &mut rusqlite::Connection,
     auth: &RequestAuth,
     id: i64,

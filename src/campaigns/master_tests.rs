@@ -1330,3 +1330,6 @@ async fn json_post(setup: &Setup, who: usize, path: &str, pairs: Pairs) -> (Stat
 
 #[path = "master_hub_tests.rs"]
 mod hub;
+
+#[path = "master_stream_tests.rs"]
+mod stream;

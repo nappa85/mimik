@@ -4,10 +4,6 @@
 //! carries no snapshot, note, session or page content, is never ordered or durable, and a
 //! consumer always reads the authoritative state from SQL. Publication never blocks: a slow
 //! subscriber loses its oldest hints (`RecvError::Lagged`) and must rebuild from a fresh read.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-)]
 use tokio::sync::broadcast;
 
 /// Capacity of the ring.
@@ -69,10 +65,6 @@ impl Hub {
 
     /// A receiver of every hint published from now on. Subscribe before reading a snapshot, so
     /// no commit between the read and the first `recv` is missed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-    )]
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<Hint> {
         self.0.subscribe()
     }
@@ -82,10 +74,6 @@ impl Hub {
 /// [`Hint::visible_to`] allows. It is **not** an authorization: the caller must already have
 /// admitted `account` as a current Master of `campaign` (sheet hints reveal sheet IDs and
 /// revisions, NPC sheets included). The global ring is never handed on.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-)]
 pub(crate) struct Feed {
     receiver: broadcast::Receiver<Hint>,
     campaign: i64,
@@ -93,10 +81,6 @@ pub(crate) struct Feed {
 }
 
 impl Feed {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-    )]
     pub(crate) fn new(receiver: broadcast::Receiver<Hint>, campaign: i64, account: i64) -> Self {
         Self {
             receiver,
@@ -110,10 +94,6 @@ impl Feed {
     /// # Errors
     /// `Lagged(n)` when the subscriber fell more than the ring behind, `Closed` when every
     /// sender is gone.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "consumed by the event stream (Master view b2)")
-    )]
     pub(crate) async fn recv(&mut self) -> Result<Hint, broadcast::error::RecvError> {
         loop {
             let hint = self.receiver.recv().await?;

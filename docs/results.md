@@ -1800,3 +1800,23 @@ decides.**
   GPU runs of the dependency-check change are not repeated; the pinned Vulkan server's
   dependency check passed on this host and the fake-GPU live tests passed. The guard worked as
   designed (ASSIST-50, HAKO-L9); the hotter junction after the reboot was not explained.
+
+## Master event stream under the owner's caps (2026-11-24)
+
+- **Scope:** `master_stream_tests::measure_saturated_caps_and_ordinary_availability` (ignored
+  test, debug build, in the container, 12 CPUs, real clock): 128 live streams (8 campaigns of 16
+  Masters, the instance cap), 40 sheets in campaign 1, a reader task per stream, the 2-permit
+  stream pool, the 250 ms refresh and 5 s idle recheck. 30 rounds of one Master-page read, one
+  sheet edit (each wakes the 16 streams of its campaign) and 300 ms of rest, then 8 sign-in form
+  reads. One run; not a model of a slow disk, a slow client or a loaded machine.
+- **Result:** handshake (check, slot, first projection) p50 3 ms, p95 6 ms, max 10 ms; stream
+  operations (permit wait plus run, 1,087 of them) p50 6 ms, p95 73 ms, max 94 ms against the 1 s
+  deadline; an edit reaches all 16 streams of its campaign in p50 91 ms, p95 100 ms, max 105 ms; ordinary
+  requests under saturation: Master page p50 6 ms, p95 7 ms, edit POST p50 53 ms, p95 58 ms,
+  sign-in form p50 10 ms, p95 10 ms; every status was the expected 200 or 303, no 503, no 429, all
+  128 streams alive at the end, `AUTH_WORKERS` 16/16 and `REQUESTS` 8/8 free.
+- **Conclusion:** the owner's caps (1 per Master, 16 per campaign, 128 per instance) and the 2-permit
+  pool leave wide margins (the worst operation took under a tenth of its deadline) and starve
+  no ordinary request; no change of caps or pool size is argued by this evidence. Not measured:
+  sign-in with a real password check, a slow SQLite disk, many large pages (50 rows per section
+  with long names), release-build timing.
