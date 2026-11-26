@@ -23,8 +23,10 @@ precision is not measured.
 - Prompt size is dominated by embedded image data in `Picture` blocks: image-heavy pages send
   115k-380k tokens, text pages 3k-12k.
 
-Conclusion: Mistral Large is the reviewer to use; Medium only after the block payload drops the
-embedded image data. Neither replaces the owner's page review.
+Conclusion: the endpoint and model are the owner's choice (`--api-url`, `--model`; nothing is
+fixed in the tool). On this trial Large gave fewer, more specific suggestions than Medium, and
+Medium needs the block payload without the embedded image data to fit every page. Neither
+replaces the owner's page review.
 
 ## htmx SSE extension under the sheet policy (DEP-33, 2026-11-25)
 
