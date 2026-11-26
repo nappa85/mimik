@@ -20,6 +20,10 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   merged (3c-2's live reminder runs done on both paths, `docs/results.md`). Step 4 (suggestions, "Which one?") is merged (2026-11-20); open: the p95 over HTTP and IME through CDP (CAT-L23). Step 5 (docs, release scope, the assistant-on release smoke) is merged (2026-11-20); CI is green with it (run 44835341346, 2026-11-21).
   Level 3's return is its own later step (plan, "Level 3 behind an owner opt-in").
 
+- **In-app API reviewer** (`docs/api-reviewer-plan.md`, reviewed: Opus, approve with changes,
+  applied; owner decisions 2026-11-26). Next: slice (a), the protocol check, transport and
+  settings, implemented by Vibe through `external-agents` (v0.1.5).
+
 - **Real ruleset material for the prompt tests (owner, 2026-10-29):** MÖRK BORG IT PDF pages
   22–39 extracted with Marker and forced OCR (`docs/results.md`, extractor screen), bundle
   `data/extractions/review-ready-dbb400754fb94e87af95cce347903ea8` with two suggestion reports

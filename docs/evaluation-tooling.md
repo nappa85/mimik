@@ -106,7 +106,7 @@ Outer elapsed-deadline controller for GGUF transfers.
 ## External reviewers and coding agents: the `external-agents` skill
 
 Implements the reviewer and implementer setup defined in `AGENTS.md`, from a local clone of
-https://github.com/nappa85/external-agents pinned at tag `v0.1.3` (commit `0778f04`)
+https://github.com/nappa85/external-agents pinned at tag `v0.1.5` (commit `7a05896`, Mistral Vibe backend)
 (`/media/data/mimik/external-agents/src`, linked as `~/.claude/skills/external-agents`). Its
 own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
 
@@ -125,10 +125,11 @@ own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
   machine-wide lock and are skipped for the rest of the UTC day after a stall or failure
   (`~/.local/state/external-agents/limits.json`).
 - **Coding agents:** `code --worktree WT --state /media/data/mimik/xagents-state/<task>
-  --agent opencode:openai/gpt-6.1-sol --preset rust --cpus N --env
+  --agent vibe:<model alias> --preset rust --cpus N --env
   LIBCLANG_PATH=/usr/lib/llvm/22/lib64 --env BINDGEN_EXTRA_CLANG_ARGS=-I/usr/lib/clang/22/include
-  --hosts chatgpt.com,auth.openai.com --timeout S --task T` (the two variables let mupdf-sys's
-  bindgen find the host libclang; the host list is the one the old tool allowed; `--cpus 2` on
+  --timeout S --task T` (the two variables let mupdf-sys's bindgen find the host libclang;
+  Vibe's default egress is api.mistral.ai and its key comes from `MISTRAL_API_KEY`, passed
+  from the owner's key file, never printed; for Sol it was `--hosts chatgpt.com,auth.openai.com`; `--cpus 2` on
   weekdays when the run can reach 09:00–18:00). Questions:
   `question --wait --state S` and `answer --to ID --state S TEXT`. The state directory holds
   the build cache (`<state>/target`), which the agent writes: delete it with `rm -rf` after a
