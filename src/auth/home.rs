@@ -5,6 +5,7 @@
 //! and never sheet contents or another player's private data. Every section is its own indexed
 //! query that fetches at most `SHOWN + 1` rows.
 use super::{AuthResult, AuthState, materials, nav};
+use crate::campaigns::{badge_of, sheet_names};
 use crate::{
     AppError, Store,
     auth::RequestAuth,
@@ -49,6 +50,9 @@ pub(crate) struct Row {
     /// The item's time; for "new" items it decides the mark.
     pub at: Option<i64>,
     pub links: Vec<Link>,
+    /// Player-controlled texts shown after the label, each in its own `<bdi>` so that bidirectional
+    /// controls in one cannot reorder the rest of the row.
+    pub isolated: Vec<String>,
 }
 
 impl Row {
@@ -59,6 +63,7 @@ impl Row {
             href,
             at,
             links: Vec::new(),
+            isolated: Vec::new(),
         }
     }
     pub(crate) fn time(&self) -> Option<DisplayTime> {
@@ -449,6 +454,7 @@ fn player_read(db: &Connection, account: i64, now: i64) -> Result<Home, AppError
         my_requests(db, account)?,
     ];
     if is_master {
+        pending.insert(1, edited_sheets(db, account)?);
         pending.push(requests_to_answer(db, account)?);
     }
     let news = vec![player_events(db, account, since)?];
@@ -469,6 +475,104 @@ fn player_campaigns(
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
         .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The latest edited sheets of the campaigns `?1` currently runs, at most three per campaign
+/// (`total` says whether there are more) and eleven in all, newest live revision first. The
+/// edit time comes from the covering index `private_sheet_history_time` (`INDEXED BY`: the
+/// planner prefers the primary key, which would read the row and its snapshot's overflow
+/// pages); `is_npc` and the other early columns are read through `private_sheets_classes`
+/// (`s.is_npc IN (0,1)` makes the planner choose it over the custody index). The snapshot is
+/// never selected here.
+pub(crate) const EDITED_SHEETS: &str = "WITH mine AS (
+  SELECT campaign_id FROM campaign_members WHERE account_id=?1 AND role='master' AND state='active'),
+ ranked AS (
+  SELECT s.id AS id,s.campaign_id AS campaign_id,s.custodian_id AS custodian_id,s.is_npc AS is_npc,
+   s.state AS state,s.revision AS revision,h.occurred_at AS occurred_at,m.seen_revision AS seen,
+   row_number() OVER (PARTITION BY s.campaign_id ORDER BY h.occurred_at DESC,s.id DESC) AS n,
+   count(*) OVER (PARTITION BY s.campaign_id) AS total
+  FROM mine
+  JOIN private_sheets s ON s.campaign_id=mine.campaign_id AND s.is_npc IN (0,1)
+  JOIN private_sheet_history h INDEXED BY private_sheet_history_time ON h.sheet_id=s.id AND h.revision=s.revision
+  LEFT JOIN master_sheet_seen m ON m.master_id=?1 AND m.sheet_id=s.id)
+ SELECT r.id,r.campaign_id,c.title,a.display_name,r.state,r.revision,r.occurred_at,r.seen,r.is_npc,r.total
+ FROM ranked r JOIN campaigns c ON c.id=r.campaign_id JOIN accounts a ON a.id=r.custodian_id
+ WHERE r.n<=3 ORDER BY r.occurred_at DESC,r.id DESC LIMIT 11";
+
+/// The Master's block of the latest edited sheets: every recent edit with this Master's badge,
+/// whatever the home's mark says. The names are read only for the rows shown.
+fn edited_sheets(db: &Connection, account: i64) -> Result<Block, AppError> {
+    struct Edited {
+        id: i64,
+        campaign: i64,
+        title: String,
+        custodian: String,
+        frozen: bool,
+        badge: &'static str,
+        at: i64,
+        npc: bool,
+        total: i64,
+    }
+    let found = db
+        .prepare(EDITED_SHEETS)?
+        .query_map([account], |row| {
+            let revision: i64 = row.get(5)?;
+            Ok(Edited {
+                id: row.get(0)?,
+                campaign: row.get(1)?,
+                title: row.get(2)?,
+                custodian: row.get(3)?,
+                frozen: row.get::<_, String>(4)? == "frozen",
+                badge: badge_of(row.get(7)?, revision),
+                at: row.get(6)?,
+                npc: row.get(8)?,
+                total: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let windowed = found.len() > SHOWN;
+    let shown: Vec<_> = found.into_iter().take(SHOWN).collect();
+    let ids: Vec<i64> = shown.iter().map(|sheet| sheet.id).collect();
+    let names = sheet_names(db, &ids)?;
+    let mut linked = std::collections::HashSet::new();
+    let rows = shown
+        .into_iter()
+        .map(|sheet| {
+            let mut note = sheet.badge.to_owned();
+            if sheet.npc {
+                note.push_str(" · NPC");
+            }
+            if sheet.frozen {
+                note.push_str(" · frozen");
+            }
+            let mut row = Row::new(
+                names.get(&sheet.id).cloned().unwrap_or_default(),
+                note,
+                format!("/private-sheets/{}", sheet.id),
+                Some(sheet.at),
+            );
+            row.isolated = vec![sheet.title, sheet.custodian];
+            if linked.insert(sheet.campaign) {
+                row.links.push(Link {
+                    label: if usize::try_from(sheet.total).is_ok_and(|total| total > SHEETS_SHOWN) {
+                        "workspace (more)".into()
+                    } else {
+                        "workspace".into()
+                    },
+                    href: format!("/campaigns/{}/master", sheet.campaign),
+                });
+            }
+            row
+        })
+        .collect();
+    Ok(Block::new(
+        "Latest edited sheets in campaigns I run",
+        "No sheet of these campaigns has been edited yet.",
+        "/campaigns",
+        "All campaigns",
+        rows,
+    )
+    .windowed(windowed))
 }
 
 /// Sheets shown per campaign; a further link opens the campaign page.

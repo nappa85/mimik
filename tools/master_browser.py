@@ -38,6 +38,11 @@ Without JavaScript: the same page explains that a reload is needed, Reload shows
 GET reload never clears a badge), the Open link and the one-click seen form (303) work and the
 badge clears; NPC creation works as plain forms.
 
+The Master's home (`/`, server-rendered, checked with JavaScript on and off): the block "Latest
+edited sheets in campaigns I run" lists a player's new sheet as Not opened, Opened after the
+Master acknowledges it, Changed after a remote edit and Opened again after the next
+acknowledgement, while the other Master's badge for it stays Not opened; no document overflow.
+
 No request leaves 127.0.0.1:3000. Run inside the browser container
 (containers/browser.Dockerfile), from the repository root:
   cargo run --example source_fixture -- /tmp/fixture
@@ -831,6 +836,57 @@ def run_plain(browser, viewport, clients, ids, version):
     print(f"Master workspace without JavaScript passed at {label}.")
 
 
+HOME_HEADING = "Latest edited sheets in campaigns I run"
+
+
+def home_badge(page, sheet, label):
+    """The badge of `sheet`'s row in the home block, read from a fresh load of `/`."""
+    response = page.goto(f"{ORIGIN}/")
+    require(response.status == 200, f"{label}: the home answered {response.status}")
+    row = page.locator(
+        f'section.home-block:has(h3:text-is("{HOME_HEADING}")) li:has(a[href="{sheet}"])'
+    )
+    require(row.count() == 1, f"{label}: no home row for {sheet}")
+    found = re.search(r"· (Changed|Not opened|Opened)\b", row.inner_text())
+    require(found, f"{label}: no badge in {row.inner_text()!r}")
+    no_overflow(page, f"{label} home")
+    return found.group(1)
+
+
+def run_home(browser, viewport, clients, ids, version, *, javascript):
+    """The Master's home block: badges per Master through a remote edit and acknowledgements."""
+    label = f"{viewport['width']}x{viewport['height']} JS {'on' if javascript else 'off'}"
+    table = Table(clients, ids, version, f"Home table {label}")
+    sheet = table.create_sheet("table-player", "Home sheet")
+    contexts = {
+        login: open_context(browser, viewport, clients[login].cookie, javascript=javascript)
+        for login in ("master-a", "master-b")
+    }
+    page_a, page_b = (contexts[login].new_page() for login in ("master-a", "master-b"))
+
+    def acknowledge(login):
+        action, fields, _ = clients[login].form(sheet, f"{sheet}/seen")
+        clients[login].submit(action, fields)
+
+    def badges():
+        return home_badge(page_a, sheet, label), home_badge(page_b, sheet, label)
+
+    got = badges()
+    require(got == ("Not opened", "Not opened"), f"{label}: first badges {got}")
+    acknowledge("master-a")
+    got = badges()
+    require(got == ("Opened", "Not opened"), f"{label}: after A's open {got}")
+    table.edit("table-player", sheet, "Home sheet v2")
+    got = badges()
+    require(got == ("Changed", "Not opened"), f"{label}: after the edit {got}")
+    acknowledge("master-a")
+    got = badges()
+    require(got == ("Opened", "Not opened"), f"{label}: after A's second open {got}")
+    for context in contexts.values():
+        context.close()
+    print(f"Master home block passed at {label}.")
+
+
 def run(binary, fixture):
     from playwright.sync_api import sync_playwright
 
@@ -861,6 +917,11 @@ def run(binary, fixture):
                         clients = {login: Client(login, passwords[login]) for login in LOGINS}
                         run_plain(browser, viewport, clients, ids, version)
                         run_paging(browser, viewport, passwords, ids, version)
+                        for javascript in (True, False):
+                            clients = {login: Client(login, passwords[login]) for login in LOGINS}
+                            run_home(
+                                browser, viewport, clients, ids, version, javascript=javascript
+                            )
                 finally:
                     browser.close()
         finally:

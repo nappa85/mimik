@@ -82,7 +82,10 @@ logo-only header. On sheet pages `sheet-assist.js` holds back form submissions w
 and a panel of what is **new**. Every section is its own query of at most 11 rows (10 shown,
 a note and a link to the full list when there are more) inside one read transaction that
 rechecks the session before and after. Each query is bounded by an index or an explicit
-window: `account_events (action, occurred_at)`, `campaign_events (target_id, occurred_at)`
+window: `private_sheet_history (sheet_id, revision, occurred_at)` (migration 040, covering: the
+edit time sits after the snapshot in the row) with `private_sheets_classes` and the
+`master_sheet_seen` primary key (at most 2,048 sheets exist across all campaigns),
+`account_events (action, occurred_at)`, `campaign_events (target_id, occurred_at)`
 and `(campaign_id, occurred_at)` (one query per campaign the account runs, at most 128
 exist), `source_suggestion_reports (imported_at)`, `source_pages (source_id, complete,
 pdf_page)`, `account_credentials` (partial, active rows) and `campaign_requests (account_id,
@@ -92,9 +95,12 @@ home reads Owner tables only (no campaign table), through the Owner admission; a
 reads campaign tables only (no Owner table), through the request admission. The one
 cross-reading is the guard `NOT EXISTS (account_owner)` that keeps an Owner membership left in
 an old database out of the Master's join-request list, as the roster does. Nothing shows sheet
-contents or another player's private data: counts, titles, links and times; a sheet is a link
-by number (the snapshot is not read), at most three per campaign and then a link to the
-campaign page.
+contents or another player's private data: counts, titles, links and times. A sheet is a link
+by number, at most three per campaign and then a link to the campaign page. The snapshot is
+not read, except in a current Master's block of latest edited sheets: it reads the sheet name
+with the workspace's guards (`sheet_names` in `src/campaigns/master.rs`: snapshot at most
+1 MiB, name at most 100 characters, otherwise "(name unavailable)"), only for the at most 10
+rows shown and only after they are chosen.
 
 - **Owner, pending:** sources with pages not complete (page-level counts, a link to the first
   incomplete page), uploads running or failed, open suggestions, unredeemed invitations,
@@ -104,6 +110,24 @@ campaign page.
 - **Player and Master, pending:** campaigns they run and play in, each with a link to the
   campaign and to their own active sheets there; their pending join requests; for a Master
   the requests to answer.
+- **Master, pending:** "Latest edited sheets in campaigns I run", after "Campaigns I run": the
+  newest edited sheets of the campaigns where the account is a current Master (one windowed
+  statement: `row_number()` and `count(*)` per campaign, at most 3 per campaign, newest
+  `private_sheet_history.occurred_at` first, then id descending, 11 fetched, 10 shown). Each
+  row is the sheet name (a link to the sheet), then the campaign title, the custodian, this
+  Master's badge (Changed, Not opened or Opened, as in the workspace) and `NPC` or `frozen`
+  where they apply, and the edit time. Every recent edit shows with its badge, the Master's own
+  too (normally Opened: only full-form and list-form saves always acknowledge, other own
+  saves only when the live revision was already acknowledged, CAMP-16). Rows ignore the home's
+  mark ("Mark as seen" changes nothing here). A row's badge becomes Opened by
+  acknowledgement (`POST /private-sheets/{id}/seen`), not by opening the sheet, and every
+  recent edit stays listed. The campaign title, the custodian and the sheet name are
+  player-controlled text, each in its own `<bdi>` element so that bidirectional controls cannot
+  reorder the badge and time; the labels of every home row are isolated the same way. Each
+  campaign has one workspace link (`/campaigns/{id}/master`), labelled "workspace (more)" when
+  the campaign has more than 3 sheets. `master_sheet_seen` starts empty (no backfill), so existing sheets read Not opened;
+  a removal that freezes many sheets fills the block for a while. "Mark as seen" re-runs the
+  same bounded read in its write transaction. A player's home never reads these tables.
 - **Player and Master, new:** campaign events whose target is the account, and for a Master
   the events of the campaigns they currently run; the account's own actions are left out.
 

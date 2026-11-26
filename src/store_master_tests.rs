@@ -1,6 +1,7 @@
 //! Migration 039: the Master view's NPC classification and seen marks (CAMP-14, ROAD-8). The
 //! classification is added without touching a stored sheet or its history, and a database
-//! rewound below 039 is not migrated twice.
+//! rewound below 039 is not migrated twice. Migration 040 adds the covering index the Master's
+//! home reads edit times through (ROAD-8).
 use super::{MIGRATIONS, SCHEMA_VERSION, Store, register_auth_clock};
 use rusqlite::Connection;
 use std::sync::Arc;
@@ -189,6 +190,75 @@ fn a_database_rewound_below_039_is_not_migrated_twice() {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 assert_eq!(kept, (1, 1), "the classification and the mark survive at {version}");
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// The index columns, in order, of the 040 index; empty when it does not exist.
+fn history_time_index(db: &Connection) -> Vec<String> {
+    db.prepare("SELECT name FROM pragma_index_info('private_sheet_history_time') ORDER BY seqno")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+const HISTORY_TIME: [&str; 3] = ["sheet_id", "revision", "occurred_at"];
+
+#[test]
+fn a_fresh_database_has_the_040_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("db")).unwrap();
+    store
+        .upload_storage(|db| {
+            assert_eq!(history_time_index(db), HISTORY_TIME);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Upgrade from 039: the index is built over the existing history rows, which stay as they are.
+#[test]
+fn schema_39_upgrades_to_the_history_time_index_with_data_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    drop(Store::open(&path).unwrap());
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP INDEX private_sheet_history_time")
+        .unwrap();
+    plant_marked_npc_and_rewind(&path, 39);
+    let store = Store::open(&path).unwrap();
+    store
+        .upload_storage(|db| {
+            assert_eq!(history_time_index(db), HISTORY_TIME);
+            let kept: (i64, i64) = db.query_row(
+                "SELECT h.occurred_at,m.seen_revision FROM private_sheet_history h JOIN master_sheet_seen m ON m.sheet_id=h.sheet_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(kept, (100, 1));
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A database rewound below 040 with the index present migrates without error.
+#[test]
+fn a_database_rewound_below_040_migrates_without_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    drop(Store::open(&path).unwrap());
+    for version in [39, 36] {
+        plant_marked_npc_and_rewind(&path, version);
+        let store = Store::open(&path).unwrap();
+        store
+            .upload_storage(|db| {
+                assert_eq!(history_time_index(db), HISTORY_TIME, "at {version}");
+                assert_039(db);
                 Ok(())
             })
             .unwrap();

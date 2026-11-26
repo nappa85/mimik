@@ -1,7 +1,7 @@
 //! Master view, slice (a) (CAMP-14, ROAD-8): NPC classification at creation, the Master
 //! workspace, the click-only seen acknowledgement and the own-save rules of owner decision 6.
 use super::cell_tests::{new_row, row_action};
-use super::formula_tests::{Setup, setup};
+use super::formula_tests::Setup;
 use super::notes_tests::{assist, create_path, form, history_len, pair, row, saved};
 use super::{admitted, router_request, sheet};
 use axum::http::StatusCode;
@@ -19,8 +19,13 @@ fn definition() -> Value {
 /// Campaign 1 of the assist fixture: account 2 (`auth[1]`) is its creator and Master A,
 /// account 3 (`auth[2]`) a player, account 4 (`auth[3]`) a second Master B, account 5
 /// (`auth[4]`) an outsider and account 1 (`auth[0]`) the Owner.
-async fn world() -> Setup {
-    let setup = setup(&definition()).await;
+pub(super) async fn world() -> Setup {
+    world_with_clock().await.0
+}
+
+/// [`world`] and the auth clock.
+pub(super) async fn world_with_clock() -> (Setup, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    let (setup, clock) = super::formula_tests::setup_with_clock(&definition()).await;
     for (who, target) in [(2, 3), (3, 4)] {
         setup
             .store
@@ -38,23 +43,33 @@ async fn world() -> Setup {
         .change_role(setup.auth[1].clone(), setup.campaign, 4, 1, true)
         .await
         .unwrap();
-    setup
+    (setup, clock)
 }
 
-async fn send(setup: &Setup, who: usize, path: &str, form: Option<Pairs>) -> (StatusCode, String) {
+pub(super) async fn send(
+    setup: &Setup,
+    who: usize,
+    path: &str,
+    form: Option<Pairs>,
+) -> (StatusCode, String) {
     let response = router_request(&setup.app, &setup.auth[who], path, form).await;
     let status = response.status();
     (status, super::formula_tests::body(response).await)
 }
 
-async fn get(setup: &Setup, who: usize, path: &str) -> String {
+pub(super) async fn get(setup: &Setup, who: usize, path: &str) -> String {
     let (status, html) = send(setup, who, path, None).await;
     assert_eq!(status, StatusCode::OK, "{path}: {html}");
     html
 }
 
 /// The `Location` of a redirect answer.
-async fn location(setup: &Setup, who: usize, path: &str, form: Pairs) -> (StatusCode, String) {
+pub(super) async fn location(
+    setup: &Setup,
+    who: usize,
+    path: &str,
+    form: Pairs,
+) -> (StatusCode, String) {
     let response = router_request(&setup.app, &setup.auth[who], path, Some(form)).await;
     let location = response
         .headers()
@@ -65,12 +80,12 @@ async fn location(setup: &Setup, who: usize, path: &str, form: Pairs) -> (Status
     (response.status(), location)
 }
 
-fn seen_form(revision: &str) -> Pairs {
+pub(super) fn seen_form(revision: &str) -> Pairs {
     vec![pair("csrf", &"a".repeat(64)), pair("revision", revision)]
 }
 
 /// `who` creates a sheet (classified when `npc`) through the router; returns the status.
-async fn create_as(setup: &Setup, who: usize, npc: bool) -> StatusCode {
+pub(super) async fn create_as(setup: &Setup, who: usize, npc: bool) -> StatusCode {
     let path = format!("{}{}", create_path(setup), if npc { "&npc=1" } else { "" });
     send(setup, who, &path, Some(form(0, &[], &[row("", "1")])))
         .await
@@ -91,7 +106,7 @@ async fn scalar(setup: &Setup, sql: &'static str, params: Vec<i64>) -> Option<i6
         .unwrap()
 }
 
-async fn seen_of(setup: &Setup, master: i64, sheet: i64) -> Option<i64> {
+pub(super) async fn seen_of(setup: &Setup, master: i64, sheet: i64) -> Option<i64> {
     scalar(
         setup,
         "SELECT seen_revision FROM master_sheet_seen WHERE master_id=?1 AND sheet_id=?2",
@@ -129,7 +144,7 @@ async fn sql_as(setup: &Setup, who: usize, sql: &'static str) -> Result<(), Stri
         .unwrap()
 }
 
-async fn lock() -> (
+pub(super) async fn lock() -> (
     tokio::sync::OwnedMutexGuard<()>,
     tokio::sync::MutexGuard<'static, ()>,
 ) {
@@ -182,7 +197,7 @@ fn section_text(html: &str, section: &str) -> String {
 }
 
 /// Sheet 1 (revision 1) created by Master A, then edited by A (HP −15, revision 2).
-async fn two_revisions(setup: &Setup) {
+pub(super) async fn two_revisions(setup: &Setup) {
     assert_eq!(create_as(setup, 1, false).await, StatusCode::SEE_OTHER);
     let (status, html) = send(
         setup,

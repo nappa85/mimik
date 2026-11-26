@@ -157,13 +157,17 @@ Routes: `GET /campaigns/{id}/master`, `GET /campaigns/{id}/master/snapshot`,
   status: 403, never a player sheet), and by the `private_sheets_npc_insert` trigger. The
   `private_sheets_npc_immutable` trigger refuses any change. The flag grants no access:
   custody, current-Master reads and departure freezes are as for any sheet, and a demoted
-  Master's NPC stays in their custody. It is read only by the workspace projection and never
-  appears in the snapshot, history, player lists, sheet pages or JSON answers.
+  Master's NPC stays in their custody. It is read only by two Master-only readers, the workspace
+  projection and the home's block of latest edited sheets, and never appears in the
+  snapshot, history, player lists, sheet pages or JSON answers.
 - **Seen marks** (`master_sheet_seen`, one row per Master and sheet, the newest acknowledged
   revision; the composite foreign key keeps it on an existing history revision; triggers
   require the request's own account to be a current Master of the sheet's campaign, refuse
   lowering, moving and deleting). Rows survive demotion; reads and writes need current Master
-  status. Marks are independent per Master and never shown to another.
+  status. Marks are independent per Master and never shown to another. The Master's home
+  (`auth-and-sessions.md`, Home page) lists the latest edited sheets of the campaigns the account
+  currently runs, 3 per campaign and 10 in all, each with this Master's badge (every recent
+  edit, not only unacknowledged ones); the marks are read only for current Masters.
 - **Acknowledging an open:** a plain current read (status 200, no history) of a current Master
   shows a one-click form carrying the rendered revision, or "Opened (revision N)" when the mark
   already reaches it. The POST (CSRF, session, exactly `csrf` and `revision`) refuses

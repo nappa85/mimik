@@ -24,7 +24,10 @@ key or internet access is needed; the assistant and its model downloads are opti
   everything also works as plain pages (Reload, paging, Open links and a one-click "mark
   opened") without JavaScript. Verified: Chromium on loopback against the release binary at
   1280 x 720 and 390 x 844, JavaScript on and off, with two Masters, a player and an
-  outsider (CI `browser-smoke`, `tools/master_browser.py`). The event stream and the snapshot probe
+  outsider (CI `browser-smoke`, `tools/master_browser.py`). A Master's home also lists the
+  latest edited sheets of the campaigns they run (name, campaign, custodian, badge; 3 per
+  campaign, 10 in all), browser-checked in the same run with JavaScript on and off. The
+  event stream and the snapshot probe
   are also verified, from the unpacked release in isolated container networks with separate
   clients (CI `lan-smoke`, `tools/lan_stream.py`), on three transports: direct LAN HTTP, loopback
   (run inside the server's container) and an nginx HTTPS reverse proxy on the configured root
