@@ -228,7 +228,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 - Verify the local manuals' editions and errata, and identify the official blank-sheet assets.
 - Optional OCR reviewer: Mistral Large through `api.mistral.ai` with the owner's key
   (`~/.config/mimik/mistral.key`; `docs/results.md`, 2026-11-26). Its IT report
-  (`api-review-c2400…`) is not imported yet (owner's call). Follow-up: leave embedded image data
+  (`api-review-c2400…`) is imported as report 3 (33 corrections, 12 notes). Follow-up: leave embedded image data
   out of the reviewer's block payload (most of the prompt on image pages).
 - Harness v3: re-review the pre-registered scoring variants S1–S4/lenient, the selection
   script and the manifest gate, then build them (`docs/evaluation-tooling.md`). H3 live smoke
