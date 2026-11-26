@@ -13,6 +13,19 @@ from source_bundle import digest, page_blocks, parse_pages, review_units, verify
 
 
 class SourceReviewTests(unittest.TestCase):
+    def test_reply_text_joins_text_chunks_and_drops_reasoning(self):
+        # Reasoning models (Mistral Large) return content as typed chunks.
+        chunks = [
+            {"type": "thinking", "thinking": [{"type": "text", "text": "not the answer"}]},
+            {"type": "text", "text": '{"summary": '},
+            {"type": "text", "text": '"ok"}'},
+        ]
+        self.assertEqual(review_extraction.reply_text(chunks), '{"summary": "ok"}')
+        self.assertEqual(review_extraction.reply_text('{"a": 1}'), '{"a": 1}')
+        for bad in (None, 3, [{"type": "thinking", "thinking": []}]):
+            with self.assertRaises(ValueError):
+                review_extraction.reply_text(bad)
+
     def test_model_origin_accepts_exact_importer_byte_boundary(self):
         for name in ("x" * 91, "é" * 45 + "x"):
             review_extraction.validate_report_origin("reviewer", name)

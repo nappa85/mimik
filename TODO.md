@@ -24,9 +24,9 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   22–39 extracted with Marker and forced OCR (`docs/results.md`, extractor screen), bundle
   `data/extractions/review-ready-dbb400754fb94e87af95cce347903ea8` with two suggestion reports
   (Claude's visual review, 64 suggestions; the text-layer cross-check) and a preview of the
-  corrected text (`proposed-reading.md` there). Next: the owner imports it into the live
-  database (`mimik import-source`, then `mimik import-suggestions --source ID --report FILE` for
-  both reports) and reviews each page in `/admin/materials` (the review screen shows the
+  corrected text (`proposed-reading.md` there). Imported into the live database on 2026-11-26
+  (source 1, both reports; backup of the previous database in `/media/data/mimik/db-backups/`).
+  Next: the owner reviews each page in `/admin/materials` (the review screen shows the
   suggestions), then the prompt tests use it. The page 29 footnote on armour grades is in
   no unit (L-SRC-1).
 
@@ -225,9 +225,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   `docs/derived-formulas-plan.md`. The fixture is hash-locked: fix it only in a reviewed
   content revision (new `FIXTURE_SHA256` in `src/definitions/formula/tests.rs` and
   `tools/test_formula_cli.py`).
-- Re-import the MÖRK BORG IT sample into the live database (0 sources at the 2026-10-15
-  check; deferred by the user). Verify the local manuals' editions and errata, and identify
-  the official blank-sheet assets.
+- Verify the local manuals' editions and errata, and identify the official blank-sheet assets.
 - Optional OCR reviewer: choose the owner's API endpoint and model and verify it with real
   responses.
 - Harness v3: re-review the pre-registered scoring variants S1–S4/lenient, the selection

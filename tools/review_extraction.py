@@ -195,6 +195,24 @@ def resolve_api_key(env_file):
     raise ValueError("Set MIMIK_REVIEW_API_KEY or OPENAI_API_KEY in the environment or .env.")
 
 
+def reply_text(content):
+    """The answer text of a chat reply: a string, or the `text` chunks of a typed chunk list
+    (reasoning models put their reasoning in separate `thinking` chunks, never used)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            chunk["text"]
+            for chunk in content
+            if isinstance(chunk, dict)
+            and chunk.get("type") == "text"
+            and isinstance(chunk.get("text"), str)
+        ]
+        if parts:
+            return "".join(parts)
+    raise ValueError("The reply has no text content.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
@@ -308,7 +326,7 @@ def main():
             with urllib.request.build_opener(NoRedirect).open(request, timeout=180) as response:
                 result = json.load(response)
             write_json(output / f"page-{index}-response.json", result)
-            findings = json.loads(result["choices"][0]["message"]["content"])
+            findings = json.loads(reply_text(result["choices"][0]["message"]["content"]))
             record.update(
                 {
                     "state": "model_suggestions_not_verified",
