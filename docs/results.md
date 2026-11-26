@@ -5,6 +5,27 @@ Product-relevant measurements come first, then model and benchmark results. Raw 
 logs, reports) stays local under `target/` and is not in the repository. The tooling is
 described in [evaluation-tooling.md](evaluation-tooling.md).
 
+## Mistral as the optional extraction reviewer (2026-11-26)
+
+`tools/review_extraction.py` on the MÖRK BORG IT bundle (`review-ready-dbb4…`, PDF pages
+22-39) against `https://api.mistral.ai/v1/chat/completions` with the owner's key, one run per
+model; compared with the earlier visual review of the same pages (40 corrections, 24 notes) by
+the block IDs the corrections target. Suggestions only; none was checked by the owner, so
+precision is not measured.
+
+- `mistral-medium-latest`: 14 of 18 pages; the other 4 exceeded its 262k-token context. 142
+  issues, 80 corrected blocks, 26 of the 40 earlier corrected blocks among them; many generic
+  (spacing, italics, page numbers).
+- `mistral-large-latest` (reasoning; replies come as `thinking` and `text` chunks, now read):
+  18 of 18 pages, 45 issues, 36 corrected blocks, 17 of the 40 among them, mostly specific
+  OCR misreadings (for example "monso" for "morso", "Spada Conta" for "Corta", "Anco" for
+  "Arco").
+- Prompt size is dominated by embedded image data in `Picture` blocks: image-heavy pages send
+  115k-380k tokens, text pages 3k-12k.
+
+Conclusion: Mistral Large is the reviewer to use; Medium only after the block payload drops the
+embedded image data. Neither replaces the owner's page review.
+
 ## htmx SSE extension under the sheet policy (DEP-33, 2026-11-25)
 
 `tools/htmx_sse_probe.py` in the browser container (Chromium of Playwright 1.56): a throwaway
