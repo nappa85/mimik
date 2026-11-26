@@ -97,7 +97,14 @@ pub(super) struct Setup {
 }
 
 pub(super) async fn setup(definition: &Value) -> Setup {
-    let (dir, store, auth, _clock) = fixture().await;
+    setup_with_clock(definition).await.0
+}
+
+/// [`setup`] and the auth clock every history row is stamped with.
+pub(super) async fn setup_with_clock(
+    definition: &Value,
+) -> (Setup, std::sync::Arc<std::sync::atomic::AtomicI64>) {
+    let (dir, store, auth, clock) = fixture().await;
     let version = publish(&store, definition).await;
     let campaign = store
         .create_campaign(
@@ -109,14 +116,15 @@ pub(super) async fn setup(definition: &Value) -> Setup {
         .await
         .unwrap();
     let app = crate::auth::app(store.clone()).await.unwrap();
-    Setup {
+    let setup = Setup {
         dir,
         store,
         auth,
         app,
         campaign,
         version,
-    }
+    };
+    (setup, clock)
 }
 
 pub(super) fn form(revision: i64, vitality: &str, luck: Option<&str>) -> Vec<(String, String)> {

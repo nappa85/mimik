@@ -6,6 +6,8 @@ mod assistant_downloads_view;
 mod assistant_live;
 mod errors;
 mod home;
+#[cfg(test)]
+pub(crate) use home::EDITED_SHEETS;
 mod materials;
 pub(crate) mod nav;
 mod persistence;

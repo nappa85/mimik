@@ -14,7 +14,7 @@ fn csrf() -> String {
     CSRF.repeat(64)
 }
 
-async fn home(app: &axum::Router, auth: &RequestAuth, owner: bool) -> String {
+pub(super) async fn home(app: &axum::Router, auth: &RequestAuth, owner: bool) -> String {
     let response = router_request(app, auth, "/", None).await;
     assert_eq!(response.status(), StatusCode::OK);
     let html = body(response).await;
@@ -35,7 +35,7 @@ async fn mark(
     mark_at(app, auth, token, seen, NOW).await
 }
 
-async fn mark_at(
+pub(super) async fn mark_at(
     app: &axum::Router,
     auth: &RequestAuth,
     token: &str,
@@ -72,18 +72,40 @@ async fn stored_mark(store: &Store, account: i64) -> Option<i64> {
 
 /// Tables read by the statements `work` prepares and runs (a SQLite authorizer on the store's
 /// connection).
-async fn tables_read<F, Fut>(store: &Store, work: F) -> Vec<String>
+pub(super) async fn tables_read<F, Fut>(store: &Store, work: F) -> Vec<String>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut tables: Vec<String> = columns_read(store, work)
+        .await
+        .into_iter()
+        .map(|(table, _)| table)
+        .collect();
+    tables.dedup();
+    tables
+}
+
+/// The `(table, column)` pairs read by the statements `work` prepares and runs, sorted and
+/// without duplicates.
+pub(super) async fn columns_read<F, Fut>(store: &Store, work: F) -> Vec<(String, String)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let seen = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
     let sink = seen.clone();
     store
         .run(move |db| {
             db.authorizer(Some(move |ctx: rusqlite::hooks::AuthContext<'_>| {
-                if let rusqlite::hooks::AuthAction::Read { table_name, .. } = ctx.action {
-                    sink.lock().unwrap().push(table_name.to_owned());
+                if let rusqlite::hooks::AuthAction::Read {
+                    table_name,
+                    column_name,
+                } = ctx.action
+                {
+                    sink.lock()
+                        .unwrap()
+                        .push((table_name.to_owned(), column_name.to_owned()));
                 }
                 rusqlite::hooks::Authorization::Allow
             }))
@@ -103,10 +125,10 @@ where
         })
         .await
         .unwrap();
-    let mut tables = seen.lock().unwrap().clone();
-    tables.sort();
-    tables.dedup();
-    tables
+    let mut columns = seen.lock().unwrap().clone();
+    columns.sort();
+    columns.dedup();
+    columns
 }
 
 const OWNER_TABLES: [&str; 9] = [
@@ -120,12 +142,14 @@ const OWNER_TABLES: [&str; 9] = [
     "account_events",
     "assistant_downloads",
 ];
-const CAMPAIGN_TABLES: [&str; 5] = [
+const CAMPAIGN_TABLES: [&str; 7] = [
     "campaigns",
     "campaign_members",
     "campaign_requests",
     "campaign_events",
     "private_sheets",
+    "private_sheet_history",
+    "master_sheet_seen",
 ];
 
 async fn seed_source(store: &Store, id: i64, title: &str, complete: &[bool]) {
@@ -412,7 +436,7 @@ async fn seed_rulesets(store: &Store) {
         .unwrap();
 }
 
-fn at(clock: &Arc<AtomicI64>, time: i64) {
+pub(super) fn at(clock: &Arc<AtomicI64>, time: i64) {
     clock.store(time, Ordering::SeqCst);
 }
 

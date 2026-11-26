@@ -44,6 +44,8 @@ mod entry_match_tests;
 mod entry_save_tests;
 #[path = "formula_tests.rs"]
 mod formula_tests;
+#[path = "home_sheets_tests.rs"]
+mod home_sheets_tests;
 #[path = "home_tests.rs"]
 mod home_tests;
 #[path = "interpret_route_tests.rs"]

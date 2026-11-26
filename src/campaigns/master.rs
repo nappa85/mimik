@@ -1,10 +1,45 @@
 //! The Master workspace projection (CAMP-14, ROAD-8): every sheet of a campaign for a current
 //! Master, in two sections (player sheets and NPC sheets) with this Master's own acknowledged
-//! revision. Only this projection reads `private_sheets.is_npc`; no player-visible query does.
-//! The HTML page and the JSON snapshot share the one query below.
+//! revision. Two Master-only readers read `private_sheets.is_npc`: this projection and the
+//! home block of the latest edited sheets; no player-visible query does. The HTML page and the
+//! JSON snapshot share the one query below. The guarded sheet name read lives here too, shared
+//! by the workspace and the home block.
 use super::{Campaign, Listing, campaign, role};
 use crate::{AppError, Store, auth::RequestAuth};
-use rusqlite::params;
+use rusqlite::{Connection, params};
+use std::collections::HashMap;
+
+/// The sheet name as the Master views read it from `private_sheets s`: only from a snapshot of
+/// at most 1 MiB and a name of at most 100 characters, otherwise `NULL`.
+const NAME_SQL: &str = "CASE WHEN length(CAST(s.snapshot AS BLOB))<=1048576 THEN CASE WHEN length(json_extract(s.snapshot,'$.name'))<=100 THEN json_extract(s.snapshot,'$.name') END END";
+const NAME_UNAVAILABLE: &str = "(name unavailable)";
+
+/// The names of the sheets `ids`, read with the guards above; a sheet that is missing or fails a
+/// guard reads "(name unavailable)". Callers pass only the rows they show.
+pub(crate) fn sheet_names(db: &Connection, ids: &[i64]) -> Result<HashMap<i64, String>, AppError> {
+    let ids = serde_json::to_string(ids)?;
+    let mut query = db.prepare(&format!(
+        "SELECT j.value,(SELECT {NAME_SQL} FROM private_sheets s WHERE s.id=j.value) FROM json_each(?1) j"
+    ))?;
+    let rows = query.query_map([ids], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?
+                .unwrap_or_else(|| NAME_UNAVAILABLE.into()),
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The textual badge for a Master's acknowledged revision against the live one: never colour
+/// alone.
+pub(crate) fn badge_of(seen: Option<i64>, revision: i64) -> &'static str {
+    match seen {
+        None => "Not opened",
+        Some(seen) if seen < revision => "Changed",
+        Some(_) => "Opened",
+    }
+}
 
 /// The two keyset cursors of the workspace page, nonnegative like [`super::domain::DetailPage`].
 #[derive(Clone, Copy, Default, serde::Deserialize)]
@@ -39,11 +74,7 @@ pub(crate) struct MasterSheet {
 impl MasterSheet {
     /// The textual badge: never colour alone.
     pub(crate) fn badge(&self) -> &'static str {
-        match self.seen {
-            None => "Not opened",
-            Some(seen) if seen < self.revision => "Changed",
-            Some(_) => "Opened",
-        }
+        badge_of(self.seen, self.revision)
     }
 }
 
@@ -86,13 +117,13 @@ pub(super) fn read_workspace(
         return Err(AppError::NotFound);
     }
     let section = |npc: bool, after: i64| -> Result<Vec<MasterSheet>, AppError> {
-        let mut q = tx.prepare("SELECT s.id,CASE WHEN length(CAST(s.snapshot AS BLOB))<=1048576 THEN CASE WHEN length(json_extract(s.snapshot,'$.name'))<=100 THEN json_extract(s.snapshot,'$.name') END END,a.display_name,s.revision,CASE WHEN length(s.state)<=6 THEN s.state END,m.seen_revision FROM private_sheets s JOIN accounts a ON a.id=s.custodian_id LEFT JOIN master_sheet_seen m ON m.master_id=?1 AND m.sheet_id=s.id WHERE s.campaign_id=?2 AND s.is_npc=?3 AND s.id>?4 ORDER BY s.id LIMIT 51")?;
+        let mut q = tx.prepare(&format!("SELECT s.id,{NAME_SQL},a.display_name,s.revision,CASE WHEN length(s.state)<=6 THEN s.state END,m.seen_revision FROM private_sheets s JOIN accounts a ON a.id=s.custodian_id LEFT JOIN master_sheet_seen m ON m.master_id=?1 AND m.sheet_id=s.id WHERE s.campaign_id=?2 AND s.is_npc=?3 AND s.id>?4 ORDER BY s.id LIMIT 51"))?;
         let rows = q.query_map(params![auth.account_id(), id, npc, after], |r| {
             Ok(MasterSheet {
                 id: r.get(0)?,
                 name: r
                     .get::<_, Option<String>>(1)?
-                    .unwrap_or_else(|| "(name unavailable)".into()),
+                    .unwrap_or_else(|| NAME_UNAVAILABLE.into()),
                 custodian: r.get(2)?,
                 revision: r.get(3)?,
                 state: r
