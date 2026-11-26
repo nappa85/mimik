@@ -72,13 +72,11 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
   table-shapes gate, 2026-11-12, 3 of 3 alone): find their timing dependence. Meanwhile the prompt tests can use MÖRK BORG Bare Bones EN
   (`~/temp/`, tagged, clean text layer) through the prototype tools.
 
-- **Worker live tests for the Words operation (table shapes, merged 2026-11-12):** the ignored
-  `sources::worker::live_tests` (words in unit polygons, rotated page, offset CropBox, UserUnit 2,
-  the corpus words case) have not run: containers cannot create the sandbox. Owner to choose: a
-  relaxed container (seccomp/apparmor unconfined, SYS_ADMIN, no network) or a host run from the
-  main checkout. The real worker did run once on the host (2026-11-12): the owner's re-import of
-  the IT source stored word boxes for all 18 pages. Still owed: the browser check of the table
-  form and page proposals.
+- **Worker live tests:** all 33 ignored `sources::worker::live_tests` (confinement, hostile corpus,
+  the Words cases, large documents) passed on the host from the main checkout on 2026-11-26
+  (release build, `MIMIK_LIVE_RUNNER=target/release/mimik`, `MIMIK_LIVE_LARGE_DIR` on the slow disk;
+  the debug build times out on `shading-only`). Still owed: the browser check of the table form
+  and page proposals.
 
 - **Resume after a reboot:** build/test agent worktrees with
   `WT=<worktree> [CPUS=n] sh /home/marco/Progetti/mimik/target/agent-tools/ci.sh <cmd>` (image
@@ -151,9 +149,7 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Pending user questions
 
-- When that work starts: print/export priorities, acceptable latency,
-  first-release features, games after the POC; the language model (PROD-24: one language per
-  table chosen by the owner, or per user).
+- None (2026-11-26 answers recorded as PROD-24 and PROD-26 to PROD-29).
 
 ## Other next actions
 
