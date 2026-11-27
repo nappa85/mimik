@@ -106,13 +106,13 @@ Outer elapsed-deadline controller for GGUF transfers.
 ## External reviewers and coding agents: the `external-agents` skill
 
 Implements the reviewer and implementer setup defined in `AGENTS.md`, from a local clone of
-https://github.com/nappa85/external-agents pinned at commit `2cd97c0` on master (tag `v0.1.5` plus the seccomp descriptor fix; Mistral Vibe backend)
-(`/media/data/mimik/external-agents/src`, linked as `~/.claude/skills/external-agents`). Its
+https://github.com/nappa85/external-agents pinned at tag `v0.1.7` (commit `ea455bc`; Mistral Vibe backend)
+(`/media/data/mimik/external-agents-git`, its `skills/external-agents` linked as `~/.claude/skills/external-agents`). Its
 own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
 
 - **Old branches:** a branch made before TOOL-1 still carries `tools/external_review.py`, whose
   free-model lock (`~/.cache/mimik-review/free.lock`) the skill does not share: do not run it.
-- **Before use:** `git -C /media/data/mimik/external-agents/src rev-parse HEAD` must print the
+- **Before use:** `git -C /media/data/mimik/external-agents-git rev-parse HEAD` must print the
   pinned commit; a new upstream commit is adopted only after reading its diff.
 - **Reviews:** first `python3 -I tools/check_agent_worktree.py --main . WORKTREE --review`, then
   `review --reviewers "opencode:openai/gpt-6.1-sol" --prompt-file P --output-dir D --base master
