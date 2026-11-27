@@ -106,7 +106,7 @@ Outer elapsed-deadline controller for GGUF transfers.
 ## External reviewers and coding agents: the `external-agents` skill
 
 Implements the reviewer and implementer setup defined in `AGENTS.md`, from a local clone of
-https://github.com/nappa85/external-agents pinned at tag `v0.1.7` (commit `ea455bc`; Mistral Vibe backend)
+https://github.com/nappa85/external-agents pinned at tag `v0.1.8` (commit `33d3ee8`; Mistral Vibe backend)
 (`/media/data/mimik/external-agents-git`, its `skills/external-agents` linked as `~/.claude/skills/external-agents`). Its
 own `docs/architecture.md` and `docs/cli.md` are the reference; what Mimik uses:
 
