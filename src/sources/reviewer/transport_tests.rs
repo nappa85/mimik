@@ -12,7 +12,6 @@ use futures_util::StreamExt;
 use rig_core::http_client::HttpClientExt;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
@@ -67,8 +66,7 @@ fn reviewer(hub: &FakeHub) -> Reviewer {
 }
 
 fn image() -> Vec<u8> {
-    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reviewer/page.png"))
-        .unwrap()
+    super::TEST_PAGE_PNG.to_vec()
 }
 
 #[tokio::test]

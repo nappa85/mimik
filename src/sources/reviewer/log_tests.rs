@@ -157,8 +157,7 @@ impl tracing::Subscriber for Capture {
 }
 
 fn image() -> Vec<u8> {
-    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reviewer/page.png"))
-        .unwrap()
+    super::TEST_PAGE_PNG.to_vec()
 }
 
 /// One `review_page` call under a TRACE subscriber: no 8-character substring of the key in any

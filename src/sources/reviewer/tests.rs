@@ -23,7 +23,7 @@ fn fixtures() -> PathBuf {
 }
 
 fn tiny_png() -> Vec<u8> {
-    std::fs::read(fixtures().join("page.png")).unwrap()
+    super::TEST_PAGE_PNG.to_vec()
 }
 
 fn image_data_url() -> String {
