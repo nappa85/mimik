@@ -171,6 +171,13 @@ async fn every_page_renders_the_menu_of_its_role_and_every_entry_answers() {
         page(
             owner,
             true,
+            "/admin/reviewer",
+            Some("/admin/reviewer"),
+            false,
+        ),
+        page(
+            owner,
+            true,
             "/admin/materials",
             Some("/admin/materials"),
             true,

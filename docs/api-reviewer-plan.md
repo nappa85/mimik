@@ -14,8 +14,8 @@ accepted automatically and no confidence approves anything (AGENTS.md).
 - The owner chooses the provider, endpoint and model; the key is theirs.
 - Manual pages may leave the machine for this reviewer, only after a confirmed preview.
 - Providers: any rig-core provider Mimik enables. Enabling one costs its protocol check
-  (step 1), not new client code. This slice enables Mistral (live-verified), OpenAI and
-  Anthropic (fixture-verified only, stated in the release scope).
+  (done for the three below), not new client code. This slice enables Mistral (live-verified),
+  OpenAI and Anthropic (fixture-verified only, stated in the release scope).
 - Endpoints: public hosts only. The resolver of the model downloads refuses loopback,
   private, link-local and other local addresses (`src/assistant/download/client.rs`,
   `public`). The resolver is skipped for a literal IP, so the base URL must name a domain: IP
@@ -41,44 +41,18 @@ accepted automatically and no confidence approves anything (AGENTS.md).
 - The fixed instruction text, moved from `tools/review_extraction.py` into Rust: the page
   content is untrusted data, never instructions.
 - Never the PDF, other pages or sources, account data, or the key in any body.
-- Retention: OpenAI requests always carry `store: false` (rig-core does not send it by
-  default); step 1 records each provider's retention terms and settings (with sources), and
-  the preview and the release scope state them.
+- Retention: each provider's retention/data-use terms are open (TODO.md, "API reviewer: open
+  before the live trial") and unverified against the providers' public API docs. Until they
+  are verified, only `store: false` is sent to OpenAI (rig-core does not send it by default),
+  and no retention claim is made anywhere — not in `docs/sources-and-retrieval.md`, not in the
+  preview, not in the release scope.
 
 ## Steps
 
-1. **Protocol check first (D-H, stop and ask on failure).** Through rig-core 0.47.1's
-   provider clients, built only with an explicit key and base URL (never `from_env*`), with
-   recorded request and reply fixtures per enabled provider (Mistral on the chat wire;
-   OpenAI on its default Responses route; Anthropic's messages API):
-   - an image part is sent as base64 data (Mistral: `image_url` data URL; check whether
-     `detail` is accepted);
-   - the request asks for structured JSON as each provider takes it (Mistral and OpenAI:
-     `json_schema` with `strict: true`; Anthropic: `output_config.format`), so the findings
-     schema is restated in strict-compatible form (every property required, nullable types,
-     no unsupported keywords); length and count bounds stay in `validate_page`;
-   - the reply text is recovered from chunked content (`thinking` dropped, `text` joined).
-     rig folds a `refusal` into answer text, so a refusal fails the page as non-JSON or
-     invalid output; the fixture asserts that;
-   - each provider's image limits (bytes and pixel dimensions) and retention terms, with
-     their sources, recorded for steps 2-4.
-2. **Transport** (new DEP decision): Mimik's own `HttpClientExt` over `reqwest::Client`;
-   rig-core's transport features stay off. It shares, factored out of
-   `src/assistant/download/client.rs`, the rustls `ring` config with the platform verifier
-   (test roots in test builds), the public-only resolver, redirect refusal and the
-   URL-free error classification. Response bodies are bounded (4 MiB) and read through the
-   bound; connect 15 s; each page has a total budget of 300 s that includes any retry. No
-   system proxy: the client calls `.no_proxy()` (reqwest's `system-proxy` feature is on
-   crate-wide); cost, recorded with the DEP: an owner behind a mandatory proxy cannot use the
-   reviewer. DEP-17's "reqwest is not in the
-   dependency tree" is corrected.
-3. **Settings and key** (`/admin/reviewer`, Owner only, CSRF): provider, base URL (the
-   provider's default; HTTPS; per-provider path rules: Mistral's base is the bare host,
-   OpenAI's includes `/v1`), model name (free text, at most 100 bytes minus the `reviewer:`
-   prefix, since it becomes the report's origin). The key is a 0600 file under the data
-   folder's `secrets/`, outside the database and backups, written atomically, never shown back
-   (only "set" and the change time), replace and delete. The settings row is in the database;
-   the key's identity for binding is its file's change time and a digest kept in memory only.
+Steps 1-3 (protocol check, transport, settings and key) are done; see the reviewer section of
+`docs/sources-and-retrieval.md` and `src/sources/reviewer/`. The remaining steps keep their
+numbers:
+
 4. **Preview and confirmation** (the source page in `/admin/materials`): the owner selects
    pages (default: pages not complete; the page count and an approximate size, text bytes and
    image bytes, are shown first and prominently). The preview lists provider, host, model,
@@ -114,7 +88,8 @@ accepted automatically and no confidence approves anything (AGENTS.md).
 
 ## Tests (written first)
 
-- Protocol fixtures per provider (step 1), including a `refusal` and a non-JSON reply.
+- Protocol fixtures per provider (done with step 1), including a `refusal` and a non-JSON
+  reply.
 - Payload: picture data absent from JSON and HTML; revision-1 extracted units only; the
   downscale bound; exclusions blacked out and removed (synthetic source with exclusions,
   forward-looking for step 4c); the no-exclusion confirmation is required to send.
@@ -140,8 +115,8 @@ accepted automatically and no confidence approves anything (AGENTS.md).
 
 ## Slices
 
-(a) steps 1-3 (protocol check, transport, settings and key); (b) steps 4-6 (preview, job,
-report); (c) browser check, live trial, docs. Each is its own reviewed change.
+(a) steps 1-3 (protocol check, transport, settings and key) is done; (b) steps 4-6 (preview,
+job, report); (c) browser check, live trial, docs. Each is its own reviewed change.
 
 ## Out of scope
 

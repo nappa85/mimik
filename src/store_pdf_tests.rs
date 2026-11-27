@@ -51,7 +51,7 @@ fn migration_037_drops_the_pdf_column_and_keeps_rows_and_other_columns() {
                 db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
                 SCHEMA_VERSION
             );
-            assert_eq!(SCHEMA_VERSION, 40);
+            assert_eq!(SCHEMA_VERSION, 41);
             let after = columns(db);
             let expected: Vec<String> = before.iter().filter(|c| *c != "pdf").cloned().collect();
             assert_eq!(after, expected);

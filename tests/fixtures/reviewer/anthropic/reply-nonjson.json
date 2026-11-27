@@ -1,0 +1,17 @@
+{
+  "id": "msg_fixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "reviewer-fixture-model",
+  "content": [
+    {
+      "type": "text",
+      "text": "Here is the review in prose: the table on page 22 looks wrong, but I will not return JSON."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 15
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "id": "msg_fixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "reviewer-fixture-model",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Comparing the page image with the extracted units.",
+      "signature": "fixture"
+    },
+    {
+      "type": "text",
+      "text": "{\"summary\":\"Page 22: one table cell mis-extracted.\",\"issues\":[{\"block_id\":\"u-2\",\"kind\":\"table_cell\",\"description\":\"The damage column reads 6 instead of 1d6.\",\"suggested_correction\":\"1d6\"}],\"needs_visual_review\":false}"
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 20
+  }
+}

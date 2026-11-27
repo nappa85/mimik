@@ -1,0 +1,12 @@
+{
+  "id": "msg_fixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "reviewer-fixture-model",
+  "content": [],
+  "stop_reason": "refusal",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 0
+  }
+}

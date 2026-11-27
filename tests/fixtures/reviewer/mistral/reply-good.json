@@ -1,0 +1,30 @@
+{
+  "id": "chatcmpl-fixture",
+  "object": "chat.completion",
+  "created": 0,
+  "model": "reviewer-fixture-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"summary\":\"Page 22: one table cell mis-extracted.\",\"issues\":[{\"block_id\":\"u-2\",\"kind\":\"table_cell\",\"descrip"
+          },
+          {
+            "type": "text",
+            "text": "tion\":\"The damage column reads 6 instead of 1d6.\",\"suggested_correction\":\"1d6\"}],\"needs_visual_review\":false}"
+          }
+        ]
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 10,
+    "completion_tokens": 20,
+    "total_tokens": 30
+  }
+}

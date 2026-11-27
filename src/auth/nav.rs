@@ -15,6 +15,7 @@ pub(crate) enum Section {
     Rulesets,
     Accounts,
     Assistant,
+    Reviewer,
 }
 
 pub(crate) struct Item {
@@ -116,6 +117,7 @@ impl Nav {
                 items: vec![
                     item("Accounts", "/admin", Section::Accounts),
                     item("Assistant", "/admin/assistant", Section::Assistant),
+                    item("Reviewer", "/admin/reviewer", Section::Reviewer),
                 ],
             });
         } else {
@@ -152,12 +154,13 @@ pub(super) async fn script() -> impl IntoResponse {
 /// Assertions on the rendered header, shared by the page tests of every renderer.
 #[cfg(test)]
 pub(crate) mod check {
-    pub const OWNER_ENTRIES: [&str; 6] = [
+    pub const OWNER_ENTRIES: [&str; 7] = [
         "/admin/materials",
         "/admin/materials/uploads",
         "/admin/rulesets",
         "/admin",
         "/admin/assistant",
+        "/admin/reviewer",
         "/auth/login",
     ];
     pub const PLAYER_ENTRIES: [&str; 3] = ["/campaigns", "/private-sheets", "/auth/login"];

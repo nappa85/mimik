@@ -1,0 +1,24 @@
+{% extends "layout.html" %}{% block title %}API reviewer · Mimik{% endblock %}{% block content %}
+<h1>API reviewer</h1>
+<p>Chosen pages of a source can be sent to a multimodal model of your choice, with your own key, and the findings come back as a suggestion report you decide on one by one (docs/api-reviewer-plan.md). Model output stays advice: nothing is accepted automatically.</p>
+{% if !notice.is_empty() %}<p class="panel" role="status">{{ notice }}</p>{% endif %}
+{% if let Some(message) = error %}<p class="form-error" role="alert">{{ message }}</p>{% endif %}
+<section class="panel"><h2>Provider and model</h2>
+<form method="post" action="/admin/reviewer/settings"><input type="hidden" name="csrf" value="{{ csrf }}">
+<fieldset><legend>Provider</legend>
+{% for p in providers %}<label><input type="radio" name="provider" value="{{ p.value }}"{% if p.checked %} checked{% endif %}> {{ p.label }}</label><p class="field-help">{{ p.help }}</p>
+{% endfor %}</fieldset>
+<p><label for="base-url">Base URL</label> <input id="base-url" name="base_url" value="{{ base_url }}" size="60" maxlength="2048" autocomplete="off" spellcheck="false" required></p>
+<p><label for="model">Model name</label> <input id="model" name="model" value="{{ model }}" size="40" maxlength="91" autocomplete="off" spellcheck="false" required></p>
+<p><button>Save settings</button></p></form>
+<p>The base URL must be HTTPS, name a domain (an IP address or a user name is refused), and carry no query or fragment; the path rule above each provider is the one its base URL must have, because the client appends the route to it. The model name is free text, at most 91 bytes: 100 bytes for the report's origin minus the <code>reviewer:</code> prefix it gets. The settings are one row in the database{% if let Some(changed) = settings_changed %}, last saved {{ changed }}{% endif %}.</p></section>
+<section class="panel"><h2>API key</h2>
+{% if let Some(message) = key_message %}<p class="form-error" role="alert">{{ message }}</p>{% endif %}
+<p>{% if key_set %}{% if let Some(changed) = key_changed %}The key is <strong>set</strong> (changed {{ changed }}).{% else %}The key is <strong>set</strong>.{% endif %}{% else %}The key is <strong>not set</strong>.{% endif %} It is stored only as the file <code>reviewer.key</code> in the data folder's <code>secrets/</code> folder (folder 0700, file 0600), outside the database and outside backups; this page never shows it again, only whether it is set and when it changed.</p>
+<form method="post" action="/admin/reviewer/key"><input type="hidden" name="csrf" value="{{ csrf }}">
+<p><label for="key">API key</label> <input id="key" name="key" type="password" maxlength="{{ key_max_bytes }}" autocomplete="off" required>
+<button>{% if key_set %}Replace the key{% else %}Set the key{% endif %}</button></p></form>
+{% if key_set || key_message.is_some() %}<form method="post" action="/admin/reviewer/key/delete"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Delete the key</button></form>{% endif %}
+<p>The key is at most {{ key_max_bytes }} bytes of visible ASCII (no spaces or line breaks), never echoed back and never written to the database, a log or a response.</p>
+<p>{% if ready %}With the stored key and settings, a reviewer can be built: pages can be sent through it (the preview of the next step).{% else %}A reviewer cannot be built yet: set the key and save a model name above.{% endif %}</p></section>
+{% endblock %}

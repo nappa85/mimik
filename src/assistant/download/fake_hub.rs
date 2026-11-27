@@ -29,6 +29,8 @@ pub(crate) struct Seen {
     pub path: String,
     pub query: String,
     pub headers: HeaderMap,
+    /// The request's body, collected before the reply is built.
+    pub body: Bytes,
 }
 
 /// How a request is answered.
@@ -212,8 +214,16 @@ impl FakeHub {
                         let service = service_fn(move |request: Request<Incoming>| {
                             let (seen, respond) = (Arc::clone(&seen), Arc::clone(&respond));
                             async move {
+                                let uri = request.uri().clone();
+                                let headers = request.headers().clone();
+                                let body = request
+                                    .into_body()
+                                    .collect()
+                                    .await
+                                    .map(http_body_util::Collected::to_bytes)
+                                    .unwrap_or_default();
                                 Ok::<_, std::convert::Infallible>(
-                                    answer(&request, &seen, &respond).await,
+                                    answer(&uri, &headers, body, &seen, &respond).await,
                                 )
                             }
                         });
@@ -290,20 +300,22 @@ fn build(
 }
 
 async fn answer(
-    request: &Request<Incoming>,
+    uri: &http::Uri,
+    headers: &HeaderMap,
+    body: Bytes,
     seen: &Arc<Mutex<Vec<Seen>>>,
     respond: &Arc<Mutex<Responder>>,
 ) -> Response<BoxBody<Bytes, std::io::Error>> {
     let record = Seen {
-        host: request
-            .headers()
+        host: headers
             .get(HOST)
             .and_then(|value| value.to_str().ok())
             .map(|host| host.split(':').next().unwrap_or(host).to_owned())
             .unwrap_or_default(),
-        path: request.uri().path().to_owned(),
-        query: request.uri().query().unwrap_or_default().to_owned(),
-        headers: request.headers().clone(),
+        path: uri.path().to_owned(),
+        query: uri.query().unwrap_or_default().to_owned(),
+        headers: headers.clone(),
+        body,
     };
     seen.lock().unwrap().push(record.clone());
     let mut reply = (respond.lock().unwrap())(&record);

@@ -11,6 +11,7 @@ pub(crate) use home::EDITED_SHEETS;
 mod materials;
 pub(crate) mod nav;
 mod persistence;
+mod reviewer;
 mod rulesets;
 #[cfg(target_os = "linux")]
 mod uploads;
@@ -209,7 +210,8 @@ fn router_with_sessions(
         .merge(administration::routes())
         .merge(assistant::routes())
         .merge(materials::routes())
-        .merge(rulesets::routes());
+        .merge(rulesets::routes())
+        .merge(reviewer::routes());
     #[cfg(target_os = "linux")]
     let router = router.merge(uploads::routes());
     router

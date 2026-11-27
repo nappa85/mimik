@@ -5,7 +5,8 @@ ASSIST-28, ASSIST-35, ASSIST-58, DEP-27). A download is owner-started, goes only
 Face, is licence-confirmed, bounded, hash-verified and published without ever replacing a file.
 It carries no sheet, note or player text: `src/assistant/download/` takes typed specs and
 imports no sheet, database, campaign or account type (a test scans for it), and only that
-module uses `reqwest` (also scanned). The model client stays on hyper and refuses every
+module uses `reqwest` (also scanned; the in-app API reviewer sends through its `https.rs`,
+DEP-34). The model client stays on hyper and refuses every
 non-loopback URL.
 
 | Concern | Code |
@@ -105,7 +106,8 @@ HTTPS only, port 443, no user information, host normalised (case, trailing dot) 
 exactly against `SHIPPED_HOSTS` before a redirect hop is sent, at most two hops, only from
 `resolve`; a 3xx from the API is refused; a rejected destination receives no request, also
 through a proxy. The system proxy (environment, `NO_PROXY`) is for downloads only, with proxy
-credentials only on the CONNECT. The resolver refuses loopback, private, link-local, shared,
+credentials only on the CONNECT; the API reviewer's transport sends with no proxy at all
+(DEP-34). The resolver refuses loopback, private, link-local, shared,
 multicast, unspecified and reserved addresses on direct connections (a proxy resolves for
 itself). IPv6 transition forms are judged by the IPv4 address they carry, not rejected: NAT64
 (`64:ff9b::/96` and the local-use `64:ff9b:1::/48`, with the RFC 6052 layout) and 6to4

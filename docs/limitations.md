@@ -268,6 +268,14 @@ Decision IDs refer to `docs/decisions.md`. Entries marked "(later)" are accepted
 - **L-SRC-CLI-MEMORY** [sources] The CLI import reads each file whole and parses it in memory (`bundle.json` 8 MiB, `source.json` 32 MiB, the PDF 128 MiB with `lopdf`, images 12 MiB each and 128 MiB in all), and accepts at most 64 pages and 20,000 units. A larger prepared source cannot be imported by the CLI; the browser upload path has no such totals.
 - **L-SRC-EXCL-HISTORY** [sources] Every exclusion revision stores the whole set of boxes (pages and up to eight boxes a page, at most 320 bytes a page in the worst case; the view allows 384), so one revision at 20,000 pages is up to 6.4 MB and the history grows by that per replacement, removal or range edit (each range edit is one whole revision) until the upload is discarded or expires. A stored coordinate may exceed its page edge by under 0.01 pt (boxes round outward and a page's size rounds up).
 - **L-SRC-PROPOSAL-BUDGET** [sources] The repeated-text proposer (two passes, the first counting) refuses ("comparison limit") on a selection that exceeds its memory budget (64 MiB), 50,000 live candidate groups, 50,000,000 comparisons or its 500,000,000-unit work budget. Ordinary manuals of 20,000 pages fit; a very large manual whose pages carry many long distinct lines (for instance about 20 KB of groupable text a page) may need a hand-drawn exclusion. Measured figures are in `docs/sources-and-retrieval.md` (Repeated-text proposal); the run holds the upload gate, and its disk-read time on the host is not yet measured. On the page screen the propose response always shows the first 100 pages.
+- **L-SRC-13** [API reviewer] rig 0.47.1 logs whole request bodies at TRACE under its
+  `rig::completions` target (`providers/internal::trace_json`), so a log filter that enables
+  TRACE for that target sees the page image's base64 in every reviewer request; filtering the
+  target is the only way to stop it from the subscriber side. The API key is never in a logged
+  body: it travels only in the provider's auth header, which rig does not log — the reviewer's
+  log test (`src/sources/reviewer/log_tests.rs`) captures a whole `review_page` call at TRACE
+  (events and span fields alike) and asserts that no 8-character substring of the key appears
+  in anything captured.
 - **C8** [sources] Page dimensions live only in `prepared_json`, so every region crop scans up to 24 MiB. Store them as columns.
 - **C10** [sources] Import validates polygon bounds but not degeneracy or point order; the crop rejects only zero-area rectangles.
 - **L-REG-1** [sources] Region previews reject cICP, mDCV and cLLI and reduce 16-bit to 8-bit; the 512 MiB per-job figure is unmeasured.
