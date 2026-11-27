@@ -31,7 +31,7 @@ fn schema_text_is_pinned_compact_and_named() {
     assert!(SCHEMA_TEXT.is_ascii());
     assert!(SCHEMA_TEXT.ends_with("}\n") && !SCHEMA_TEXT.contains('\r'));
     // Re-serialising keeps the file's own key order (serde_json's `preserve_order`, which
-    // rig-core enables), so the bytes sent in `response_format` are the pinned text.
+    // Mimik enables, DEP-18), so the bytes sent in `response_format` are the pinned text.
     assert_eq!(
         format!("{}\n", serde_json::to_string(&*SCHEMA).unwrap()),
         SCHEMA_TEXT

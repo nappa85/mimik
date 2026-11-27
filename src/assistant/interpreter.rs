@@ -7,10 +7,11 @@ use super::contract::{
 };
 use super::transport::Bounded;
 use async_trait::async_trait;
+use rig_core::Model;
 use rig_core::completion::CompletionRequest;
 use rig_core::http_client::HttpClientExt;
 use rig_core::providers::openai::OpenAI;
-use rig_core::providers::openai::wire::{LLAMACPP, OpenAIConfig};
+use rig_core::providers::openai::wire::{Chat, LLAMACPP, OpenAIConfig};
 use serde_json::{Value, json};
 
 /// What a request is for: it picks the system message and the reply schema (plan 3c-1).
@@ -88,6 +89,18 @@ impl RigInterpreter {
             model,
         }
     }
+
+    /// The chat model one streamed completion runs on, with rig's stream idle timeout
+    /// off (`None`): [`rig_core::driver::STREAM_IDLE_TIMEOUT`] fails a reply that sends
+    /// no frame for 300 s as `Stalled`, but llama-server sends nothing while it
+    /// processes a long prompt, and Mimik's own budgets (`RUN_CEILING_S`, 600 s) already
+    /// bound and cancel every interpretation, so rig's timer must not cut the run
+    /// earlier.
+    pub(crate) fn chat_model(&self) -> Model<Chat> {
+        self.client
+            .chat(self.model.as_str())
+            .with_idle_timeout(None)
+    }
 }
 
 /// The body members beside rig's own (plan §1.4): the schema of a request of `kind` that supplies
@@ -139,7 +152,7 @@ impl Interpreter for RigInterpreter {
             .map_err(|_| Failure::Transport)?;
         let response = self
             .transport
-            .send::<_, bytes::Bytes>(request)
+            .send(request)
             .await
             .map_err(|error| match error {
                 rig_core::http_client::Error::InvalidStatusCodeWithDetails { status, .. } => {
@@ -164,9 +177,9 @@ impl Interpreter for RigInterpreter {
             .temperature(0.0)
             .max_tokens(u64::from(completion.max_tokens))
             .additional_params(additional_params(&completion.kind, &completion.ref_ids));
+        // The model must come from `chat_model()` (rig's idle timeout off).
         let stream = self
-            .client
-            .chat(self.model.as_str())
+            .chat_model()
             .stream(request)
             .map_err(|error| failure(&error))?;
         let response = stream.finish().await.map_err(|error| failure(&error))?;

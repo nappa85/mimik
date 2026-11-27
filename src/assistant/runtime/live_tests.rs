@@ -495,7 +495,7 @@ async fn raw(child: &RealChild, path: &str, token: Option<&str>, body: &Value) -
     let request = request
         .body(bytes::Bytes::from(serde_json::to_vec(body).unwrap()))
         .unwrap();
-    match transport.send::<_, bytes::Bytes>(request).await {
+    match transport.send(request).await {
         Ok(response) => {
             let status = response.status().as_u16();
             let body = response.into_body().await.unwrap();

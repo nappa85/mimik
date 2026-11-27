@@ -288,7 +288,7 @@ impl Bounded {
     ) -> http_client::Result<(http::Response<hyper::body::Incoming>, Driver)> {
         let (mut parts, body) = request.into_parts();
         if !self.destined(&parts.uri) {
-            return Err(http_client::Error::instance(Elsewhere));
+            return Err(http_client::Error::permanent(Elsewhere));
         }
         let target = parts
             .uri
@@ -302,19 +302,15 @@ impl Bounded {
             .map_err(|error| http_client::Error::Protocol(error.into()))?;
         parts.headers.insert(http::header::HOST, host);
         let request = http::Request::from_parts(parts, Full::new(body));
-        let stream = self
-            .connector
-            .connect()
-            .await
-            .map_err(http_client::Error::instance)?;
+        let stream = self.connector.connect().await.map_err(connect_error)?;
         let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
-            .map_err(http_client::Error::instance)?;
+            .map_err(http_client::Error::transient)?;
         let driver = Driver(tokio::spawn(connection).abort_handle());
         let response = sender
             .send_request(request)
             .await
-            .map_err(http_client::Error::instance)?;
+            .map_err(http_client::Error::transient)?;
         Ok((response, driver))
     }
 }
@@ -328,8 +324,8 @@ enum BodyError {
 impl BodyError {
     fn into_http(self) -> http_client::Error {
         match self {
-            Self::Transport(error) => http_client::Error::instance(error),
-            Self::Over => http_client::Error::instance(OverBound),
+            Self::Transport(error) => http_client::Error::transient(error),
+            Self::Over => http_client::Error::permanent(OverBound),
         }
     }
 }
@@ -359,22 +355,22 @@ fn rebuild<B>(
     Ok(out)
 }
 
-fn owned<T: Into<Bytes>>(request: http::Request<T>) -> http::Request<Bytes> {
-    let (parts, body) = request.into_parts();
-    http::Request::from_parts(parts, body.into())
+/// Classifies a failed connection attempt: the endpoint check's refusal (wrong peer or
+/// sandbox; `runtime::endpoint` reports it as `EACCES`) is permanent, the same request
+/// meets it again, and every other failure (refused, reset, timeout) is transient.
+fn connect_error(error: std::io::Error) -> http_client::Error {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => http_client::Error::permanent(error),
+        _ => http_client::Error::transient(error),
+    }
 }
 
 impl HttpClientExt for Bounded {
-    fn send<T, U>(
+    fn send(
         &self,
-        request: http::Request<T>,
-    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody<U>>>> + Send + 'static
-    where
-        T: Into<Bytes> + Send,
-        U: From<Bytes> + Send + 'static,
-    {
+        request: http::Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody>>> + Send + 'static {
         let this = self.clone();
-        let request = owned(request);
         async move {
             let (response, driver) = this.exchange(request).await?;
             let status = response.status();
@@ -391,30 +387,23 @@ impl HttpClientExt for Bounded {
                 .await
                 .map_err(BodyError::into_http)?;
             drop(driver);
-            let lazy: LazyBody<U> = Box::pin(async move { Ok(U::from(body)) });
+            let lazy: LazyBody = Box::pin(async move { Ok::<Bytes, http_client::Error>(body) });
             rebuild(status, headers, lazy).map_err(http_client::Error::Protocol)
         }
     }
 
-    fn send_multipart<U>(
+    fn send_multipart(
         &self,
         _request: http::Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody<U>>>> + Send + 'static
-    where
-        U: From<Bytes> + Send + 'static,
-    {
-        std::future::ready(Err(http_client::Error::instance(Elsewhere)))
+    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody>>> + Send + 'static {
+        std::future::ready(Err(http_client::Error::permanent(Elsewhere)))
     }
 
-    fn send_streaming<T>(
+    fn send_streaming(
         &self,
-        request: http::Request<T>,
-    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + Send
-    where
-        T: Into<Bytes> + Send,
-    {
+        request: http::Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + Send {
         let this = self.clone();
-        let request = owned(request);
         async move {
             let (response, driver) = this.exchange(request).await?;
             let status = response.status();
@@ -435,10 +424,10 @@ impl HttpClientExt for Bounded {
                 // The driver lives as long as the stream: dropping the stream closes the
                 // connection.
                 let _ = &driver;
-                let chunk = chunk.map_err(http_client::Error::instance)?;
+                let chunk = chunk.map_err(http_client::Error::transient)?;
                 seen = seen.saturating_add(chunk.len());
                 if seen > BODY_LIMIT {
-                    return Err(http_client::Error::instance(OverBound));
+                    return Err(http_client::Error::permanent(OverBound));
                 }
                 Ok(chunk)
             });

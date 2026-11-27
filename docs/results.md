@@ -1159,7 +1159,8 @@ decides.**
 
 - **Setup:** `genai` 0.7.0, `rig-core` 0.44.0 and `async-openai` 0.42.2, default features
   off, `reqwest` 0.13.5, measured in `mimik-ci` with Rust 1.95.0; the table holds those
-  figures. `rig-core` 0.45.0 on Rust 1.99.1, the version in use, was re-checked offline (below). Probes run against loopback stubs in `--network none` containers; the
+  figures. `rig-core` 0.45.0 and 0.47.1 (the version in use) on Rust 1.99.1 were re-checked offline
+  (below). Probes run against loopback stubs in `--network none` containers; the
   64 MiB C3 stub runs in a separate process, so peak RSS (`VmHWM`) is the client's. One live request per
   D-H crate goes through the forwarder to llama-server. The host-built client sets `no_proxy`,
   no redirects, `no_gzip`/`no_brotli`/`no_deflate`/`no_zstd` and a fresh connection per
@@ -1213,7 +1214,21 @@ decides.**
   unchanged. `rig-reqwest`'s `rustls` feature (a default, kept off) now also adds a
   bundled-roots TLS fallback. Not re-run on 0.45.0: the live request through the forwarder (C1
   live) and the C5 check against the shipped `Cargo.lock` (due in 2c).
-- **Conclusion (proposal):** `rig-core` (0.44.0 measured, 0.45.0 re-checked) is the only D-H
+- **rig-core 0.47.1 re-check** (Rust 1.99.1, `mimik-ci`, `--network none`; outputs in
+  `/media/data/mimik/assist-2b/runs/probes/v5-rig047/`): the probe's transport needed the same
+  port as Mimik's (`HttpClientExt` takes `Request<Bytes>`; `Error::Instance` split into
+  `Transient` and `Permanent`); what it measures is unchanged. Every offline C1, C2, C3 and C4
+  outcome is the same as on 0.45.0, with two differences. An endless SSE line on the default
+  path now fails at rig's own 64 MiB frame bound ("a frame of more than 67108864 bytes", +76 MiB)
+  instead of at the stream's end. And rig no longer enables serde_json's `preserve_order`, so in
+  the probe's build (which does not enable it) JSON keys arrive sorted: the native path's
+  `required` lists and the body's key order differ, with the same members; Mimik enables
+  `preserve_order` itself (DEP-18), and its tests pin the bytes sent. The own transport refuses
+  the 64 MiB body at about +11.2 to 11.6 MiB (0.45.0: +6.4 MiB); default path +330 MiB; drops close
+  within 1 ms. `reqwest` features stay `json, multipart, stream`, with no TLS crate in the
+  probe's dependency tree. rig 0.47 adds a stream idle timeout (300 s), which Mimik turns off
+  (DEP-17). Not re-run: the live request through the forwarder (C1 live).
+- **Conclusion (proposal):** `rig-core` (0.44.0 measured, 0.45.0 and 0.47.1 re-checked) is the only D-H
   crate that meets C1 to C5. The schema arrives structurally identical (compared as parsed
   JSON) through `additional_params` (its native path rewrites `oneOf`), and the body bound
   needs a small Mimik transport (about 80 lines, the probe's `Bounded`).
@@ -1222,7 +1237,7 @@ decides.**
   lists it). D-H's stop does not trigger: both D-H crates can send the schema.
 - **Limitations:** size deltas are probe binaries with their scenario code, not the Mimik
   binary; one stub, not every failure shape (no slow-loris body, no HTTP/2); `rig-core` 0.45.0
-  has no live run; maintenance is release cadence only.
+  and 0.47.1 have no live probe run; maintenance is release cadence only.
 
 ### Runtime topology and egress
 
@@ -1351,7 +1366,7 @@ decides.**
   from the EVAL-1 bar (≥ 90% correct, ≤ 2% false-supported; waived for the POC, D-D).
 - **What carries over to production** (ASSIST-27 to ASSIST-40): the crate results and the
   client policy (no proxies, redirects, retries or decompression, the body-bound transport and
-  cancellation; `rig-core` is re-checked at 0.45.0 by its own upgrade change, ASSIST-39),
+  cancellation; `rig-core` is re-checked at 0.47.1 by its own upgrade change, ASSIST-39),
   priming, the output schema and validation findings, and the CPU latency and quality numbers
   (measured in a container capped to 2 CPUs; a native child at 2 threads is not measured).
   Not exercised in 2b: llama-server `--api-key` auth and the Unix-socket transport. Not

@@ -1,4 +1,4 @@
-//! rig-core 0.45.0 probe: C1 schema pass-through, C2 client policy, C3 body bound, C4 cancellation.
+//! rig-core 0.47.1 probe: C1 schema pass-through, C2 client policy, C3 body bound, C4 cancellation.
 use std::net::SocketAddr;
 
 use bytes::Bytes;
@@ -24,23 +24,19 @@ impl std::fmt::Display for Over {
 }
 impl std::error::Error for Over {}
 
-fn to_reqwest<T: Into<Bytes>>(c: &reqwest::Client, req: http::Request<T>) -> reqwest::RequestBuilder {
+fn to_reqwest(c: &reqwest::Client, req: http::Request<Bytes>) -> reqwest::RequestBuilder {
     let (parts, body) = req.into_parts();
-    c.request(parts.method, parts.uri.to_string()).headers(parts.headers).body(body.into())
+    c.request(parts.method, parts.uri.to_string()).headers(parts.headers).body(body)
 }
 
 impl HttpClientExt for Bounded {
-    fn send<T, U>(
+    fn send(
         &self,
-        req: http::Request<T>,
-    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody<U>>>> + Send + 'static
-    where
-        T: Into<Bytes> + Send,
-        U: From<Bytes> + Send + 'static,
-    {
+        req: http::Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody>>> + Send + 'static {
         let builder = to_reqwest(&self.0, req);
         async move {
-            let response = builder.send().await.map_err(http_client::Error::instance)?;
+            let response = builder.send().await.map_err(http_client::Error::transient)?;
             let status = response.status();
             let headers = response.headers().clone();
             let body = bounded_body(response, BODY_LIMIT).await;
@@ -48,45 +44,43 @@ impl HttpClientExt for Bounded {
                 let text = body.map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
                 return Err(http_client::Error::non_success_with_details(status, headers, text));
             }
-            let body = body.map_err(|_| http_client::Error::instance(Over))?;
-            let lazy: LazyBody<U> = Box::pin(async move { Ok(U::from(body)) });
+            let body = body.map_err(|_| http_client::Error::permanent(Over))?;
+            let lazy: LazyBody = Box::pin(async move { Ok::<Bytes, http_client::Error>(body) });
             let mut out = http::Response::builder().status(status);
             *out.headers_mut().unwrap() = headers;
             out.body(lazy).map_err(http_client::Error::Protocol)
         }
     }
 
-    fn send_multipart<U>(
+    fn send_multipart(
         &self,
         _req: http::Request<MultipartForm>,
-    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody<U>>>> + Send + 'static
-    where
-        U: From<Bytes> + Send + 'static,
-    {
-        async { Err(http_client::Error::instance(Over)) }
+    ) -> impl Future<Output = http_client::Result<http::Response<LazyBody>>> + Send + 'static {
+        std::future::ready(Err(http_client::Error::permanent(Over)))
     }
 
-    fn send_streaming<T>(
+    fn send_streaming(
         &self,
-        req: http::Request<T>,
-    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + Send
-    where
-        T: Into<Bytes> + Send,
-    {
+        req: http::Request<Bytes>,
+    ) -> impl Future<Output = http_client::Result<StreamingResponse>> + Send {
         let builder = to_reqwest(&self.0, req);
         async move {
-            let response = builder.send().await.map_err(http_client::Error::instance)?;
+            let response = builder.send().await.map_err(http_client::Error::transient)?;
             let status = response.status();
             let headers = response.headers().clone();
             if !status.is_success() {
                 return Err(http_client::Error::non_success_with_details(status, headers, String::new()));
             }
             let mut seen = 0usize;
+            #[expect(
+                clippy::result_large_err,
+                reason = "the item type is rig's `http_client::Result`"
+            )]
             let stream = response.bytes_stream().map(move |chunk| {
-                let chunk = chunk.map_err(http_client::Error::instance)?;
+                let chunk = chunk.map_err(http_client::Error::transient)?;
                 seen += chunk.len();
                 if seen > BODY_LIMIT {
-                    return Err(http_client::Error::instance(Over));
+                    return Err(http_client::Error::permanent(Over));
                 }
                 Ok(chunk)
             });
