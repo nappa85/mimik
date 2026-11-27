@@ -823,6 +823,74 @@ available and explicit equivalent checks for their emitted correction/note subse
 Invalid pages are marked failed with an actionable error; text is never silently truncated.
 Empty or whitespace-only model text proposals map to notes.
 
+## API reviewer (`/admin/reviewer`, `src/sources/reviewer/`)
+
+The in-app API reviewer (docs/api-reviewer-plan.md) is configured on an Owner-only page
+(`/admin/reviewer`, CSRF-protected forms, no JavaScript needed). Its settings are one database
+row (migration 041, `reviewer_settings`): the provider (Mistral, OpenAI, Anthropic), the base
+URL and the model name. The base URL must be HTTPS, name a domain (IP literals and userinfo are
+refused) and follow the provider's path rule — Mistral's and Anthropic's base is the bare host,
+`OpenAI`'s includes `/v1` — because rig 0.47.1 appends the route to it; the defaults are the
+providers' public base URLs. The model name is free text, non-empty, at most 91 bytes (100 bytes
+for the report's origin minus the `reviewer:` prefix) and free of control characters (the
+`Report::origin` rule in `src/sources/reports.rs`).
+
+The API key is not in the database: it is the file `reviewer.key` in the data folder's
+`secrets/` folder (folder 0700, file 0600 whatever the umask — the temporary file of the atomic
+write is `fchmod`ed — written atomically: a temporary file in the same folder, fsync, rename,
+directory fsync). The save rule is visible ASCII only, 1 to 512 bytes after trimming the ends
+(no spaces or line breaks). The page shows only "set"/"not set" and the file's change time, and
+offers replace and delete; a key file that is not private (a wrong mode or a link) still renders
+the page, with the fixed message "The key file is not private: replace or delete it" and both
+forms kept. The key is never echoed, logged or stored. `secrets/` is not part of a backup (a
+backup is the database file plus the `sources/` folder). The key's identity for later binding is
+the change time and nanoseconds of the very descriptor the key was read from, plus a SHA-256
+digest held in memory only (`sources::reviewer::key::key_identity`).
+
+What exists now is the configuration and the readiness indicator; no send path is wired into
+the routes yet (that is step 4 of the plan). The page's readiness is a cheap check — a key is
+set and passes the save rule, a model is set, and the stored base URL validates — it builds no
+TLS client and copies the key into no `String`. `sources::reviewer::build` builds a reviewer from
+the stored settings and the key file over the shared transport of
+`src/assistant/download/https.rs` (DEP-34): public addresses only, no redirects, no proxy, bodies
+bounded at 4 MiB; step 4's preview and send build it this way.
+
+### What rig 0.47.1 sends, per provider (reference facts)
+
+Recorded from this code over rig 0.47.1. The fixtures under `tests/fixtures/reviewer/<provider>/`
+assert the recorded requests and parse the recorded replies; they catch regressions of this
+code, not provider conformance.
+
+- Mistral (chat wire, `POST {base}/v1/chat/completions` with `Authorization: Bearer`): the page
+  image is a content part
+  `{"type":"image_url","image_url":{"url":"data:image/png;base64,…","detail":"auto"}}` — rig
+  sends its default `detail: auto` on user images; whether Mistral accepts `detail` is
+  unverified until the live trial. The findings schema is
+  `response_format: {"type":"json_schema","json_schema":{"name":"Findings","strict":true,"schema":…}}`.
+- OpenAI (Responses route, `POST {base}/v1/responses` with `Authorization: Bearer`): the image is
+  a content part
+  `{"type":"input_image","detail":"auto","image_url":"data:image/png;base64,…"}` of a user
+  `input` item; the system prompt is lifted into top-level `instructions`; the schema is
+  `text.format: {"type":"json_schema","name":"Findings","schema":…,"strict":true}`; every request
+  carries `store: false` (the request sets it in its params, which the wire honours over the wire
+  default), and rig then adds `include: ["reasoning.encrypted_content"]` to the body whenever
+  `store` is false. Whether OpenAI accepts the `include` parameter for non-reasoning models is
+  unverified.
+- Anthropic (messages API, `POST {base}/v1/messages` with `x-api-key` and
+  `anthropic-version: 2023-06-01`): the image is a content block
+  `{"type":"image","source":{"type":"base64","media_type":"image/png","data":…}}`; rig maps the
+  request's `output_schema` to `output_config: {"format":{"type":"json_schema","schema":…}}`
+  (Anthropic's structured output takes no `strict` flag); the API requires `max_tokens`, so the
+  request sets it (32,768).
+- All three: rig's sanitizer (`providers/internal/schema.rs`) restates the schema for strict
+  mode — every property required, `additionalProperties: false` injected, `$ref` siblings
+  stripped — so the findings schema is declared in that form already
+  (`src/sources/reviewer/findings.rs`: nullable types as `["string","null"]`, no length/count
+  keywords; those bounds stay in `validate_page`, step 6). The reply text is
+  `CompletionResponse::text()`: `text` chunks joined, `thinking` dropped; a refusal (including
+  Anthropic's `stop_reason: "refusal"`, with empty content or a short text) fails the page as
+  non-JSON with the fixed invalid-reply message, which the refusal fixtures assert.
+
 ## Page images and region previews
 
 `/…/pages/{id}/image` serves the original PNG (`no-store`, `nosniff`). `/…/pages/{page}/units/{unit}/image` serves a **derived bounding-rectangle crop** (`region::crop`): not a polygon mask, not evidence, no state change.

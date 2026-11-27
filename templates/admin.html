@@ -12,5 +12,6 @@
 {% if let Some(next) = next %}<a href="/admin?after={{ next }}">Next accounts page</a>{% endif %}<a href="/admin">First accounts page</a></section>
 <p>Invitations expire after24h; resets after1h. Reissue/reset revokes old tokens and sessions. Reset issuance keeps the old password usable for new login until completion. Disablement is irreversible here and preserves custody/history. Owner reset issuance/disablement requires local CLI.</p>
 <section class="panel"><h2>Local materials</h2><p><a href="/admin/materials">Inspect sources and review evidence</a>. Ingestion, finalization and definition publication use the local operator workflows in docs/sources-and-retrieval.md and docs/runtime-definition-contract.md. Imported materials stay local.</p></section>
+<section class="panel"><h2>API reviewer</h2><p><a href="/admin/reviewer">Provider, endpoint, model and API key</a> for sending chosen pages of a source to a model of your choice; the findings come back as suggestions you decide on one by one (docs/api-reviewer-plan.md).</p></section>
 <section class="panel"><h2>Ruleset registry</h2><p><a href="/admin/rulesets">Register game editions and exact legacy aliases</a> before importing version-2 sources. Registration identifies materials only; it does not approve evidence or enable a sheet. The local CLI offers the same registrations.</p></section>
 {% endblock %}

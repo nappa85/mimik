@@ -68,6 +68,8 @@ mod notes_tests;
 mod quick_tests;
 #[path = "registry_tests.rs"]
 mod registry_tests;
+#[path = "reviewer_admin_tests.rs"]
+mod reviewer_admin_tests;
 #[path = "script_tests.rs"]
 mod script_tests;
 #[path = "suggest_tests.rs"]

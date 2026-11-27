@@ -397,15 +397,18 @@ jobs:
           target/confinement-tests --test-threads=2 --include-ignored \
             sandbox::seccomp:: assistant::runtime::endpoint:: \
             sandbox::runner:: sources::worker::live_tests:: assistant::runtime::launch::live_tests:: \
+            sources::reviewer::sandbox_tests:: sources::worker::secret_tests:: \
             --show-output \
             --skip live_gpu_ \
             --skip live_large_ \
             2>&1 | tee target/confinement.log
           ran=$(grep -oE '^test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' target/confinement.log | grep -oE '[0-9]+' | head -n 1)
-          # Includes two PDF re-exec helpers, 27 live checks and the generator bound check. The
-          # large-input gate (`live_large_`) needs a host data folder and runs only on request.
-          if [ "${ran:-0}" -lt 60 ]; then
-            echo "only ${ran:-0} confinement tests ran; expected at least 60"
+          # Includes two PDF re-exec helpers, the six secrets-sandbox tests (the reviewer's and
+          # the PDF worker's runner helpers, reader helpers and confinement checks), 27 live checks and the
+          # generator bound check. The large-input gate (`live_large_`) needs a host data folder
+          # and runs only on request.
+          if [ "${ran:-0}" -lt 66 ]; then
+            echo "only ${ran:-0} confinement tests ran; expected at least 66"
             exit 1
           fi
           workers=$(grep -cE '^test sources::worker::live_tests::(corpus::|large_inputs::)?live_[^ ]+ \.\.\. ok$' target/confinement.log)
@@ -413,6 +416,16 @@ jobs:
             echo "only $workers PDF worker confinement tests ran; expected 27"
             exit 1
           fi
+          # The two secrets-sandbox confinement tests must each have run and passed.
+          for secrets_test in \
+            'test sources::reviewer::sandbox_tests::the_model_server_sandbox_cannot_read_the_secrets_folder ... ok' \
+            'test sources::worker::secret_tests::the_pdf_worker_sandbox_cannot_read_the_secrets_folder ... ok'
+          do
+            if ! grep -qxF "$secrets_test" target/confinement.log; then
+              echo "the confinement log lacks the line: $secrets_test"
+              exit 1
+            fi
+          done
           # On a runner with Landlock the kernel-level check of the rule semantics (`hako_tests`,
           # which the filters above leave out) runs with `require` set, and must have run: it
           # prints SKIPPED when it checked nothing.

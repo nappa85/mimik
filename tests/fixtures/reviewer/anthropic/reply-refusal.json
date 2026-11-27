@@ -1,0 +1,17 @@
+{
+  "id": "msg_fixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "reviewer-fixture-model",
+  "content": [
+    {
+      "type": "text",
+      "text": "I'm sorry, I can't help with that."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 5
+  }
+}

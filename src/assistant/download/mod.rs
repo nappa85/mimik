@@ -8,6 +8,7 @@ pub(crate) mod disk;
 pub(crate) mod fake_hub;
 #[cfg(test)]
 pub(crate) mod fake_proxy;
+pub(crate) mod https;
 pub(crate) mod hub;
 #[cfg(test)]
 mod net_tests;

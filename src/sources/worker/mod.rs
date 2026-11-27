@@ -82,3 +82,5 @@ mod tests;
 
 #[cfg(test)]
 mod preflight_tests;
+#[cfg(test)]
+mod secret_tests;

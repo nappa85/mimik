@@ -1,0 +1,27 @@
+{
+  "id": "resp_fixture",
+  "object": "response",
+  "created_at": 0,
+  "status": "completed",
+  "model": "reviewer-fixture-model",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_fixture",
+      "status": "completed",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "annotations": [],
+          "text": "Here is the review in prose: the table on page 22 looks wrong, but I will not return JSON."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 15,
+    "total_tokens": 25
+  }
+}

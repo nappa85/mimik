@@ -105,6 +105,12 @@ done. Decisions in force: `docs/decisions.md`. Known limits and follow-ups:
 
 ## Next steps
 
+- **API reviewer: open before the live trial** (`docs/api-reviewer-plan.md`):
+  - each provider's image limits (bytes and pixel dimensions) and retention/data-use terms,
+    unverified against the providers' public API docs;
+  - whether OpenAI accepts the `include` parameter (rig adds
+    `include: ["reasoning.encrypted_content"]` when `store` is false) for non-reasoning models.
+
 - **Review screen points (owner):** collect the owner's points on the materials review screen
   (cards, table form, merge, split) and plan them.
 

@@ -39,6 +39,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use super::private_dir::{io, open_private_subfolder};
+
 const DIRECTORY: &str = "sources";
 const MARKER: &str = ".store-id";
 const SHARED: &str = ".store-shared";
@@ -46,10 +48,6 @@ const TEMPORARY: &str = ".tmp-";
 const SUFFIX: &str = ".pdf";
 /// Files younger than this are never swept: a writer may be between its rename and its commit.
 const MINIMUM_AGE: Duration = Duration::from_secs(3600);
-
-fn io(error: Errno) -> AppError {
-    std::io::Error::from(error).into()
-}
 
 fn valid_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -74,27 +72,8 @@ impl PdfStore {
     /// Refuses a link in place of the directory, a directory another user owns or one that is
     /// accessible to group or others, and filesystem failures.
     pub fn in_directory(data: &Path) -> Result<Self, AppError> {
-        let parent = rustix::fs::open(
-            data,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io)?;
-        match rustix::fs::mkdirat(&parent, DIRECTORY, Mode::RWXU) {
-            Ok(()) | Err(Errno::EXIST) => {}
-            Err(error) => return Err(io(error)),
-        }
-        let dir = rustix::fs::openat(
-            &parent,
-            DIRECTORY,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io)?;
-        let stat = rustix::fs::fstat(&dir).map_err(io)?;
-        if stat.st_uid != rustix::process::geteuid().as_raw() || stat.st_mode & 0o077 != 0 {
-            return Err(AppError::Invalid("The PDF store directory is not private."));
-        }
+        let dir =
+            open_private_subfolder(data, DIRECTORY, "The PDF store directory is not private.")?;
         Ok(Self {
             dir,
             identity: OnceLock::new(),

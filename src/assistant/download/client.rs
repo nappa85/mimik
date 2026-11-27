@@ -2,26 +2,24 @@
 //! the model client, HTTPS only, port 443 only, exact host list checked before every redirect
 //! hop is sent, a resolver that refuses local addresses, the system proxy for downloads only,
 //! no cookies, no `Referer`, identity encoding only, and errors that never carry a URL.
+//! The TLS config, the resolver, the trust roots, the proxy modes, the public-address policy
+//! and the URL-free error classification are shared with the API reviewer in
+//! [`super::https`], which also holds the reviewer's own client.
 use crate::assistant::model::HfSpec;
 use bytes::Bytes;
 use reqwest::{
-    dns::{Addrs, Name, Resolve, Resolving},
-    header::{
-        ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, HeaderMap, HeaderValue, LOCATION, RANGE,
-    },
+    header::{CONTENT_ENCODING, CONTENT_RANGE, LOCATION, RANGE},
     redirect::Policy,
 };
 #[cfg(test)]
-use rustls::pki_types::CertificateDer;
-use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
-    pin::Pin,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use url::Url;
+
+// Shared with `super::https` (re-exported so this module's tests keep their `use super::*`).
+#[cfg(test)]
+pub(crate) use super::https::public;
+pub(crate) use super::https::{AddressPolicy, Lookup, ProxyMode, Roots};
 
 /// At most this many redirect hops are followed from a `resolve` URL.
 const MAX_HOPS: usize = 2;
@@ -92,165 +90,6 @@ pub(crate) enum Error {
     Setup(&'static str),
 }
 
-/// The marker error a refused address travels in through the connector.
-#[derive(Debug, thiserror::Error)]
-#[error("address refused")]
-struct AddressRefused;
-
-/// Which addresses a hostname may resolve to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AddressPolicy {
-    /// Only public unicast addresses (the shipped policy).
-    Public,
-    /// Anything (the tests' loopback fake server; never constructed by `shipped`).
-    #[cfg(test)]
-    Any,
-}
-
-impl AddressPolicy {
-    pub(crate) fn allows(self, ip: IpAddr) -> bool {
-        match self {
-            Self::Public => public(ip),
-            #[cfg(test)]
-            Self::Any => true,
-        }
-    }
-}
-
-fn public_v6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4_mapped() {
-        return public(IpAddr::V4(v4));
-    }
-    let groups = ip.segments();
-    // Transition forms carry an IPv4 address that decides: NAT64 (64:ff9b::/96) and 6to4
-    // (2002::/16, the address in the next two groups).
-    let embedded = |high: u16, low: u16| {
-        let (high, low) = (high.to_be_bytes(), low.to_be_bytes());
-        std::net::Ipv4Addr::new(high[0], high[1], low[0], low[1])
-    };
-    if groups[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-        return public(IpAddr::V4(embedded(groups[6], groups[7])));
-    }
-    // The local-use NAT64 prefix 64:ff9b:1::/48 (RFC 8215) with the /48 layout of RFC 6052:
-    // the IPv4 address is split around the reserved octet 8, in octets 6, 7, 9 and 10.
-    if groups[..3] == [0x64, 0xff9b, 0x1] {
-        let octets = ip.octets();
-        return public(IpAddr::V4(std::net::Ipv4Addr::new(
-            octets[6], octets[7], octets[9], octets[10],
-        )));
-    }
-    if groups[0] == 0x2002 {
-        return public(IpAddr::V4(embedded(groups[1], groups[2])));
-    }
-    let loopback_or_reserved = ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || ip.is_unique_local()
-        || ip.is_unicast_link_local();
-    // Site-local (fec0::/10, deprecated), IPv4-compatible (::a.b.c.d), Teredo (2001::/32),
-    // documentation (2001:db8::/32) and the discard prefix (100::/64).
-    let site_local = groups[0] & 0xffc0 == 0xfec0;
-    let ipv4_compatible = groups[..6] == [0, 0, 0, 0, 0, 0];
-    let teredo = groups[0] == 0x2001 && groups[1] == 0;
-    let documentation = groups[0] == 0x2001 && groups[1] == 0x0db8;
-    let discard = groups[0] == 0x0100 && groups[1..4] == [0, 0, 0];
-    !(loopback_or_reserved || site_local || ipv4_compatible || teredo || documentation || discard)
-}
-
-/// Whether `ip` is a public unicast address: not loopback, private, link-local, multicast,
-/// unspecified, shared (CGNAT), reserved or documentation space.
-pub(crate) fn public(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            !(v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                // 100.64.0.0/10 (shared), 0.0.0.0/8, 192.0.0.0/24, 198.18.0.0/15, 240.0.0.0/4.
-                || (o[0] == 100 && (64..128).contains(&o[1]))
-                || o[0] == 0
-                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
-                || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
-                || o[0] >= 240)
-        }
-        IpAddr::V6(v6) => public_v6(v6),
-    }
-}
-
-/// How a host name is looked up (replaced in tests).
-pub(crate) type Lookup = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>>
-        + Send
-        + Sync,
->;
-
-fn system_lookup() -> Lookup {
-    Arc::new(|host: String| {
-        Box::pin(async move {
-            Ok(tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .map(|addr| addr.ip())
-                .collect())
-        })
-    })
-}
-
-struct Resolver {
-    policy: AddressPolicy,
-    lookup: Lookup,
-    /// Fixed addresses (tests only: the fake server's).
-    overrides: HashMap<String, SocketAddr>,
-}
-
-impl Resolve for Resolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().trim_end_matches('.').to_ascii_lowercase();
-        if let Some(address) = self.overrides.get(&host).copied() {
-            return Box::pin(async move { Ok(Box::new(std::iter::once(address)) as Addrs) });
-        }
-        let (policy, lookup) = (self.policy, Arc::clone(&self.lookup));
-        Box::pin(async move {
-            let found = lookup(host).await?;
-            let allowed: Vec<SocketAddr> = found
-                .into_iter()
-                .filter(|ip| policy.allows(*ip))
-                .map(|ip| SocketAddr::new(ip, 0))
-                .collect();
-            if allowed.is_empty() {
-                return Err(Box::new(AddressRefused) as Box<dyn std::error::Error + Send + Sync>);
-            }
-            Ok(Box::new(allowed.into_iter()) as Addrs)
-        })
-    }
-}
-
-/// Where the trusted roots come from.
-#[derive(Clone)]
-pub(crate) enum Roots {
-    /// The operating system's trust store, through the platform verifier.
-    Platform,
-    /// Exactly these certificates and nothing else (tests).
-    #[cfg(test)]
-    Only(Vec<CertificateDer<'static>>),
-}
-
-/// How the system proxy is used.
-#[derive(Clone)]
-pub(crate) enum ProxyMode {
-    /// reqwest's system proxy (environment variables, `NO_PROXY`, OS settings).
-    System,
-    /// No proxy at all (tests are isolated from the ambient environment).
-    #[cfg(test)]
-    Direct,
-    /// This proxy (tests).
-    #[cfg(test)]
-    Explicit(Box<reqwest::Proxy>),
-}
-
 /// Everything the client needs; the shipped values are fixed in code, with no knob.
 #[derive(Clone)]
 pub(crate) struct Endpoints {
@@ -261,6 +100,8 @@ pub(crate) struct Endpoints {
     pub addresses: AddressPolicy,
     pub proxy: ProxyMode,
     pub lookup: Option<Lookup>,
+    /// Test-only (the fake hub's addresses); empty in the shipped values.
+    #[cfg(test)]
     pub overrides: HashMap<String, SocketAddr>,
 }
 
@@ -279,6 +120,7 @@ impl Endpoints {
             addresses: AddressPolicy::Public,
             proxy: ProxyMode::System,
             lookup: None,
+            #[cfg(test)]
             overrides: HashMap::new(),
         }
     }
@@ -351,32 +193,6 @@ impl Body {
     }
 }
 
-fn tls_config(roots: &Roots) -> Result<rustls::ClientConfig, Error> {
-    use rustls_platform_verifier::BuilderVerifierExt;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let builder = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|_| Error::Setup("the TLS protocol versions cannot be set"))?;
-    let mut config = match roots {
-        Roots::Platform => builder
-            .with_platform_verifier()
-            .map_err(|_| Error::NoTrustStore)?
-            .with_no_client_auth(),
-        #[cfg(test)]
-        Roots::Only(certificates) => {
-            let mut store = rustls::RootCertStore::empty();
-            for certificate in certificates {
-                store
-                    .add(certificate.clone())
-                    .map_err(|_| Error::Setup("a trusted root certificate is malformed"))?;
-            }
-            builder.with_root_certificates(store).with_no_client_auth()
-        }
-    };
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(config)
-}
-
 impl Client {
     /// Builds the two clients over `endpoints`.
     ///
@@ -409,37 +225,23 @@ impl Client {
                 }
             })
         };
-        let resolver = Arc::new(Resolver {
-            policy: endpoints.addresses,
-            lookup: endpoints.lookup.clone().unwrap_or_else(system_lookup),
+        let transport = super::https::Transport {
+            roots: endpoints.roots.clone(),
+            addresses: endpoints.addresses,
+            lookup: endpoints.lookup.clone(),
+            #[cfg(test)]
             overrides: endpoints.overrides.clone(),
-        });
-        let tls = tls_config(&endpoints.roots)?;
-        let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+            proxy: endpoints.proxy.clone(),
+            connect_timeout: CONNECT_TIMEOUT,
+            read_timeout: Some(READ_TIMEOUT),
+            user_agent: concat!("mimik-model-download/", env!("CARGO_PKG_VERSION")).to_owned(),
+        };
         let build = |redirect: Policy| -> Result<reqwest::Client, Error> {
-            let mut builder = reqwest::Client::builder()
-                .tls_backend_preconfigured(tls.clone())
-                .https_only(true)
-                .http1_only()
-                .referer(false)
-                .redirect(redirect)
-                .user_agent(concat!("mimik-model-download/", env!("CARGO_PKG_VERSION")))
-                .default_headers(headers.clone())
-                .connect_timeout(CONNECT_TIMEOUT)
-                .read_timeout(READ_TIMEOUT)
-                .pool_max_idle_per_host(0)
-                .dns_resolver(Arc::clone(&resolver));
-            builder = match &endpoints.proxy {
-                ProxyMode::System => builder,
-                #[cfg(test)]
-                ProxyMode::Direct => builder.no_proxy(),
-                #[cfg(test)]
-                ProxyMode::Explicit(proxy) => builder.no_proxy().proxy((**proxy).clone()),
-            };
-            builder
-                .build()
-                .map_err(|_| Error::Setup("the HTTP client cannot be built"))
+            transport.build(redirect).map_err(|error| match error {
+                super::https::Error::NoTrustStore => Error::NoTrustStore,
+                super::https::Error::Setup(reason) => Error::Setup(reason),
+                _ => Error::Setup("the HTTP client cannot be built"),
+            })
         };
         Ok(Self {
             api: build(Policy::none())?,
@@ -619,38 +421,16 @@ impl Client {
     }
 }
 
-fn chain_has<T: std::error::Error + 'static>(error: &(dyn std::error::Error + 'static)) -> bool {
-    if error.downcast_ref::<T>().is_some() {
-        return true;
-    }
-    // An `io::Error` wraps its cause without exposing it through `source()`.
-    if let Some(io) = error.downcast_ref::<std::io::Error>()
-        && io.get_ref().is_some_and(|inner| chain_has::<T>(inner))
-    {
-        return true;
-    }
-    error.source().is_some_and(chain_has::<T>)
-}
-
-/// Turns a `reqwest` error into one that never holds a URL.
+/// Turns a `reqwest` error into one that never holds a URL, through the shared classification.
 fn classify(error: reqwest::Error) -> Error {
-    let error = error.without_url();
-    if error.is_timeout() {
-        return Error::Timeout;
+    match super::https::classify(error) {
+        super::https::Failure::Timeout => Error::Timeout,
+        super::https::Failure::Address => Error::Address,
+        super::https::Failure::Tls => Error::Tls,
+        super::https::Failure::Connect => Error::Connect,
+        super::https::Failure::Redirect => Error::RedirectShape,
+        super::https::Failure::Transfer => Error::Transfer,
     }
-    if chain_has::<AddressRefused>(&error) {
-        return Error::Address;
-    }
-    if chain_has::<rustls::Error>(&error) {
-        return Error::Tls;
-    }
-    if error.is_connect() {
-        return Error::Connect;
-    }
-    if error.is_redirect() {
-        return Error::RedirectShape;
-    }
-    Error::Transfer
 }
 
 #[cfg(test)]

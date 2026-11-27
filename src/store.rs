@@ -7,10 +7,10 @@ use std::{
 };
 
 /// Current database schema version; migration `N` sets `PRAGMA user_version=N`.
-pub const SCHEMA_VERSION: i64 = 40;
+pub const SCHEMA_VERSION: i64 = 41;
 
 /// Contiguous migrations in application order: index `N-1` holds migration `N`.
-const MIGRATIONS: [&str; 40] = [
+const MIGRATIONS: [&str; 41] = [
     include_str!("../migrations/001_characters.sql"),
     include_str!("../migrations/002_mork_borg.sql"),
     include_str!("../migrations/003_sources.sql"),
@@ -51,6 +51,7 @@ const MIGRATIONS: [&str; 40] = [
     include_str!("../migrations/038_remove_native_game.sql"),
     include_str!("../migrations/039_master_view.sql"),
     include_str!("../migrations/040_home_sheet_times.sql"),
+    include_str!("../migrations/041_reviewer_settings.sql"),
 ];
 
 #[derive(Clone)]
@@ -61,6 +62,9 @@ pub struct Store(
     pub(crate) Arc<crate::sources::pdf_store::PdfStore>,
     crate::hub::Hub,
     Arc<crate::streams::Streams>,
+    /// The data folder's `secrets/` directory (the reviewer's key file; the API reviewer plan
+    /// step 3), beside the PDF store's `sources/` directory.
+    pub(crate) Arc<crate::sources::reviewer::key::Secrets>,
 );
 
 /// Called after every committed sheet save that wrote change notes: the sheet, the new
@@ -124,6 +128,7 @@ impl Store {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
         let files = crate::sources::pdf_store::PdfStore::in_directory(data)?;
+        let secrets = crate::sources::reviewer::key::Secrets::in_directory(data)?;
         crate::auth::register_domain_guard(&connection)?;
         crate::sources::search::install_budget_handler(&mut connection)?;
         register_auth_clock(
@@ -214,7 +219,13 @@ impl Store {
             Arc::new(files),
             crate::hub::Hub::default(),
             Arc::default(),
+            Arc::new(secrets),
         ))
+    }
+
+    /// The data folder's `secrets/` directory (the reviewer's key file).
+    pub(crate) fn secrets(&self) -> &Arc<crate::sources::reviewer::key::Secrets> {
+        &self.6
     }
 
     /// A receiver of the hints published from now on (the Master view's invalidations).
