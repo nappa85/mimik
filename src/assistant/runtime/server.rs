@@ -119,7 +119,7 @@ impl Llama {
             .map_err(|_| Failure::Transport)?;
         let response = self
             .transport
-            .send::<_, bytes::Bytes>(request)
+            .send(request)
             .await
             .map_err(|error| failure(&error))?;
         let body = response.into_body().await.map_err(|_| Failure::Transport)?;
@@ -176,7 +176,7 @@ fn failure(error: &http_client::Error) -> Failure {
 /// The I/O error under a transport error, if there is one.
 fn io_kind(error: &http_client::Error) -> Option<(std::io::ErrorKind, String)> {
     match error {
-        http_client::Error::Instance(inner) => {
+        http_client::Error::Transient(inner) | http_client::Error::Permanent(inner) => {
             let mut source: Option<&(dyn std::error::Error + 'static)> = Some(inner.as_ref());
             while let Some(current) = source {
                 if let Some(io) = current.downcast_ref::<std::io::Error>() {
@@ -198,7 +198,7 @@ impl Server for Llama {
         else {
             return Health::Failed;
         };
-        match self.transport.send::<_, bytes::Bytes>(request).await {
+        match self.transport.send(request).await {
             Ok(_) => Health::Ready,
             Err(http_client::Error::InvalidStatusCodeWithDetails { status, .. })
                 if status.as_u16() == 503 =>

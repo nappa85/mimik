@@ -47,7 +47,7 @@ accepted automatically and no confidence approves anything (AGENTS.md).
 
 ## Steps
 
-1. **Protocol check first (D-H, stop and ask on failure).** Through rig-core 0.45.0's
+1. **Protocol check first (D-H, stop and ask on failure).** Through rig-core 0.47.1's
    provider clients, built only with an explicit key and base URL (never `from_env*`), with
    recorded request and reply fixtures per enabled provider (Mistral on the chat wire;
    OpenAI on its default Responses route; Anthropic's messages API):

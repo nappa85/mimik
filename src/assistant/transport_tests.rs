@@ -53,6 +53,25 @@ fn completion() -> Completion {
     }
 }
 
+/// rig-core 0.47 fails a streamed reply that sends no frame for
+/// [`rig_core::driver::STREAM_IDLE_TIMEOUT`] (300 s) with `ProviderError::Stalled`, but
+/// llama-server sends nothing while it processes a long prompt, and Mimik's own budgets
+/// let an interpretation run up to `RUN_CEILING_S` (600 s), so the chat model must be
+/// built with `with_idle_timeout(None)`. rig's idle timer runs on a real-time timer
+/// thread (`futures_timer`), not on tokio's clock, so no paused-clock test can make it
+/// fire early; this asserts on the model the adapter builds instead.
+#[test]
+fn the_chat_model_disables_rigs_stream_idle_timeout() {
+    let model =
+        interpreter(Endpoint::Tcp(tcp("http://127.0.0.1:8080", false).unwrap())).chat_model();
+    let debug = format!("{model:?}");
+    assert!(
+        debug.contains("idle_timeout: None"),
+        "rig's STREAM_IDLE_TIMEOUT ({:?}) must not cut a bounded interpretation short: {debug}",
+        rig_core::driver::STREAM_IDLE_TIMEOUT
+    );
+}
+
 #[tokio::test]
 async fn a_reminder_completion_carries_the_reminder_prefix_and_its_own_schema() {
     use super::super::contract::{REMINDER_PREFIX, reminder_schema_for};
@@ -220,8 +239,8 @@ async fn a_plain_body_over_the_bound_is_refused_without_buffering() {
     let request = http::Request::post(format!("{url}/v1/chat/completions"))
         .body(Bytes::from_static(b"{}"))
         .unwrap();
-    let error = transport.send::<_, Bytes>(request).await.err().unwrap();
-    assert!(matches!(error, http_client::Error::Instance(_)), "{error}");
+    let error = transport.send(request).await.err().unwrap();
+    assert!(matches!(error, http_client::Error::Permanent(_)), "{error}");
     assert!(error.to_string().contains("over the bound"), "{error}");
 }
 
@@ -251,9 +270,50 @@ async fn a_request_for_another_destination_is_refused() {
     let request = http::Request::post(format!("{other}/v1/chat/completions"))
         .body(Bytes::from_static(b"{}"))
         .unwrap();
-    assert!(transport.send::<_, Bytes>(request).await.is_err());
+    assert!(transport.send(request).await.is_err());
     assert!(other_shared.seen().is_empty());
     assert!(shared.seen().is_empty());
+}
+
+/// A connector that refuses the connection the way the endpoint check does (wrong peer or
+/// sandbox: `runtime::endpoint`'s `refused`, an `EACCES`).
+#[derive(Debug)]
+struct Refusing;
+
+impl Connect for Refusing {
+    fn connect(&self) -> Connecting {
+        Box::pin(async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the socket's peer is not in this generation's sandbox",
+            ))
+        })
+    }
+
+    fn authority(&self) -> String {
+        "127.0.0.1:8080".to_owned()
+    }
+}
+
+#[tokio::test]
+async fn an_endpoint_check_refusal_is_permanent() {
+    let transport = Bounded::new(std::sync::Arc::new(Refusing));
+    let request = http::Request::post("http://127.0.0.1:8080/v1/chat/completions")
+        .body(Bytes::from_static(b"{}"))
+        .unwrap();
+    let error = transport.send(request).await.err().unwrap();
+    assert!(matches!(error, http_client::Error::Permanent(_)), "{error}");
+}
+
+#[tokio::test]
+async fn a_connection_failure_stays_transient() {
+    let directory = tempfile::tempdir().unwrap();
+    let transport = Bounded::direct(Endpoint::Unix(directory.path().join("missing.sock")));
+    let request = http::Request::post(format!("http://{UNIX_AUTHORITY}/v1/chat/completions"))
+        .body(Bytes::from_static(b"{}"))
+        .unwrap();
+    let error = transport.send(request).await.err().unwrap();
+    assert!(matches!(error, http_client::Error::Transient(_)), "{error}");
 }
 
 #[tokio::test]
